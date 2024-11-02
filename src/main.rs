@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use csv::{Writer, WriterBuilder};
+use csv::WriterBuilder;
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
