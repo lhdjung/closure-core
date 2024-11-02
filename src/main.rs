@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -120,7 +120,7 @@ fn parallel_dfs(
         }
     }
 
-    // Initialize CSV file
+    // Initialize CSV file with headers
     let file = File::create(output_file)?;
     let mut writer = WriterBuilder::new()
         .has_headers(true)
@@ -138,10 +138,13 @@ fn parallel_dfs(
         .unwrap()
         .progress_chars("##-"));
 
-    // Shared writer for results
+    // Shared writer for results - now using OpenOptions to append
     let writer = Arc::new(Mutex::new(WriterBuilder::new()
         .has_headers(false)
-        .from_writer(File::create(output_file)?)));
+        .from_writer(OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(output_file)?)));
 
     // Process combinations in parallel
     initial_combinations.par_iter().for_each(|(combo, running_sum, running_m2)| {
@@ -176,7 +179,7 @@ fn parallel_dfs(
     let duration = start_time.elapsed();
     println!("Execution time: {:.2} seconds", duration.as_secs_f64());
 
-    // Count lines in output file
+    // Count lines in output file (excluding header)
     let file = File::open(output_file)?;
     let reader = csv::ReaderBuilder::new()
         .has_headers(true)
