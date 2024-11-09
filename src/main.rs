@@ -7,6 +7,8 @@ use csv::WriterBuilder;
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
+const BUFFER_SIZE: usize = 1000; // Adjust this based on your needs
+
 #[derive(Clone)]
 struct Combination {
     values: Vec<i32>,
@@ -14,6 +16,7 @@ struct Combination {
     running_m2: f64,
 }
 
+// dfs_branch function remains the same
 fn dfs_branch(
     start_combination: Vec<i32>,
     running_sum_init: f64,
@@ -51,7 +54,6 @@ fn dfs_branch(
         let last_value = *current.values.last().unwrap();
 
         for next_value in last_value..max_scale_1 {
-            // Filter based on mean constraints
             let next_sum = current.running_sum + next_value as f64;
             let minmean = next_sum + min_scale_sum[n_left] as f64;
             if minmean > target_sum_upper {
@@ -62,7 +64,6 @@ fn dfs_branch(
                 continue;
             }
 
-            // sd calculations and filter
             let next_mean = next_sum / next_n as f64;
             let delta = next_value as f64 - current.running_sum / current.values.len() as f64;
             let delta2 = next_value as f64 - next_mean;
@@ -72,7 +73,6 @@ fn dfs_branch(
                 continue;
             }
 
-            // Create new combination
             let mut new_values = current.values.clone();
             new_values.push(next_value);
             stack.push_back(Combination {
@@ -136,9 +136,10 @@ fn parallel_dfs(
     pb.set_style(ProgressStyle::default_bar()
         .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
         .unwrap()
-        .progress_chars("##-"));
+        .progress_chars("=>-"));
 
-    // Shared writer for results - now using OpenOptions to append
+    // Create a buffer for results
+    let results_buffer = Arc::new(Mutex::new(Vec::new()));
     let writer = Arc::new(Mutex::new(WriterBuilder::new()
         .has_headers(false)
         .from_writer(OpenOptions::new()
@@ -146,7 +147,7 @@ fn parallel_dfs(
             .append(true)
             .open(output_file)?)));
 
-    // Process combinations in parallel
+    // Process combinations in parallel with buffered writing
     initial_combinations.par_iter().for_each(|(combo, running_sum, running_m2)| {
         let results = dfs_branch(
             combo.clone(),
@@ -163,15 +164,31 @@ fn parallel_dfs(
             max_scale_1,
         );
 
-        // Write results
-        let writer = Arc::clone(&writer);
+        if !results.is_empty() {
+            let mut buffer = results_buffer.lock().unwrap();
+            buffer.extend(results);
+
+            // Write buffer when it reaches the threshold
+            if buffer.len() >= BUFFER_SIZE {
+                let mut writer = writer.lock().unwrap();
+                for result in buffer.drain(..) {
+                    writer.write_record(&result.iter().map(|x| x.to_string()).collect::<Vec<String>>()).unwrap();
+                }
+                writer.flush().unwrap();
+            }
+        }
+        pb.inc(1);
+    });
+
+    // Write any remaining results in the buffer
+    let mut final_buffer = results_buffer.lock().unwrap();
+    if !final_buffer.is_empty() {
         let mut writer = writer.lock().unwrap();
-        for result in results {
+        for result in final_buffer.drain(..) {
             writer.write_record(&result.iter().map(|x| x.to_string()).collect::<Vec<String>>()).unwrap();
         }
         writer.flush().unwrap();
-        pb.inc(1);
-    });
+    }
 
     pb.finish_with_message("Done!");
 
