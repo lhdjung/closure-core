@@ -15,7 +15,7 @@ struct Combination {
 }
 
 /// Calculates the number of initial combinations that will be processed in parallel
-fn count_initial_combinations(min_scale: i32, max_scale: i32) -> usize {
+fn count_initial_combinations(min_scale: i32, max_scale: i32) -> i32 {
     // Each combination starts with two numbers i,j where min_scale ≤ i ≤ j ≤ max_scale
     // This is equivalent to choosing 2 numbers with replacement where order doesn't matter
     // The formula is: (n+1) * n / 2 where n is the range size
