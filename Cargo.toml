@@ -1,5 +1,5 @@
 [package]
-name = "closure_ground"
+name = "closure-core"
 version = "0.1.0"
 edition = "2021"
 
