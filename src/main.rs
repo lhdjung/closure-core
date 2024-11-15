@@ -35,8 +35,8 @@ fn dfs_branch(
     target_sd_lower: f64,
     min_scale_sum: &[i32],
     max_scale_sum: &[i32],
-    n_1: usize,
-    max_scale_1: i32,
+    n_minus_1: usize,
+    max_scale_plus_1: i32,
 ) -> Vec<Vec<i32>> {
     let mut stack = VecDeque::new();
     let mut results = Vec::new();
@@ -51,7 +51,7 @@ fn dfs_branch(
     while let Some(current) = stack.pop_back() {
         // Check if we've reached desired length
         if current.values.len() >= n {
-            let current_std = (current.running_m2 / n_1 as f64).sqrt();
+            let current_std = (current.running_m2 / n_minus_1 as f64).sqrt();
             if current_std >= target_sd_lower {
                 results.push(current.values);
             }
@@ -59,12 +59,12 @@ fn dfs_branch(
         }
 
         // Calculate remaining positions to fill
-        let n_left = n_1 - current.values.len();
+        let n_left = n_minus_1 - current.values.len();
         let next_n = current.values.len() + 1;
         let last_value = *current.values.last().unwrap();
 
         // Try each possible next value
-        for next_value in last_value..max_scale_1 {
+        for next_value in last_value..max_scale_plus_1 {
             // Early pruning based on mean bounds
             let next_sum = current.running_sum + next_value as f64;
             let minmean = next_sum + min_scale_sum[n_left] as f64;
@@ -84,7 +84,7 @@ fn dfs_branch(
             let next_m2 = current.running_m2 + delta * delta2;
             
             // Early pruning based on standard deviation
-            let min_sd = (next_m2 / n_1 as f64).sqrt();
+            let min_sd = (next_m2 / n_minus_1 as f64).sqrt();
             if min_sd > target_sd_upper {
                 continue;
             }
@@ -129,8 +129,8 @@ fn parallel_dfs(
         .map(|x| max_scale * x as i32)
         .collect();
     
-    let n_1 = n - 1;
-    let max_scale_1 = max_scale + 1;
+    let n_minus_1 = n - 1;
+    let max_scale_plus_1 = max_scale + 1;
 
     // Generate initial combinations for parallel processing
     let mut initial_combinations = Vec::new();
@@ -194,8 +194,8 @@ fn parallel_dfs(
                 target_sd_lower,
                 &min_scale_sum,
                 &max_scale_sum,
-                n_1,
-                max_scale_1,
+                n_minus_1,
+                max_scale_plus_1,
             );
 
             // Write all results from this branch at once
