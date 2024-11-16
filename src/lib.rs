@@ -1,3 +1,16 @@
+//! CLOSURE: complete listing of original samples of underlying raw evidence
+//! 
+//! Crate closure-core implements the CLOSURE technique for efficiently reconstructing
+//! all possible distributions of raw data from summary statistics. It is not
+//! about the Rust feature called closure.
+//! 
+//! The only API users are likely to need is `parallel_dfs()`. This function applies
+//! the lower-level `dfs_branch()` in parallel and writes results to disk (currently
+//! into a CSV file, but this may change in the future.)
+//! 
+//! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
+
+
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -7,12 +20,18 @@ use csv::WriterBuilder;
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
+
+/// Struct to hold combinations of possible raw data
+/// 
+/// Each row in the tabular structure written to disk is collected from `values`.
+/// The other two fields are only used at runtime.
 #[derive(Clone)]
 struct Combination {
     values: Vec<i32>,
     running_sum: f64,
     running_m2: f64,
 }
+
 
 /// Calculates the number of initial combinations that will be processed in parallel
 fn count_initial_combinations(min_scale: i32, max_scale: i32) -> i32 {
@@ -23,8 +42,9 @@ fn count_initial_combinations(min_scale: i32, max_scale: i32) -> i32 {
     (range_size * (range_size + 1)) / 2
 }
 
-/// DFS implementation that collects all valid combinations from a starting point
-fn dfs_branch(
+
+/// Collect all valid combinations from a starting point
+pub fn dfs_branch(
     start_combination: Vec<i32>,
     running_sum_init: f64,
     running_m2_init: f64,
@@ -103,7 +123,9 @@ fn dfs_branch(
     results
 }
 
-fn parallel_dfs(
+
+/// Run CLOSURE across starting combinations and write results to disk
+pub fn parallel_dfs(
     min_scale: i32,
     max_scale: i32,
     n: usize,
@@ -114,6 +136,10 @@ fn parallel_dfs(
     output_file: &str,
 ) -> io::Result<()> {
     let start_time = Instant::now();
+    
+    // Calculate and print the number of initial parallel tasks
+    let initial_count = count_initial_combinations(min_scale, max_scale);
+    println!("Number of initial combinations to process: {}", initial_count);
     
     // Calculate bounds for target metrics
     let target_sum_upper = target_sum + rounding_error_sums;
@@ -233,30 +259,26 @@ fn parallel_dfs(
     Ok(())
 }
 
-fn main() -> io::Result<()> {
-    let min_scale = 1;
-    let max_scale = 7;
-    let n = 30;
-    let target_mean = 5.0;
-    let target_sum = target_mean * n as f64;
-    let target_sd = 2.78;
-    let rounding_error_means = 0.01;
-    let rounding_error_sums = rounding_error_means * n as f64;
-    let rounding_error_sds = 0.01;
-    let output_file = "parallel_results.csv";
-
-    // Calculate and print the number of initial parallel tasks
-    let initial_count = count_initial_combinations(min_scale, max_scale);
-    println!("Number of initial combinations to process: {}", initial_count);
-
-    parallel_dfs(
-        min_scale,
-        max_scale,
-        n,
-        target_sum,
-        target_sd,
-        rounding_error_sums,
-        rounding_error_sds,
-        output_file,
-    )
-}
+// fn main() -> io::Result<()> {
+//     let min_scale = 1;
+//     let max_scale = 7;
+//     let n = 30;
+//     let target_mean = 5.0;
+//     let target_sum = target_mean * n as f64;
+//     let target_sd = 2.78;
+//     let rounding_error_means = 0.01;
+//     let rounding_error_sums = rounding_error_means * n as f64;
+//     let rounding_error_sds = 0.01;
+//     let output_file = "parallel_results.csv";
+// 
+//     parallel_dfs(
+//         min_scale,
+//         max_scale,
+//         n,
+//         target_sum,
+//         target_sd,
+//         rounding_error_sums,
+//         rounding_error_sds,
+//         output_file,
+//     )
+// }
