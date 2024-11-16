@@ -4,7 +4,7 @@
 //! all possible distributions of raw data from summary statistics. It is not
 //! about the Rust feature called closure.
 //! 
-//! The only API users are likely to need is `parallel_dfs()`. This function applies
+//! The only API users are likely to need is `dfs_parallel()`. This function applies
 //! the lower-level `dfs_branch()` in parallel and writes results to disk (currently
 //! into a CSV file, but this may change in the future.)
 //! 
@@ -125,7 +125,7 @@ pub fn dfs_branch(
 
 
 /// Run CLOSURE across starting combinations and write results to disk
-pub fn parallel_dfs(
+pub fn dfs_parallel(
     min_scale: i32,
     max_scale: i32,
     n: usize,
@@ -271,7 +271,7 @@ pub fn parallel_dfs(
 //     let rounding_error_sds = 0.01;
 //     let output_file = "parallel_results.csv";
 // 
-//     parallel_dfs(
+//     dfs_parallel(
 //         min_scale,
 //         max_scale,
 //         n,
