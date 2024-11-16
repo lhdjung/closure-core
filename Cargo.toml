@@ -1,7 +1,12 @@
 [package]
 name = "closure-core"
 version = "0.1.0"
+authors = ["Lukas Jung jung-lukas@gmx.net"]
 edition = "2021"
+description = "CLOSURE: complete listing of original samples of underlying raw evidence"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lhdjung/closure-core"
+readme = "README.md"
 
 [dependencies]
 csv = "1.3"
