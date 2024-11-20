@@ -20,6 +20,8 @@ use csv::WriterBuilder;
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
+mod decimal_places;
+use decimal_places::rounding_error;
 
 /// Struct to hold combinations of possible raw data
 /// 
@@ -129,10 +131,10 @@ pub fn dfs_parallel(
     min_scale: i32,
     max_scale: i32,
     n: usize,
-    target_sum: f64,
-    target_sd: f64,
-    rounding_error_sums: f64,
-    rounding_error_sds: f64,
+    target_sum: &str,
+    target_sd: &str,
+    // rounding_error_sums: f64,
+    // rounding_error_sds: f64,
     output_file: &str,
 ) -> io::Result<()> {
     let start_time = Instant::now();
@@ -140,20 +142,28 @@ pub fn dfs_parallel(
     // Calculate and print the number of initial parallel tasks
     let initial_count = count_initial_combinations(min_scale, max_scale);
     println!("Number of initial combinations to process: {}", initial_count);
+
+    let target_sum_parsed = target_sum.parse::<f64>().unwrap();
+    let target_sd_parsed  = target_sd.parse::<f64>().unwrap();
+
+    // Rounding error formula is currently:        1 / (10^d)         where d is the number of decimal places
+    // But shouldn't it be this, as in scrutiny?   5 / (10^(d + 1))
+    
+    // let rounding_error_sums: f64 = 1.0 / 10.0_f64.powi(count_decimal_places(target_sum).unwrap() as i32);
+    // let rounding_error_sds:  f64 = 1.0 / 10.0_f64.powi(count_decimal_places(target_sd).unwrap()  as i32);
+
+    let rounding_error_sums = rounding_error(target_sum);
+    let rounding_error_sds  = rounding_error(target_sd);
     
     // Calculate bounds for target metrics
-    let target_sum_upper = target_sum + rounding_error_sums;
-    let target_sum_lower = target_sum - rounding_error_sums;
-    let target_sd_upper = target_sd + rounding_error_sds;
-    let target_sd_lower = target_sd - rounding_error_sds;
+    let target_sum_upper = target_sum_parsed + rounding_error_sums;
+    let target_sum_lower = target_sum_parsed - rounding_error_sums;
+    let target_sd_upper  = target_sd_parsed  + rounding_error_sds;
+    let target_sd_lower  = target_sd_parsed  - rounding_error_sds;
     
     // Precompute scale sums for optimization
-    let min_scale_sum: Vec<i32> = (0..n)
-        .map(|x| min_scale * x as i32)
-        .collect();
-    let max_scale_sum: Vec<i32> = (0..n)
-        .map(|x| max_scale * x as i32)
-        .collect();
+    let min_scale_sum: Vec<i32> = (0..n).map(|x| min_scale * x as i32).collect();
+    let max_scale_sum: Vec<i32> = (0..n).map(|x| max_scale * x as i32).collect();
     
     let n_minus_1 = n - 1;
     let max_scale_plus_1 = max_scale + 1;
