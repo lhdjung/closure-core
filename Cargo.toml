@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/lhdjung/closure-core"
 readme = "README.md"
 
+[[bin]]
+name = "test-harness"
+path = "src/bin/test-harness.rs"
+
 [dependencies]
 csv = "1.3"
 rayon = "1.8"
