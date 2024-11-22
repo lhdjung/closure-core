@@ -14,8 +14,13 @@
 use std::collections::VecDeque;
 use rayon::prelude::*;
 use std::time::Instant;
+use std::fs::File;
+use std::io;
+use csv::WriterBuilder;
+use indicatif::{ProgressBar, ProgressStyle};
 
-/// Result type containing all valid combinations and execution metadata
+
+/// Result type containing all valid CLOSURE combinations and execution metadata
 #[derive(Debug)]
 pub struct ClosureResult {
     pub combinations: Vec<Vec<i32>>,
@@ -179,6 +184,76 @@ pub fn dfs_parallel(
         initial_combinations_count: initial_count,
     }
 }
+
+
+
+/// Write CLOSURE results to disk with progress tracking
+pub fn write_closure_csv(
+    min_scale: i32,
+    max_scale: i32,
+    n: usize,
+    target_sum: f64,
+    target_sd: f64,
+    rounding_error_sums: f64,
+    rounding_error_sds: f64,
+    output_file: &str,
+) -> io::Result<()> {
+    // Setup progress bar
+    let initial_count = count_initial_combinations(min_scale, max_scale);
+    let bar = ProgressBar::new(initial_count as u64);
+    bar.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} Computing...")
+            .unwrap()
+            .progress_chars("=>-")
+    );
+
+    // Compute results (only this part is timed)
+    let result = dfs_parallel(
+        min_scale,
+        max_scale,
+        n,
+        target_sum,
+        target_sd,
+        rounding_error_sums,
+        rounding_error_sds,
+    );
+    
+    println!("Computation time: {:.2} seconds", result.execution_time_secs);
+    bar.set_message("Writing to disk...");
+
+    // Initialize CSV file
+    let file = File::create(output_file)?;
+    let mut writer = WriterBuilder::new()
+        .has_headers(true)
+        .from_writer(file);
+
+    // Write header
+    let header: Vec<String> = (1..=n).map(|i| format!("n{}", i)).collect();
+    writer.write_record(&header)?;
+
+    // Write combinations with progress updates
+    let chunk_size = result.combinations.len() / 100;  // Update every 1%
+    for (i, combination) in result.combinations.iter().enumerate() {
+        writer.write_record(
+            &combination
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>()
+        )?;
+        
+        if i % chunk_size == 0 {
+            bar.inc(1);
+        }
+    }
+
+    bar.finish_with_message("Done!");
+    
+    println!("Number of valid combinations: {}", result.combinations.len());
+    Ok(())
+}
+
+
 
 #[cfg(test)]
 mod tests {
