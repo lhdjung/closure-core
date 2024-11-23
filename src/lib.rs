@@ -233,7 +233,12 @@ pub fn write_closure_csv(
     writer.write_record(&header)?;
 
     // Write combinations with progress updates
-    let chunk_size = result.combinations.len() / 100;  // Update every 1%
+    let chunk_size = if result.combinations.len() >= 100 {
+        result.combinations.len() / 100  // Update every 1%
+    } else {
+        1  // Update for every combination if fewer than 100
+    };
+    
     for (i, combination) in result.combinations.iter().enumerate() {
         writer.write_record(
             &combination
