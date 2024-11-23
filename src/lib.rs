@@ -82,36 +82,34 @@ fn dfs_branch(
         let last_value = *current.values.last().unwrap();
         let current_mean = current.running_sum / current.values.len() as f64;
 
-        // Use iterator for better performance than range
-        (last_value..max_scale_plus_1)
-            .take_while(|&next_value| {
-                let next_sum = current.running_sum + next_value as f64;
-                let minmean = next_sum + min_scale_sum[n_left] as f64;
-                minmean <= target_sum_upper
-            })
-            .filter(|&next_value| {
-                let next_sum = current.running_sum + next_value as f64;
-                let maxmean = next_sum + max_scale_sum[n_left] as f64;
-                maxmean >= target_sum_lower
-            })
-            .for_each(|next_value| {
-                let next_sum = current.running_sum + next_value as f64;
-                let next_mean = next_sum / next_n as f64;
-                let delta = next_value as f64 - current_mean;
-                let delta2 = next_value as f64 - next_mean;
-                let next_m2 = current.running_m2 + delta * delta2;
-                
-                let min_sd = (next_m2 / n_minus_1 as f64).sqrt();
-                if min_sd <= target_sd_upper {
-                    let mut new_values = current.values.clone();
-                    new_values.push(next_value);
-                    stack.push_back(Combination {
-                        values: new_values,
-                        running_sum: next_sum,
-                        running_m2: next_m2,
-                    });
-                }
-            });
+        for next_value in last_value..max_scale_plus_1 {
+            let next_sum = current.running_sum + next_value as f64;
+            let minmean = next_sum + min_scale_sum[n_left] as f64;
+            if minmean > target_sum_upper {
+                break; // Early termination - better than take_while!
+            }
+            
+            let maxmean = next_sum + max_scale_sum[n_left] as f64;
+            if maxmean < target_sum_lower {
+                continue;
+            }
+        
+            let next_mean = next_sum / next_n as f64;
+            let delta = next_value as f64 - current_mean;
+            let delta2 = next_value as f64 - next_mean;
+            let next_m2 = current.running_m2 + delta * delta2;
+            
+            let min_sd = (next_m2 / n_minus_1 as f64).sqrt();
+            if min_sd <= target_sd_upper {
+                let mut new_values = current.values.clone();
+                new_values.push(next_value);
+                stack.push_back(Combination {
+                    values: new_values,
+                    running_sum: next_sum,
+                    running_m2: next_m2,
+                });
+            }
+        }
     }
 
     results
