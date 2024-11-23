@@ -41,8 +41,8 @@ struct Combination {
 
 /// Calculates the number of initial combinations that will be processed in parallel
 #[inline]
-fn count_initial_combinations(min_scale: i32, max_scale: i32) -> i32 {
-    let range_size = max_scale - min_scale + 1;
+fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
+    let range_size = scale_max - scale_min + 1;
     (range_size * (range_size + 1)) / 2
 }
 
@@ -55,12 +55,12 @@ fn dfs_branch(
     n: usize,
     target_sum_upper: f64,
     target_sum_lower: f64,
-    target_sd_upper: f64,
-    target_sd_lower: f64,
-    min_scale_sum: &[i32],
-    max_scale_sum: &[i32],
+    sd_upper: f64,
+    sd_lower: f64,
+    scale_min_sum: &[i32],
+    scale_max_sum: &[i32],
     n_minus_1: usize,
-    max_scale_plus_1: i32,
+    scale_max_plus_1: i32,
 ) -> Vec<Vec<i32>> {
     let mut stack = VecDeque::with_capacity(n * 2); // Preallocate with reasonable capacity
     let mut results = Vec::new();
@@ -74,7 +74,7 @@ fn dfs_branch(
     while let Some(current) = stack.pop_back() {
         if current.values.len() >= n {
             let current_std = (current.running_m2 / n_minus_1 as f64).sqrt();
-            if current_std >= target_sd_lower {
+            if current_std >= sd_lower {
                 results.push(current.values);
             }
             continue;
@@ -85,14 +85,14 @@ fn dfs_branch(
         let last_value = *current.values.last().unwrap();
         let current_mean = current.running_sum / current.values.len() as f64;
 
-        for next_value in last_value..max_scale_plus_1 {
+        for next_value in last_value..scale_max_plus_1 {
             let next_sum = current.running_sum + next_value as f64;
-            let minmean = next_sum + min_scale_sum[n_left] as f64;
+            let minmean = next_sum + scale_min_sum[n_left] as f64;
             if minmean > target_sum_upper {
                 break; // Early termination - better than take_while!
             }
             
-            let maxmean = next_sum + max_scale_sum[n_left] as f64;
+            let maxmean = next_sum + scale_max_sum[n_left] as f64;
             if maxmean < target_sum_lower {
                 continue;
             }
@@ -103,7 +103,7 @@ fn dfs_branch(
             let next_m2 = current.running_m2 + delta * delta2;
             
             let min_sd = (next_m2 / n_minus_1 as f64).sqrt();
-            if min_sd <= target_sd_upper {
+            if min_sd <= sd_upper {
                 let mut new_values = current.values.clone();
                 new_values.push(next_value);
                 stack.push_back(Combination {
@@ -120,38 +120,38 @@ fn dfs_branch(
 
 /// Run CLOSURE across starting combinations and return results
 pub fn dfs_parallel(
-    min_scale: i32,
-    max_scale: i32,
+    scale_min: i32,
+    scale_max: i32,
     n: usize,
     // target_sum: f64,
-    target_mean: f64,
-    target_sd: f64,
-    rounding_error_sums: f64,
-    rounding_error_sds: f64,
+    mean: f64,
+    sd: f64,
+    rounding_error_mean: f64,
+    rounding_error_sd: f64,
 ) -> ClosureResult {
     let start_time = Instant::now();
     
-    let initial_count = count_initial_combinations(min_scale, max_scale);
+    let initial_count = count_initial_combinations(scale_min, scale_max);
 
-    // Remember: target_sum == target_mean * n
-    let target_sum = target_mean * n as f64;
+    // Remember: target_sum == mean * n
+    let target_sum = mean * n as f64;
     
-    let target_sum_upper = target_sum + rounding_error_sums;
-    let target_sum_lower = target_sum - rounding_error_sums;
-    let target_sd_upper = target_sd + rounding_error_sds;
-    let target_sd_lower = target_sd - rounding_error_sds;
+    let target_sum_upper = target_sum + rounding_error_mean;
+    let target_sum_lower = target_sum - rounding_error_mean;
+    let sd_upper = sd + rounding_error_sd;
+    let sd_lower = sd - rounding_error_sd;
     
     // Precompute scale sums for optimization
-    let min_scale_sum: Vec<i32> = (0..n).map(|x| min_scale * x as i32).collect();
-    let max_scale_sum: Vec<i32> = (0..n).map(|x| max_scale * x as i32).collect();
+    let scale_min_sum: Vec<i32> = (0..n).map(|x| scale_min * x as i32).collect();
+    let scale_max_sum: Vec<i32> = (0..n).map(|x| scale_max * x as i32).collect();
     
     let n_minus_1 = n - 1;
-    let max_scale_plus_1 = max_scale + 1;
+    let scale_max_plus_1 = scale_max + 1;
 
     // Generate initial combinations - now using iterators
-    let initial_combinations: Vec<_> = (min_scale..=max_scale)
+    let initial_combinations: Vec<_> = (scale_min..=scale_max)
         .flat_map(|i| {
-            (i..=max_scale).map(move |j| {
+            (i..=scale_max).map(move |j| {
                 let initial_combination = vec![i, j];
                 let running_sum = (i + j) as f64;
                 let current_mean = running_sum / 2.0;
@@ -172,12 +172,12 @@ pub fn dfs_parallel(
                 n,
                 target_sum_upper,
                 target_sum_lower,
-                target_sd_upper,
-                target_sd_lower,
-                &min_scale_sum,
-                &max_scale_sum,
+                sd_upper,
+                sd_lower,
+                &scale_min_sum,
+                &scale_max_sum,
                 n_minus_1,
-                max_scale_plus_1,
+                scale_max_plus_1,
             )
         })
         .collect();
@@ -193,14 +193,14 @@ pub fn dfs_parallel(
 
 /// Write CLOSURE results to disk with progress tracking
 pub fn write_closure_csv(
-    min_scale: i32,
-    max_scale: i32,
+    scale_min: i32,
+    scale_max: i32,
     n: usize,
     // target_sum: f64,
-    target_mean: f64,
-    target_sd: f64,
-    rounding_error_sums: f64,
-    rounding_error_sds: f64,
+    mean: f64,
+    sd: f64,
+    rounding_error_mean: f64,
+    rounding_error_sd: f64,
     output_file: &str,
 ) -> io::Result<()> {
 
@@ -215,7 +215,7 @@ pub fn write_closure_csv(
     }
 
     // Setup progress bar
-    let initial_count = count_initial_combinations(min_scale, max_scale);
+    let initial_count = count_initial_combinations(scale_min, scale_max);
     let bar = ProgressBar::new(initial_count as u64);
     bar.set_style(
         ProgressStyle::default_bar()
@@ -226,13 +226,13 @@ pub fn write_closure_csv(
 
     // Compute results (only this part is timed)
     let result = dfs_parallel(
-        min_scale,
-        max_scale,
+        scale_min,
+        scale_max,
         n,
-        target_mean,
-        target_sd,
-        rounding_error_sums,
-        rounding_error_sds,
+        mean,
+        sd,
+        rounding_error_mean,
+        rounding_error_sd,
     );
     
     println!("Computation time: {:.2} seconds", result.execution_time_secs);
@@ -290,25 +290,25 @@ mod tests {
 }
 
 // fn main() -> io::Result<()> {
-//     let min_scale = 1;
-//     let max_scale = 7;
+//     let scale_min = 1;
+//     let scale_max = 7;
 //     let n = 30;
-//     let target_mean = 5.0;
-//     let target_sum = target_mean * n as f64;
-//     let target_sd = 2.78;
+//     let mean = 5.0;
+//     let target_sum = mean * n as f64;
+//     let sd = 2.78;
 //     let rounding_error_means = 0.01;
-//     let rounding_error_sums = rounding_error_means * n as f64;
-//     let rounding_error_sds = 0.01;
+//     let rounding_error_mean = rounding_error_means * n as f64;
+//     let rounding_error_sd = 0.01;
 //     let output_file = "parallel_results.csv";
 // 
 //     dfs_parallel(
-//         min_scale,
-//         max_scale,
+//         scale_min,
+//         scale_max,
 //         n,
 //         target_sum,
-//         target_sd,
-//         rounding_error_sums,
-//         rounding_error_sds,
+//         sd,
+//         rounding_error_mean,
+//         rounding_error_sd,
 //         output_file,
 //     )
 // }
