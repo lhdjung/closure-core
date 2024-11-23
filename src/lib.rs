@@ -120,12 +120,12 @@ fn dfs_branch(
 
 /// Run CLOSURE across starting combinations and return results
 pub fn dfs_parallel(
-    scale_min: i32,
-    scale_max: i32,
-    n: usize,
-    // target_sum: f64,
     mean: f64,
     sd: f64,
+    n: usize,
+    scale_min: i32,
+    scale_max: i32,
+    // target_sum: f64,
     rounding_error_mean: f64,
     rounding_error_sd: f64,
 ) -> ClosureResult {
@@ -193,12 +193,11 @@ pub fn dfs_parallel(
 
 /// Write CLOSURE results to disk with progress tracking
 pub fn write_closure_csv(
-    scale_min: i32,
-    scale_max: i32,
-    n: usize,
-    // target_sum: f64,
     mean: f64,
     sd: f64,
+    n: usize,
+    scale_min: i32,
+    scale_max: i32,
     rounding_error_mean: f64,
     rounding_error_sd: f64,
     output_file: &str,
@@ -226,11 +225,11 @@ pub fn write_closure_csv(
 
     // Compute results (only this part is timed)
     let result = dfs_parallel(
-        scale_min,
-        scale_max,
-        n,
         mean,
         sd,
+        n,
+        scale_min,
+        scale_max,
         rounding_error_mean,
         rounding_error_sd,
     );

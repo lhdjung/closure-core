@@ -11,26 +11,22 @@ Most of the code was written by Claude 3.5, translating Python code by Nathanael
 Enter summary data reported in a paper and call `dfs_parallel()`.
 
 ```
+let mean = 5.0;
+let sd = 2.78;
+let n = 30;
 let scale_min = 1;
 let scale_max = 7;
-let n = 30;
-let mean = 5.0;
-let target_sum = mean * n as f64;
-let sd = 2.78;
-let rounding_error_means = 0.01;
-let rounding_error_mean = rounding_error_means * n as f64;
+let rounding_error_mean = 0.01;
 let rounding_error_sd = 0.01;
-let output_file = "parallel_results.csv";
 
 dfs_parallel(
+    mean,
+    sd,
+    n,
     scale_min,
     scale_max,
-    n,
-    target_sum,
-    sd,
     rounding_error_mean,
     rounding_error_sd,
-    output_file,
 )
 ```
 
