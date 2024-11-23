@@ -19,6 +19,9 @@ use std::io;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 
+mod path;
+use path::get_current_dir;
+
 
 /// Result type containing all valid CLOSURE combinations and execution metadata
 #[derive(Debug)]
@@ -120,7 +123,8 @@ pub fn dfs_parallel(
     min_scale: i32,
     max_scale: i32,
     n: usize,
-    target_sum: f64,
+    // target_sum: f64,
+    target_mean: f64,
     target_sd: f64,
     rounding_error_sums: f64,
     rounding_error_sds: f64,
@@ -128,6 +132,9 @@ pub fn dfs_parallel(
     let start_time = Instant::now();
     
     let initial_count = count_initial_combinations(min_scale, max_scale);
+
+    // Remember: target_sum == target_mean * n
+    let target_sum = target_mean * n as f64;
     
     let target_sum_upper = target_sum + rounding_error_sums;
     let target_sum_lower = target_sum - rounding_error_sums;
@@ -148,8 +155,7 @@ pub fn dfs_parallel(
                 let initial_combination = vec![i, j];
                 let running_sum = (i + j) as f64;
                 let current_mean = running_sum / 2.0;
-                let current_m2 = (i as f64 - current_mean).powi(2) + 
-                                (j as f64 - current_mean).powi(2);
+                let current_m2 = (i as f64 - current_mean).powi(2) + (j as f64 - current_mean).powi(2);
                 (initial_combination, running_sum, current_m2)
             })
         })
@@ -190,12 +196,24 @@ pub fn write_closure_csv(
     min_scale: i32,
     max_scale: i32,
     n: usize,
-    target_sum: f64,
+    // target_sum: f64,
+    target_mean: f64,
     target_sd: f64,
     rounding_error_sums: f64,
     rounding_error_sds: f64,
     output_file: &str,
 ) -> io::Result<()> {
+
+    let mut cwd = String::new();
+
+    // Record working directory
+    match get_current_dir() {
+        Ok(path) => cwd = path,
+        Err(e) => {
+            eprintln!("Error getting current directory: {}", e);
+        }
+    }
+
     // Setup progress bar
     let initial_count = count_initial_combinations(min_scale, max_scale);
     let bar = ProgressBar::new(initial_count as u64);
@@ -211,7 +229,7 @@ pub fn write_closure_csv(
         min_scale,
         max_scale,
         n,
-        target_sum,
+        target_mean,
         target_sd,
         rounding_error_sums,
         rounding_error_sds,
@@ -253,6 +271,8 @@ pub fn write_closure_csv(
     bar.finish_with_message("Done!");
     
     println!("Number of valid combinations: {}", result.combinations.len());
+    println!("Wrote result file: {}", cwd.clone() + "/" + output_file);
+
     Ok(())
 }
 
