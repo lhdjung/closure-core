@@ -149,8 +149,8 @@ pub fn dfs_parallel(
     let n_minus_1 = n - 1;
     let scale_max_plus_1 = scale_max + 1;
 
-    // Generate initial combinations - now using iterators
-    let initial_combinations: Vec<_> = (scale_min..=scale_max)
+    // Generate initial combinations
+    (scale_min..=scale_max)
         .flat_map(|i| {
             (i..=scale_max).map(move |j| {
                 let initial_combination = vec![i, j];
@@ -160,21 +160,8 @@ pub fn dfs_parallel(
                 (initial_combination, running_sum, current_m2)
             })
         })
-        .collect();
-
-    // TODO: Remove `execution_time_secs` and `initial_combinations_count`;
-    // just implicitly return the value that is now assigned to `combinations`!
-    // (Turbofish in `collect()` instead of type annotation in variable assignment.)
-    // This may help improve performance by avoiding unnecessary allocations.
-    
-    // So the `ClosureResult` struct will be dissolved, but I think this is fine and
-    // it was never very useful to begin with. Consider separation of concerns:
-    // users who want to measure execution time can do this on their own, and of course,
-    // these values will likely never bubble up to the R level, so they are superfluous
-    // in terms of using the R package closure.
-
-    // Process combinations in parallel and collect results
-    initial_combinations
+        .collect::<Vec<_>>()
+        // Process combinations in parallel and collect results
         .par_iter()
         .flat_map(|(combo, running_sum, running_m2)| {
             dfs_branch(
