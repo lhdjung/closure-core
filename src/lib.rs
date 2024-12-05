@@ -13,7 +13,6 @@
 
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use std::time::Instant;
 // use std::fs::File;
 // use std::io;
 // use csv::WriterBuilder;
@@ -26,13 +25,6 @@ use std::time::Instant;
 // use  decimal_places::rounding_error;
 
 
-/// Result type containing all valid CLOSURE combinations and execution metadata
-#[derive(Debug)]
-pub struct ClosureResult {
-    pub combinations: Vec<Vec<i32>>,
-    pub execution_time_secs: f64,
-    pub initial_combinations_count: i32,
-}
 
 /// Struct to hold combinations of possible raw data during processing
 #[derive(Clone)]
@@ -42,12 +34,12 @@ struct Combination {
     running_m2: f64,
 }
 
-/// Calculates the number of initial combinations that will be processed in parallel
-#[inline]
-fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
-    let range_size = scale_max - scale_min + 1;
-    (range_size * (range_size + 1)) / 2
-}
+// /// Calculates the number of initial combinations that will be processed in parallel
+// #[inline]
+// fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
+//     let range_size = scale_max - scale_min + 1;
+//     (range_size * (range_size + 1)) / 2
+// }
 
 
 
@@ -139,11 +131,7 @@ pub fn dfs_parallel(
     // mean_upper: f64,
     sd_lower: f64,
     sd_upper: f64,
-) -> ClosureResult {
-    let start_time = Instant::now();
-    
-    let initial_count = count_initial_combinations(scale_min, scale_max);
-
+) -> Vec<Vec<i32>> {
     // Remember: target_sum == mean * n
     let target_sum = mean * n as f64;
 
@@ -174,8 +162,19 @@ pub fn dfs_parallel(
         })
         .collect();
 
+    // TODO: Remove `execution_time_secs` and `initial_combinations_count`;
+    // just implicitly return the value that is now assigned to `combinations`!
+    // (Turbofish in `collect()` instead of type annotation in variable assignment.)
+    // This may help improve performance by avoiding unnecessary allocations.
+    
+    // So the `ClosureResult` struct will be dissolved, but I think this is fine and
+    // it was never very useful to begin with. Consider separation of concerns:
+    // users who want to measure execution time can do this on their own, and of course,
+    // these values will likely never bubble up to the R level, so they are superfluous
+    // in terms of using the R package closure.
+
     // Process combinations in parallel and collect results
-    let combinations: Vec<Vec<i32>> = initial_combinations
+    initial_combinations
         .par_iter()
         .flat_map(|(combo, running_sum, running_m2)| {
             dfs_branch(
@@ -193,27 +192,10 @@ pub fn dfs_parallel(
                 scale_max_plus_1,
             )
         })
-        .collect();
-
-    ClosureResult {
-        combinations,
-        execution_time_secs: start_time.elapsed().as_secs_f64(),
-        initial_combinations_count: initial_count,
-    }
+        .collect::<Vec<Vec<i32>>>()
 }
 
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_count_initial_combinations() {
-        assert_eq!(count_initial_combinations(1, 3), 6);
-        assert_eq!(count_initial_combinations(1, 4), 10);
-    }
-}
 
 // fn main() -> io::Result<()> {
 //     let scale_min = 1;
