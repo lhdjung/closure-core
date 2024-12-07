@@ -122,7 +122,7 @@ pub fn dfs_parallel(
     mean: f64,
     mean_lower: f64,
     // mean_upper: f64,
-    sd: f64,
+    // sd: f64,
     sd_lower: f64,
     sd_upper: f64,
     n: usize,
