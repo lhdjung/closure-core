@@ -120,25 +120,30 @@ fn dfs_branch(
 /// Run CLOSURE across starting combinations and return results
 pub fn dfs_parallel(
     mean: f64,
-    // sd: f64,
+    mean_lower: f64,
+    // mean_upper: f64,
+    sd: f64,
+    sd_lower: f64,
+    sd_upper: f64,
     n: usize,
     scale_min: i32,
     scale_max: i32,
     // target_sum: f64,
-    rounding_error_mean: f64,
+    // rounding_error_mean: f64,
     // rounding_error_sd: f64,
     // mean_lower: f64,
     // mean_upper: f64,
-    sd_lower: f64,
-    sd_upper: f64,
 ) -> Vec<Vec<i32>> {
-    // Remember: target_sum == mean * n
-    let target_sum = mean * n as f64;
 
-    // let rounding_error_mean = rounding_error(mean);
+    // Recalculate mean and SD on the fly to derive rounding errors from them
+    let rounding_error_mean = mean - mean_lower;
+    // let rounding_error_sd   = sd   - sd_lower;
+
+    // Remember: target_sum == mean * n
+    let target_sum = sd * n as f64;
     
-    let target_sum_upper = target_sum + rounding_error_mean;
     let target_sum_lower = target_sum - rounding_error_mean;
+    let target_sum_upper = target_sum + rounding_error_mean;
     // let sd_upper = sd + rounding_error_sd;
     // let sd_lower = sd - rounding_error_sd;
     
