@@ -18,17 +18,6 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 name = "closure-core"
 version = "0.1.0"
 dependencies = [
- "closure-core 0.1.0 (git+https://github.com/lhdjung/closure-core)",
- "csv",
- "indicatif",
- "rayon",
-]
-
-[[package]]
-name = "closure-core"
-version = "0.1.0"
-source = "git+https://github.com/lhdjung/closure-core#82ac9410378d9493c332dbee4b3555e3e9fced92"
-dependencies = [
  "csv",
  "indicatif",
  "rayon",

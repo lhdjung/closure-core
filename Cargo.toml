@@ -12,4 +12,3 @@ readme = "README.md"
 csv = "1.3"
 rayon = "1.8"
 indicatif = "0.17"
-closure-core = { git = "https://github.com/lhdjung/closure-core", version = "0.1.0" }
