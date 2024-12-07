@@ -140,7 +140,7 @@ pub fn dfs_parallel(
     // let rounding_error_sd   = sd   - sd_lower;
 
     // Remember: target_sum == mean * n
-    let target_sum = sd * n as f64;
+    let target_sum = mean * n as f64;
     
     let target_sum_lower = target_sum - rounding_error_mean;
     let target_sum_upper = target_sum + rounding_error_mean;
