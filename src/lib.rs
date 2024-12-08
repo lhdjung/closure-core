@@ -13,18 +13,23 @@
 
 use std::collections::VecDeque;
 use rayon::prelude::*;
-// use std::fs::File;
-// use std::io;
-// use csv::WriterBuilder;
-// use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Instant;
+use std::fs::File;
+use std::io;
+use csv::WriterBuilder;
+use indicatif::{ProgressBar, ProgressStyle};
 
-// mod path;
-// use path::get_current_dir;
-
-// mod decimal_places;
-// use  decimal_places::rounding_error;
+mod path;
+use path::get_current_dir;
 
 
+/// Result type containing all valid CLOSURE combinations and execution metadata
+#[derive(Debug)]
+pub struct ClosureResult {
+    pub combinations: Vec<Vec<i32>>,
+    pub execution_time_secs: f64,
+    pub initial_combinations_count: i32,
+}
 
 /// Struct to hold combinations of possible raw data during processing
 #[derive(Clone)]
@@ -34,14 +39,12 @@ struct Combination {
     running_m2: f64,
 }
 
-// /// Calculates the number of initial combinations that will be processed in parallel
-// #[inline]
-// fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
-//     let range_size = scale_max - scale_min + 1;
-//     (range_size * (range_size + 1)) / 2
-// }
-
-
+/// Calculates the number of initial combinations that will be processed in parallel
+#[inline]
+fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
+    let range_size = scale_max - scale_min + 1;
+    (range_size * (range_size + 1)) / 2
+}
 
 /// Collect all valid combinations from a starting point
 #[inline]
@@ -115,37 +118,28 @@ fn dfs_branch(
     results
 }
 
-
-
 /// Run CLOSURE across starting combinations and return results
 pub fn dfs_parallel(
     mean: f64,
-    mean_lower: f64,
-    // mean_upper: f64,
-    // sd: f64,
-    sd_lower: f64,
-    sd_upper: f64,
+    sd: f64,
     n: usize,
     scale_min: i32,
     scale_max: i32,
     // target_sum: f64,
-    // rounding_error_mean: f64,
-    // rounding_error_sd: f64,
-    // mean_lower: f64,
-    // mean_upper: f64,
-) -> Vec<Vec<i32>> {
-
-    // Recalculate mean and SD on the fly to derive rounding errors from them
-    let rounding_error_mean = mean - mean_lower;
-    // let rounding_error_sd   = sd   - sd_lower;
+    rounding_error_mean: f64,
+    rounding_error_sd: f64,
+) -> ClosureResult {
+    let start_time = Instant::now();
+    
+    let initial_count = count_initial_combinations(scale_min, scale_max);
 
     // Remember: target_sum == mean * n
     let target_sum = mean * n as f64;
     
-    let target_sum_lower = target_sum - rounding_error_mean;
     let target_sum_upper = target_sum + rounding_error_mean;
-    // let sd_upper = sd + rounding_error_sd;
-    // let sd_lower = sd - rounding_error_sd;
+    let target_sum_lower = target_sum - rounding_error_mean;
+    let sd_upper = sd + rounding_error_sd;
+    let sd_lower = sd - rounding_error_sd;
     
     // Precompute scale sums for optimization
     let scale_min_sum: Vec<i32> = (0..n).map(|x| scale_min * x as i32).collect();
@@ -154,8 +148,8 @@ pub fn dfs_parallel(
     let n_minus_1 = n - 1;
     let scale_max_plus_1 = scale_max + 1;
 
-    // Generate initial combinations
-    (scale_min..=scale_max)
+    // Generate initial combinations - now using iterators
+    let initial_combinations: Vec<_> = (scale_min..=scale_max)
         .flat_map(|i| {
             (i..=scale_max).map(move |j| {
                 let initial_combination = vec![i, j];
@@ -165,8 +159,10 @@ pub fn dfs_parallel(
                 (initial_combination, running_sum, current_m2)
             })
         })
-        .collect::<Vec<_>>()
-        // Process combinations in parallel and collect results
+        .collect();
+
+    // Process combinations in parallel and collect results
+    let combinations: Vec<Vec<i32>> = initial_combinations
         .par_iter()
         .flat_map(|(combo, running_sum, running_m2)| {
             dfs_branch(
@@ -184,10 +180,113 @@ pub fn dfs_parallel(
                 scale_max_plus_1,
             )
         })
-        .collect::<Vec<Vec<i32>>>()
+        .collect();
+
+    ClosureResult {
+        combinations,
+        execution_time_secs: start_time.elapsed().as_secs_f64(),
+        initial_combinations_count: initial_count,
+    }
 }
 
 
+
+/// Write CLOSURE results to disk with progress tracking
+pub fn write_closure_csv(
+    mean: f64,
+    sd: f64,
+    n: usize,
+    scale_min: i32,
+    scale_max: i32,
+    rounding_error_mean: f64,
+    rounding_error_sd: f64,
+    output_file: &str,
+) -> io::Result<()> {
+
+    let mut cwd = String::new();
+
+    // Record working directory
+    match get_current_dir() {
+        Ok(path) => cwd = path,
+        Err(e) => {
+            eprintln!("Error getting current directory: {}", e);
+        }
+    }
+
+    // Setup progress bar
+    let initial_count = count_initial_combinations(scale_min, scale_max);
+    let bar = ProgressBar::new(initial_count as u64);
+    bar.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} Computing...")
+            .unwrap()
+            .progress_chars("=>-")
+    );
+
+    // Compute results (only this part is timed)
+    let result = dfs_parallel(
+        mean,
+        sd,
+        n,
+        scale_min,
+        scale_max,
+        rounding_error_mean,
+        rounding_error_sd,
+    );
+    
+    println!("Computation time: {:.2} seconds", result.execution_time_secs);
+    bar.set_message("Writing to disk...");
+
+    // Initialize CSV file
+    let file = File::create(output_file)?;
+    let mut writer = WriterBuilder::new()
+        .has_headers(true)
+        .from_writer(file);
+
+    // Write header
+    let header: Vec<String> = (1..=n).map(|i| format!("n{}", i)).collect();
+    writer.write_record(&header)?;
+
+    // Write combinations with progress updates
+    let chunk_size = if result.combinations.len() >= 100 {
+        result.combinations.len() / 100  // Update every 1%
+    } else {
+        1  // Update for every combination if fewer than 100
+    };
+    
+    for (i, combination) in result.combinations.iter().enumerate() {
+        writer.write_record(
+            &combination
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>()
+        )?;
+        
+        if i % chunk_size == 0 {
+            bar.inc(1);
+        }
+    }
+
+    bar.finish_with_message("Done!");
+    
+    println!("Number of valid combinations: {}", result.combinations.len());
+    println!("Wrote result file: {}", cwd.clone() + "/" + output_file);
+
+    Ok(())
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_initial_combinations() {
+        assert_eq!(count_initial_combinations(1, 3), 6);
+        assert_eq!(count_initial_combinations(1, 4), 10);
+    }
+}
 
 // fn main() -> io::Result<()> {
 //     let scale_min = 1;
