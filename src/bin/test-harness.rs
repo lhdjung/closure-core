@@ -77,9 +77,6 @@ fn write_closure_csv(
         rounding_error_sd,
     );
     
-    println!("Computation time: {:.2} seconds", result.execution_time_secs);
-    bar.set_message("Writing to disk...");
-
     // Initialize CSV file
     let file = File::create(output_file)?;
     let mut writer = WriterBuilder::new()
@@ -91,13 +88,13 @@ fn write_closure_csv(
     writer.write_record(&header)?;
 
     // Write combinations with progress updates
-    let chunk_size = if result.combinations.len() >= 100 {
-        result.combinations.len() / 100  // Update every 1%
+    let chunk_size = if result.len() >= 100 {
+        result.len() / 100  // Update every 1%
     } else {
         1  // Update for every combination if fewer than 100
     };
     
-    for (i, combination) in result.combinations.iter().enumerate() {
+    for (i, combination) in result.iter().enumerate() {
         writer.write_record(
             &combination
                 .iter()
@@ -112,7 +109,7 @@ fn write_closure_csv(
 
     bar.finish_with_message("Done!");
     
-    println!("Number of valid combinations: {}", result.combinations.len());
+    println!("Number of valid combinations: {}", result.len());
     println!("Wrote result file: {}", cwd.clone() + "/" + output_file);
 
     Ok(())

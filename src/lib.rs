@@ -13,16 +13,7 @@
 
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use std::time::Instant;
 
-
-/// Result type containing all valid CLOSURE combinations and execution metadata
-#[derive(Debug)]
-pub struct ClosureResult {
-    pub combinations: Vec<Vec<i32>>,
-    pub execution_time_secs: f64,
-    pub initial_combinations_count: i32,
-}
 
 /// Struct to hold combinations of possible raw data during processing
 #[derive(Clone)]
@@ -121,11 +112,8 @@ pub fn dfs_parallel(
     // target_sum: f64,
     rounding_error_mean: f64,
     rounding_error_sd: f64,
-) -> ClosureResult {
-    let start_time = Instant::now();
+) -> Vec<Vec<i32>> {
     
-    let initial_count = count_initial_combinations(scale_min, scale_max);
-
     // Remember: target_sum == mean * n
     let target_sum = mean * n as f64;
     
@@ -141,8 +129,8 @@ pub fn dfs_parallel(
     let n_minus_1 = n - 1;
     let scale_max_plus_1 = scale_max + 1;
 
-    // Generate initial combinations - now using iterators
-    let initial_combinations: Vec<_> = (scale_min..=scale_max)
+    // Generate initial combinations
+    (scale_min..=scale_max)
         .flat_map(|i| {
             (i..=scale_max).map(move |j| {
                 let initial_combination = vec![i, j];
@@ -152,10 +140,8 @@ pub fn dfs_parallel(
                 (initial_combination, running_sum, current_m2)
             })
         })
-        .collect();
-
-    // Process combinations in parallel and collect results
-    let combinations: Vec<Vec<i32>> = initial_combinations
+        .collect::<Vec<_>>()
+    // Process combinations in parallel
         .par_iter()
         .flat_map(|(combo, running_sum, running_m2)| {
             dfs_branch(
@@ -173,13 +159,7 @@ pub fn dfs_parallel(
                 scale_max_plus_1,
             )
         })
-        .collect();
-
-    ClosureResult {
-        combinations,
-        execution_time_secs: start_time.elapsed().as_secs_f64(),
-        initial_combinations_count: initial_count,
-    }
+        .collect::<Vec<Vec<i32>>>()
 }
 
 
