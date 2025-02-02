@@ -18,13 +18,13 @@ fn main() -> std::io::Result<()> {
     
     // Call library function to test
     write_closure_csv(
-        5.0,
-        2.78,
-        30,
+        3.5,
+        0.5,
+        52,
         1,
-        10,
-        0.01,
-        0.01,
+        5,
+        0.05,
+        0.05,
         "parallel_results.csv"
     )?;
     
