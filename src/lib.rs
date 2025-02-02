@@ -175,26 +175,4 @@ mod tests {
     }
 }
 
-// fn main() -> io::Result<()> {
-//     let scale_min = 1;
-//     let scale_max = 7;
-//     let n = 30;
-//     let mean = 5.0;
-//     let target_sum = mean * n as f64;
-//     let sd = 2.78;
-//     let rounding_error_means = 0.01;
-//     let rounding_error_mean = rounding_error_means * n as f64;
-//     let rounding_error_sd = 0.01;
-//     let output_file = "parallel_results.csv";
-// 
-//     dfs_parallel(
-//         scale_min,
-//         scale_max,
-//         n,
-//         target_sum,
-//         sd,
-//         rounding_error_mean,
-//         rounding_error_sd,
-//         output_file,
-//     )
-// }
+
