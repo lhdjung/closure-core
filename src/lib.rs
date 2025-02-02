@@ -117,26 +117,15 @@ pub fn dfs_parallel(
     // Remember: target_sum == mean * n
     let target_sum = mean * n as f64;
     let rounding_error_sum = rounding_error_mean * n as f64;
-
-    println!("target_sum: {target_sum}");
-    println!("rounding_error_sum: {rounding_error_sum}");
     
     let target_sum_upper = target_sum + rounding_error_sum;
     let target_sum_lower = target_sum - rounding_error_sum;
     let sd_upper = sd + rounding_error_sd;
     let sd_lower = sd - rounding_error_sd;
-
-    println!("target_sum_upper: {target_sum_upper}");
-    println!("target_sum_lower: {target_sum_lower}");
-    println!("sd_upper: {sd_upper}");
-    println!("sd_lower: {sd_lower}");
     
     // Precompute scale sums for optimization
     let scale_min_sum: Vec<i32> = (0..n).map(|x| scale_min * x as i32).collect();
     let scale_max_sum: Vec<i32> = (0..n).map(|x| scale_max * x as i32).collect();
-
-    println!("scale_min_sum: {scale_min_sum:?}");
-    println!("scale_max_sum: {scale_max_sum:?}");
     
     let n_minus_1 = n - 1;
     let scale_max_plus_1 = scale_max + 1;
