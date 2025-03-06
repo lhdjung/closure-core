@@ -12,6 +12,7 @@
 
 
 use std::collections::VecDeque;
+use num::{Float, Integer, NumCast};
 use rayon::prelude::*;
 
 
@@ -103,29 +104,38 @@ fn dfs_branch(
 }
 
 /// Run CLOSURE across starting combinations and return results
-pub fn dfs_parallel(
-    mean: f64,
-    sd: f64,
-    n: usize,
-    scale_min: i32,
-    scale_max: i32,
+pub fn dfs_parallel<T, U>(
+    mean: T,
+    sd: T,
+    n: U,
+    scale_min: U,
+    scale_max: U,
     // target_sum: f64,
-    rounding_error_mean: f64,
-    rounding_error_sd: f64,
-) -> Vec<Vec<i32>> {
+    rounding_error_mean: T,
+    rounding_error_sd: T,
+) -> Vec<Vec<U>>
+where
+    T: Float,
+    U: Integer + num::ToPrimitive, // Vec<i32>: FromIterator<U>
+{
+    // Convert integer `n` to float to enable multiplication with other floats
+    let n_float = T::from(n).unwrap();
     
     // Remember: target_sum == mean * n
-    let target_sum = mean * n as f64;
-    let rounding_error_sum = rounding_error_mean * n as f64;
+    let target_sum = mean * n_float;
+    let rounding_error_sum = rounding_error_mean * n_float;
     
     let target_sum_upper = target_sum + rounding_error_sum;
     let target_sum_lower = target_sum - rounding_error_sum;
     let sd_upper = sd + rounding_error_sd;
     let sd_lower = sd - rounding_error_sd;
+
+    // Convert `n` to specific type i32 to use in sequence below
+    let n_int = U::to_i32(&n).unwrap();
     
     // Precompute scale sums for optimization
-    let scale_min_sum: Vec<i32> = (0..n).map(|x| scale_min * x as i32).collect();
-    let scale_max_sum: Vec<i32> = (0..n).map(|x| scale_max * x as i32).collect();
+    let scale_min_sum: Vec<i32> = (0..n_int).map(|x| scale_min * U::from(x).unwrap()).collect();
+    let scale_max_sum: Vec<i32> = (0..n_int).map(|x| scale_max * U::from(x).unwrap()).collect();
     
     let n_minus_1 = n - 1;
     let scale_max_plus_1 = scale_max + 1;
