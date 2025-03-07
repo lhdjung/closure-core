@@ -12,7 +12,7 @@
 
 
 use std::collections::VecDeque;
-use num::{Float, Integer, NumCast};
+use num::{Float, Integer, NumCast, FromPrimitive, ToPrimitive};
 use rayon::prelude::*;
 
 
@@ -110,13 +110,13 @@ pub fn dfs_parallel<T, U>(
     n: U,
     scale_min: U,
     scale_max: U,
-    // target_sum: f64,
+    // target_sum: T,
     rounding_error_mean: T,
     rounding_error_sd: T,
 ) -> Vec<Vec<U>>
 where
-    T: Float,
-    U: Integer + num::ToPrimitive, // Vec<i32>: FromIterator<U>
+    T: Float + FromPrimitive,
+    U: Integer + NumCast + ToPrimitive + Copy,
 {
     // Convert integer `n` to float to enable multiplication with other floats
     let n_float = T::from(n).unwrap();
@@ -130,29 +130,35 @@ where
     let sd_upper = sd + rounding_error_sd;
     let sd_lower = sd - rounding_error_sd;
 
-    // Convert `n` to specific type i32 to use in sequence below
+    // Convert n to appropriate integer type - safely using NumCast
     let n_int = U::to_i32(&n).unwrap();
     
-    // Precompute scale sums for optimization
-    let scale_min_sum: Vec<i32> = (0..n_int).map(|x| scale_min * U::from(x).unwrap()).collect();
-    let scale_max_sum: Vec<i32> = (0..n_int).map(|x| scale_max * U::from(x).unwrap()).collect();
+    // Precompute scale sums for optimization - keep everything in type U
+    let scale_min_sum: Vec<U> = (0..n_int).map(|x| scale_min * U::from(x).unwrap()).collect();
+    let scale_max_sum: Vec<U> = (0..n_int).map(|x| scale_max * U::from(x).unwrap()).collect();
     
-    let n_minus_1 = n - 1;
-    let scale_max_plus_1 = scale_max + 1;
+    let n_minus_1 = n - U::one();
+    let scale_max_plus_1 = scale_max + U::one();
 
     // Generate initial combinations
     (scale_min..=scale_max)
         .flat_map(|i| {
             (i..=scale_max).map(move |j| {
                 let initial_combination = vec![i, j];
-                let running_sum = (i + j) as f64;
-                let current_mean = running_sum / 2.0;
-                let current_m2 = (i as f64 - current_mean).powi(2) + (j as f64 - current_mean).powi(2);
-                (initial_combination, running_sum, current_m2)
+                // Convert to T for calculations
+                let i_float = T::from(i).unwrap();
+                let j_float = T::from(j).unwrap();
+                let sum = i_float + j_float;
+                let two = T::from(2).unwrap();
+                let current_mean = sum / two;
+                let diff_i = i_float - current_mean;
+                let diff_j = j_float - current_mean;
+                let current_m2 = diff_i * diff_i + diff_j * diff_j;
+                (initial_combination, sum, current_m2)
             })
         })
         .collect::<Vec<_>>()
-    // Process combinations in parallel
+        // Process combinations in parallel
         .par_iter()
         .flat_map(|(combo, running_sum, running_m2)| {
             dfs_branch(
@@ -170,7 +176,7 @@ where
                 scale_max_plus_1,
             )
         })
-        .collect::<Vec<Vec<i32>>>()
+        .collect()
 }
 
 
