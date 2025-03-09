@@ -23,6 +23,11 @@ struct Combination<T, U> {
     running_m2: T,
 }
 
+pub fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
+    let range_size = scale_max - scale_min + 1;
+    (range_size * (range_size + 1)) / 2
+}
+
 // Collect all valid combinations from a starting point
 #[inline]
 fn dfs_branch<T, U>(
@@ -209,4 +214,15 @@ where
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_initial_combinations() {
+        assert_eq!(count_initial_combinations(1, 3), 6);
+        assert_eq!(count_initial_combinations(1, 4), 10);
+    }
 }
