@@ -11,33 +11,19 @@
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
 
+use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
-use std::slice::SliceIndex;
-//use std::iter::Step;
-use num::{Float, Integer, NumCast, FromPrimitive, ToPrimitive};
 use rayon::prelude::*;
 
-
-/// Struct to hold combinations of possible raw data during processing
+// Define the Combination struct
 #[derive(Clone)]
-struct Combination<T, U>
-where
-    T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + std::slice::SliceIndex<[U]>,
-{
+struct Combination<T, U> {
     values: Vec<U>,
     running_sum: T,
     running_m2: T,
 }
 
-/// Calculates the number of initial combinations that will be processed in parallel
-#[inline]
-pub fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
-    let range_size = scale_max - scale_min + 1;
-    (range_size * (range_size + 1)) / 2
-}
-
-/// Collect all valid combinations from a starting point
+// Collect all valid combinations from a starting point
 #[inline]
 fn dfs_branch<T, U>(
     start_combination: Vec<U>,
@@ -68,7 +54,8 @@ where
     
     while let Some(current) = stack.pop_back() {
         if current.values.len() >= n {
-            let current_std = (current.running_m2 / T::from(n).unwrap()).sqrt();
+            let n_minus_1_float = T::from(n - 1).unwrap();
+            let current_std = (current.running_m2 / n_minus_1_float).sqrt();
             if current_std >= sd_lower {
                 results.push(current.values);
             }
@@ -84,18 +71,18 @@ where
         let current_mean = current.running_sum / T::from(current_len).unwrap();
 
         // Get the last value and convert to i32 for range operations
-        let last_value = U::to_i32(&current.values[current_len - 1]).unwrap();
+        let last_value_i32 = U::to_i32(&current.values[current_len - 1]).unwrap();
         let scale_max_plus_1_i32 = U::to_i32(&scale_max_plus_1).unwrap();
 
         // Use concrete i32 type for the range
-        for next_value_i32 in last_value..scale_max_plus_1_i32 {
+        for next_value_i32 in last_value_i32..scale_max_plus_1_i32 {
             let next_value = U::from(next_value_i32).unwrap();
             let next_value_as_t = T::from(next_value_i32).unwrap();
             let next_sum = current.running_sum + next_value_as_t;
             
-            // Safe indexing with bounds check
+            // Safe indexing with bounds check (using usize for indexing)
             if n_left < scale_min_sum.len() {
-                let scale_min_sum_value = scale_min_sum[n_left];
+                let scale_min_sum_value = scale_min_sum[n_left]; // Indexing with usize
                 let scale_min_sum_as_t = T::from(U::to_i32(&scale_min_sum_value).unwrap()).unwrap();
                 
                 let minmean = next_sum + scale_min_sum_as_t;
@@ -103,9 +90,9 @@ where
                     break; // Early termination - better than take_while!
                 }
                 
-                // Safe indexing with bounds check
+                // Safe indexing with bounds check (using usize for indexing)
                 if n_left < scale_max_sum.len() {
-                    let scale_max_sum_value = scale_max_sum[n_left];
+                    let scale_max_sum_value = scale_max_sum[n_left]; // Indexing with usize
                     let scale_max_sum_as_t = T::from(U::to_i32(&scale_max_sum_value).unwrap()).unwrap();
                     
                     let maxmean = next_sum + scale_max_sum_as_t;
@@ -114,11 +101,12 @@ where
                     }
                     
                     let next_mean = next_sum / T::from(next_n).unwrap();
-                    let delta  = next_value_as_t - current_mean;
+                    let delta = next_value_as_t - current_mean;
                     let delta2 = next_value_as_t - next_mean;
                     let next_m2 = current.running_m2 + delta * delta2;
                     
-                    let min_sd = (next_m2 / T::from(n).unwrap()).sqrt();
+                    let n_minus_1_float = T::from(n - 1).unwrap();
+                    let min_sd = (next_m2 / n_minus_1_float).sqrt();
                     if min_sd <= sd_upper {
                         let mut new_values = current.values.clone();
                         new_values.push(next_value);
@@ -136,7 +124,6 @@ where
     results
 }
 
-/// Run CLOSURE across starting combinations and return results
 pub fn dfs_parallel<T, U>(
     mean: T,
     sd: T,
@@ -150,9 +137,6 @@ where
     T: Float + FromPrimitive + Send + Sync,
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
 {
-    use std::collections::VecDeque;
-    use rayon::prelude::*;
-    
     // Convert integer `n` to float to enable multiplication with other floats
     let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
     
@@ -206,14 +190,6 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Define the Combination struct
-    #[derive(Clone)]
-    struct Combination<T, U> {
-        values: Vec<U>,
-        running_sum: T,
-        running_m2: T,
-    }
-
     // Process combinations in parallel
     combinations.par_iter()
         .flat_map(|(combo, running_sum, running_m2)| {
@@ -234,16 +210,3 @@ where
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_count_initial_combinations() {
-        assert_eq!(count_initial_combinations(1, 3), 6);
-        assert_eq!(count_initial_combinations(1, 4), 10);
-    }
-}
-
-
