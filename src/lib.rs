@@ -73,8 +73,6 @@ pub fn dfs_parallel<T, U>(
 where
     T: Float + FromPrimitive + Send + Sync, // suggest renaming to F to indicate float type?
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
-    // how many of these traits will still be necessary by the end? Can we drop ToPrimitive and
-// Numcast? maybe not from here, but maybe from the branch function?
 {
     // Convert integer `n` to float to enable multiplication with other floats
     let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
