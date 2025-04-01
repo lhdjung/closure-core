@@ -15,6 +15,7 @@ use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
 
+/// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
 where
     U: Integer + Copy
@@ -29,6 +30,7 @@ where
 {
     type Item = U;
 
+    /// Increment over U type integers
     fn next(&mut self) -> Option<U> {
         if self.current < self.end {
             let next = self.current;
@@ -40,6 +42,7 @@ where
     }
 }
 
+/// Creates an iterator over the space of U type integers 
 fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
     IntegerRange {current: start, end}
 }
