@@ -15,8 +15,6 @@ use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
 
-
-#[allow(dead_code)]
 struct IntegerRange<U>
 where
     U: Integer + Copy
@@ -42,7 +40,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
     IntegerRange {current: start, end}
 }
