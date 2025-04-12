@@ -41,7 +41,7 @@ fn dfs_branch<T, U>(
     sd_lower: T,
     scale_min_sum: &[U],
     scale_max_sum: &[U],
-    n_minus_1: U,
+    // n_minus_1: U,
     scale_max_plus_1: U,
 ) -> Vec<Vec<U>>
 where
@@ -168,7 +168,7 @@ where
         .map(|x| U::from(scale_max_i32 * (x as i32)).unwrap())
         .collect();
     
-    let n_minus_1 = n - U::one();
+    // let n_minus_1 = n - U::one();
     let scale_max_plus_1 = scale_max + U::one();
 
     // Generate initial combinations using concrete types for the ranges
@@ -209,7 +209,7 @@ where
                 sd_lower,
                 &scale_min_sum,
                 &scale_max_sum,
-                n_minus_1,
+                // n_minus_1,
                 scale_max_plus_1,
             )
         })
