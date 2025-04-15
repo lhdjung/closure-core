@@ -33,6 +33,7 @@ pub fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
 }
 
 /// Collect all valid combinations from a starting point
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn dfs_branch(
     start_combination: Vec<i32>,
