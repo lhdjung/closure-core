@@ -1,5 +1,11 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
+use crate::grimmer::{decimal_places_scalar, rust_round, grim_rust};
+use core::f64;
+use std::cmp::max;
+use std::iter::once;
+use statrs::statistics::Statistics;
+
 pub fn sd_limits(n_obs: u32, mean: f64, min_val: i32, max_val: i32, sd_prec: Option<i32>, n_items: u32) -> (f64, f64) {
 
     // double check that this is actually the right implementation, getting the sd precision from
