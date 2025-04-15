@@ -1,5 +1,45 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
+pub fn sd_limits(n_obs: u32, mean: f64, min_val: i32, max_val: i32, sd_prec: Option<i32>, n_items: u32) -> (f64, f64) {
+
+    // double check that this is actually the right implementation, getting the sd precision from
+    // mean, not sd as we do in set_parameters
+    let sd_prec: i32 = sd_prec.unwrap_or_else(|| 
+        max(decimal_places_scalar(Some(&mean.to_string()), ".").unwrap() - 1, 0)
+    );
+
+    let a_max = min_val;
+    let a_min = (mean * n_items as f64).floor()/n_items as f64;
+    let b_max = [max_val as f64, min_val as f64 + 1.0, a_min + 1.0].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let b_min = a_min + 1.0 / n_items as f64;
+    let total = rust_round(mean * n_obs as f64 * n_items as f64, 0)/n_items as f64;
+
+    let mut poss_values = vec![max_val as f64];
+
+    for i in 0..n_items {
+        generate_sequence(min_val, max_val, n_items, i).append(&mut poss_values)
+    }
+    poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // assuming that what the above is supposed to be doing is creating a vector which we merge into
+    // poss_values before sorting everything
+    // So poss_values should still be a flat vector?
+    
+
+    let combined_vec_1: Vec<f64> = abm_internal(total, n_obs as f64, a_min, b_min);
+    
+    if rust_round(combined_vec_1.iter().sum::<f64>()/combined_vec_1.len() as f64, sd_prec) != rust_round(mean, sd_prec) {
+        panic!("Error in calculating range of possible standard deviations")
+    }
+
+    let combined_vec_2: Vec<f64> = abm_internal(total, n_obs as f64, a_max as f64, b_max);
+    
+    if rust_round(combined_vec_2.iter().sum::<f64>()/combined_vec_2.len() as f64, sd_prec) != rust_round(mean, sd_prec) {
+        panic!("Error in calculating range of possible standard deviations")
+    }
+
+    (rust_round(combined_vec_1.std_dev(), sd_prec), rust_round(combined_vec_2.std_dev(), sd_prec))
+}
+
 fn abm_internal(total: f64, n_obs: f64, a: f64, b: f64) -> Vec<f64>{
 
     let k1 = rust_round((total - (n_obs * b)) / (a - b), 0);
