@@ -6,6 +6,94 @@ use std::cmp::max;
 use std::iter::once;
 use statrs::statistics::Statistics;
 
+
+#[allow(clippy::too_many_arguments)]
+#[allow(unused_variables)]
+pub fn set_parameters(
+    mean: f64, 
+    sd: f64, 
+    n_obs: u32, 
+    min_val: i32, 
+    max_val: i32, 
+    m_prec: Option<i32>, 
+    sd_prec: Option<i32>, 
+    n_items: u32, 
+    restrictions_exact: Option<f64>,
+    restrictions_minimum: Option<f64>, 
+    dont_test: bool) {
+
+    let m_prec: i32 = m_prec.unwrap_or_else(|| 
+        max(decimal_places_scalar(Some(&mean.to_string()), ".").unwrap() - 1, 0)
+    );
+    let sd_prec: i32 = sd_prec.unwrap_or_else(|| 
+        max(decimal_places_scalar(Some(&sd.to_string()), ".").unwrap() - 1, 0)
+    );
+    
+    assert!(min_val < max_val, "min_val was not less than max_val");
+
+
+    if !dont_test 
+    && n_obs as f64 * n_items as f64 <= 10.0f64.powi(m_prec) 
+    && !grim_rust(
+        vec![&mean.to_string()], 
+        vec![n_obs], 
+        vec![false, false, false], 
+        vec![n_items], 
+        "up_or_down", 
+        5.0, 
+        f64::EPSILON.powf(0.5)
+    )[0] {
+        panic!("The mean is not consistent with this number of observations (fails GRIM test). 
+You can use grim_scalar() to identify the closest possible mean and try again")
+    }
+
+    // add GRIMMER test warning
+    
+    let sd_limits = sd_limits(n_obs, mean, min_val, max_val, Some(sd_prec), n_items);
+
+    if !(sd > sd_limits.0 && sd <= sd_limits.1) {
+        panic!("The standard deviation is outside the possible range, givent he other parameters. 
+It should be between {} and {}.", sd_limits.0, sd_limits.1)
+    }
+
+    if !(mean >= min_val as f64 && mean <= max_val as f64) {
+        panic!("The mean is outside the possible range, which is impossible - please check inputs.")
+    }
+
+    // implement checkmate warning commented below
+    //  if (isTRUE(checkmate::check_choice(restrictions_minimum, "range"))) {
+    //    restrictions_minimum <- list(1, 1)
+    //    names(restrictions_minimum) <- c(min_val, max_val)
+    //  }
+    
+    let mut poss_values = vec![max_val as f64];
+
+    for i in 0..n_items {
+        generate_sequence(min_val, max_val, n_items, i).append(&mut poss_values)
+    }
+
+    poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+//restrictions_minimum <- restrictions_minimum[as.character(poss_values_chr[poss_values_chr %in% names(restrictions_minimum)])]
+
+
+    // double check implementation here
+    
+
+    //poss_values <- max_val
+    //  for (i in seq_len(n_items)) {
+    //    poss_values <- c(poss_values, min_val:(max_val-1) + (1 / n_items) * (i - 1))
+    //  }
+    //  poss_values <- sort(poss_values)
+    //
+    //  poss_values_chr <- round(poss_values, 2)
+    //
+    //  fixed_responses <- numeric()
+    //  fixed_values <- NA
+
+}
+
+
 pub fn sd_limits(n_obs: u32, mean: f64, min_val: i32, max_val: i32, sd_prec: Option<i32>, n_items: u32) -> (f64, f64) {
 
     // double check that this is actually the right implementation, getting the sd precision from
