@@ -1,35 +1,34 @@
 //! CLOSURE: complete listing of original samples of underlying raw evidence
-//! 
+//!
 //! Crate closure-core implements the CLOSURE technique for efficiently reconstructing
 //! all possible distributions of raw data from summary statistics. It is not
 //! about the Rust feature called closure.
-//! 
+//!
 //! The only API users are likely to need is `dfs_parallel()`. This function applies
 //! the lower-level `dfs_branch()` in parallel and writes results to disk (currently
 //! into a CSV file, but this may change in the future.)
-//! 
+//!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-
-use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
-use std::collections::VecDeque;
-use rayon::prelude::*;
+use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressStyle}; // ProgressState
-use indicatif::ParallelProgressIterator;  // Add this line
-//use std::fmt::Write;
+use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
+use rayon::prelude::*;
+use std::collections::VecDeque; // Add this line
+                                //use std::fmt::Write;
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
 where
-    U: Integer + Copy
+    U: Integer + Copy,
 {
     current: U,
     end: U,
 }
 
 impl<U> Iterator for IntegerRange<U>
-where 
-    U: Integer + Copy
+where
+    U: Integer + Copy,
 {
     type Item = U;
 
@@ -38,16 +37,19 @@ where
         if self.current < self.end {
             let next = self.current;
             self.current = self.current + U::one();
-            Some(next) 
+            Some(next)
         } else {
             None
         }
     }
 }
 
-/// Creates an iterator over the space of U type integers 
+/// Creates an iterator over the space of U type integers
 fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
-    IntegerRange {current: start, end}
+    IntegerRange {
+        current: start,
+        end,
+    }
 }
 
 // Define the Combination struct
@@ -79,11 +81,11 @@ where
 {
     // Convert integer `n` to float to enable multiplication with other floats
     let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
-    
+
     // Target sum calculations
     let target_sum = mean * n_float;
     let rounding_error_sum = rounding_error_mean * n_float;
-    
+
     let target_sum_upper = target_sum + rounding_error_sum;
     let target_sum_lower = target_sum - rounding_error_sum;
     let sd_upper = sd + rounding_error_sd;
@@ -91,21 +93,21 @@ where
 
     // Convert to usize for range operations
     let n_usize = U::to_usize(&n).unwrap();
-    
-    // Precomputing scale sums directly on T types 
+
+    // Precomputing scale sums directly on T types
     let scale_min_sum_t: Vec<T> = (0..n_usize)
         .map(|x| T::from(scale_min).unwrap() * T::from(x).unwrap())
         .collect();
-    
+
     let scale_max_sum_t: Vec<T> = (0..n_usize)
         .map(|x| T::from(scale_max).unwrap() * T::from(x).unwrap())
         .collect();
-    
+
     let n_minus_1 = n - U::one();
     let scale_max_plus_1 = scale_max + U::one();
 
-   // instead of generating the initial combinations using concrete types, we're keeping them in U
-    // and T using the iterator for U 
+    // instead of generating the initial combinations using concrete types, we're keeping them in U
+    // and T using the iterator for U
     let combinations = range_u(scale_min, scale_max_plus_1)
         .flat_map(|i| {
             range_u(i, scale_max_plus_1).map(move |j| {
@@ -128,15 +130,16 @@ where
         .collect::<Vec<_>>();
 
     // Instead of using combinations.len(), let's estimate total work more conservatively
-    let total_work = combinations.iter()
+    let total_work = combinations
+        .iter()
         .map(|(combo, _, _)| {
             // Each initial combo of size 2 needs to be expanded to size n
             let remaining = n_usize - combo.len();
             // Use very conservative estimates to avoid misleading ETAs
             if remaining > 10 {
-                50  // Fixed estimate for deep trees
+                50 // Fixed estimate for deep trees
             } else {
-                2_u64.saturating_pow(remaining as u32)  // Use 2 as branching factor
+                2_u64.saturating_pow(remaining as u32) // Use 2 as branching factor
             }
         })
         .sum::<u64>();
@@ -156,13 +159,18 @@ where
     pb.enable_steady_tick(std::time::Duration::from_millis(50));
 
     // Process combinations in parallel with progress
-    let results: Vec<Vec<U>> = combinations.into_par_iter()
+    let results: Vec<Vec<U>> = combinations
+        .into_par_iter()
         .progress_with(pb.clone())
         .flat_map(|(combo, running_sum, running_m2)| {
             let pb = pb.clone();
             // Calculate estimated work for this combination
             let remaining = n_usize - combo.len();
-            let estimated_work = if remaining > 10 { 50 } else { 2_u64.pow(remaining as u32) };
+            let estimated_work = if remaining > 10 {
+                50
+            } else {
+                2_u64.pow(remaining as u32)
+            };
             let results = dfs_branch(
                 combo.clone(),
                 running_sum,
@@ -183,7 +191,7 @@ where
         .collect();
 
     pb.finish_with_message(format!(
-        "\n✓ Completed in {:.2?} | Found {} samples\n", 
+        "\n✓ Completed in {:.2?} | Found {} samples\n",
         pb.elapsed(),
         results.len()
     ));
@@ -198,7 +206,7 @@ fn dfs_branch<T, U>(
     start_combination: Vec<U>,
     running_sum_init: T,
     running_m2_init: T,
-    n: usize,  // Use usize for the length
+    n: usize, // Use usize for the length
     target_sum_upper: T,
     target_sum_lower: T,
     sd_upper: T,
@@ -214,13 +222,13 @@ where
 {
     let mut stack = VecDeque::with_capacity(n * 2); // Preallocate with reasonable capacity
     let mut results = Vec::new();
-    
+
     stack.push_back(Combination {
         values: start_combination.clone(),
         running_sum: running_sum_init,
         running_m2: running_m2_init,
     });
-    
+
     while let Some(current) = stack.pop_back() {
         if current.values.len() >= n {
             let n_minus_1_float = T::from(n - 1).unwrap();
@@ -239,32 +247,32 @@ where
         // Get current mean
         let current_mean = current.running_sum / T::from(current_len).unwrap();
 
-        // Get the last value        
+        // Get the last value
         let last_value = current.values[current_len - 1];
 
         for next_value in range_u(last_value, scale_max_plus_1) {
             let next_value_as_t = T::from(next_value).unwrap();
             let next_sum = current.running_sum + next_value_as_t;
-            
+
             // Safe indexing with bounds check (using usize for indexing)
             if n_left < scale_min_sum_t.len() {
                 let minmean = next_sum + scale_min_sum_t[n_left];
                 if minmean > target_sum_upper {
                     break; // Early termination - better than take_while!
                 }
-                
+
                 // Safe indexing with bounds check (using usize for indexing)
                 if n_left < scale_max_sum_t.len() {
                     let maxmean = next_sum + scale_max_sum_t[n_left];
                     if maxmean < target_sum_lower {
                         continue;
                     }
-                    
+
                     let next_mean = next_sum / T::from(next_n).unwrap();
                     let delta = next_value_as_t - current_mean;
                     let delta2 = next_value_as_t - next_mean;
                     let next_m2 = current.running_m2 + delta * delta2;
-                    
+
                     let min_sd = (next_m2 / T::from(n - 1).unwrap()).sqrt();
                     if min_sd <= sd_upper {
                         let mut new_values = current.values.clone();
@@ -292,4 +300,3 @@ mod tests {
         assert_eq!(count_initial_combinations(1, 4), 10);
     }
 }
-
