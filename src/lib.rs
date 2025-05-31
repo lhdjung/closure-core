@@ -14,6 +14,8 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
+use indicatif::{ProgressBar};
+use indicatif::ParallelProgressIterator;  // Add this line
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
@@ -71,7 +73,7 @@ pub fn dfs_parallel<T, U>(
     rounding_error_sd: T,
 ) -> Vec<Vec<U>>
 where
-    T: Float + FromPrimitive + Send + Sync, // suggest renaming to F to indicate float type?
+    T: Float + FromPrimitive + Send + Sync,
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
 {
     // Convert integer `n` to float to enable multiplication with other floats
@@ -104,28 +106,38 @@ where
    // instead of generating the initial combinations using concrete types, we're keeping them in U
     // and T using the iterator for U 
     let combinations = range_u(scale_min, scale_max_plus_1)
-    .flat_map(|i| {
-        range_u(i, scale_max_plus_1).map(move |j| {
-            let initial_combination = vec![i, j];
+        .flat_map(|i| {
+            range_u(i, scale_max_plus_1).map(move |j| {
+                let initial_combination = vec![i, j];
 
-            // turn the integer type into the float type
-            // again, might be good for readability to rename T to F
-            let i_float = T::from(i).unwrap();
-            let j_float = T::from(j).unwrap();
-            let sum = i_float + j_float;
-            let current_mean = sum / T::from(2).unwrap();
+                // turn the integer type into the float type
+                // again, might be good for readability to rename T to F
+                let i_float = T::from(i).unwrap();
+                let j_float = T::from(j).unwrap();
+                let sum = i_float + j_float;
+                let current_mean = sum / T::from(2).unwrap();
 
-            let diff_i = i_float - current_mean;
-            let diff_j = j_float - current_mean;
-            let current_m2 = diff_i * diff_i + diff_j * diff_j;
+                let diff_i = i_float - current_mean;
+                let diff_j = j_float - current_mean;
+                let current_m2 = diff_i * diff_i + diff_j * diff_j;
 
-            (initial_combination, sum, current_m2)
+                (initial_combination, sum, current_m2)
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
 
-    // Process combinations in parallel
+    // Create progress bar
+    let pb = ProgressBar::new(combinations.len() as u64);
+    pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-")
+    );
+
+    // Process combinations in parallel with progress
     combinations.par_iter()
+        .progress_with(pb)
         .flat_map(|(combo, running_sum, running_m2)| {
             dfs_branch(
                 combo.clone(),

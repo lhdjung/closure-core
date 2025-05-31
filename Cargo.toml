@@ -10,8 +10,9 @@ readme = "README.md"
 
 
 [dependencies]
+indicatif = { version = "0.17", features = ["rayon"] }
+rayon = "1.7"
 num = "0.4.3"
-rayon = "1.8"
 
 
 [[bin]]
@@ -22,12 +23,8 @@ required-features = ["test-harness"]
 
 [features]
 default = []
-test-harness = ["dep:csv", "dep:indicatif"]
+test-harness = ["dep:csv"]
 
 [dependencies.csv]
 version = "1.3"
-optional = true
-
-[dependencies.indicatif]
-version = "0.17"
 optional = true
