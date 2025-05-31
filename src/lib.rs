@@ -14,9 +14,9 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use indicatif::{ProgressBar, ProgressStyle, ProgressState};
+use indicatif::{ProgressBar, ProgressStyle}; // ProgressState
 use indicatif::ParallelProgressIterator;  // Add this line
-use std::fmt::Write;
+//use std::fmt::Write;
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
@@ -132,15 +132,12 @@ where
         .map(|(combo, _, _)| {
             // Each initial combo of size 2 needs to be expanded to size n
             let remaining = n_usize - combo.len();
-            // Use a more conservative branching factor estimate
-            let max_branching: i32 = 5; // Limit branching factor to avoid overflow
-            let work = if remaining > 10 {
-                // For deep trees, use a conservative estimate
-                1000
+            // Use very conservative estimates to avoid misleading ETAs
+            if remaining > 10 {
+                50  // Fixed estimate for deep trees
             } else {
-                max_branching.pow(remaining as u32)
-            };
-            work as u64
+                2_u64.saturating_pow(remaining as u32)  // Use 2 as branching factor
+            }
         })
         .sum::<u64>();
 
@@ -148,19 +145,14 @@ where
     let pb = ProgressBar::new(total_work);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec}, {eta})")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {human_pos}/{human_total} ({per_sec})")
             .unwrap()
-            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
-                write!(w, "eta:{:.1}s", state.eta().as_secs_f64()).unwrap();
-            })
-            .with_key("per_sec", |state: &ProgressState, w: &mut dyn Write| {
-                write!(w, "{:.1}/s", state.per_sec()).unwrap();
-            })
             .progress_chars("=>-")
     );
 
-    // Enable steady ticks for spinner animation
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    // Set minimum update interval to 50ms to prevent too frequent updates
+    pb.set_message("Processing combinations...");
+    pb.enable_steady_tick(std::time::Duration::from_millis(50));
 
     // Process combinations in parallel with progress
     let results = combinations.into_par_iter()
