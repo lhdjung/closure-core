@@ -71,8 +71,8 @@ fn write_closure_csv(
         mean,
         sd,
         n,
-        scale_min,
-        scale_max,
+        scale_min.try_into().unwrap(),
+        scale_max.try_into().unwrap(),
         rounding_error_mean,
         rounding_error_sd,
     );
