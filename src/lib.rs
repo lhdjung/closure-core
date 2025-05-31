@@ -145,9 +145,10 @@ where
     let pb = ProgressBar::new(total_work);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {human_pos}/{human_total} ({per_sec})")
-            .unwrap()
-            .progress_chars("=>-")
+        // The "msg" part represents pb.finish_with_message() below
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {human_pos}/{human_len} | Remaining: {per_sec} {msg}")
+        .unwrap()
+        .progress_chars("=>-")
     );
 
     // Set minimum update interval to 50ms to prevent too frequent updates
@@ -155,10 +156,13 @@ where
     pb.enable_steady_tick(std::time::Duration::from_millis(50));
 
     // Process combinations in parallel with progress
-    let results = combinations.into_par_iter()
+    let results: Vec<Vec<U>> = combinations.into_par_iter()
         .progress_with(pb.clone())
         .flat_map(|(combo, running_sum, running_m2)| {
             let pb = pb.clone();
+            // Calculate estimated work for this combination
+            let remaining = n_usize - combo.len();
+            let estimated_work = if remaining > 10 { 50 } else { 2_u64.pow(remaining as u32) };
             let results = dfs_branch(
                 combo.clone(),
                 running_sum,
@@ -173,12 +177,16 @@ where
                 n_minus_1,
                 scale_max_plus_1,
             );
-            pb.inc(1);
+            pb.inc(estimated_work);
             results
         })
         .collect();
 
-    pb.finish_with_message("Done!");
+    pb.finish_with_message(format!(
+        "\n✓ Completed in {:.2?} | Found {} samples\n", 
+        pb.elapsed(),
+        results.len()
+    ));
 
     results
 }
