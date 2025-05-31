@@ -14,8 +14,9 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use indicatif::{ProgressBar};
+use indicatif::{ProgressBar, ProgressStyle, ProgressState};
 use indicatif::ParallelProgressIterator;  // Add this line
+use std::fmt::Write;
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
@@ -126,23 +127,50 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Create progress bar
-    let pb = ProgressBar::new(combinations.len() as u64);
+    // Instead of using combinations.len(), let's estimate total work more conservatively
+    let total_work = combinations.iter()
+        .map(|(combo, _, _)| {
+            // Each initial combo of size 2 needs to be expanded to size n
+            let remaining = n_usize - combo.len();
+            // Use a more conservative branching factor estimate
+            let max_branching: i32 = 5; // Limit branching factor to avoid overflow
+            let work = if remaining > 10 {
+                // For deep trees, use a conservative estimate
+                1000
+            } else {
+                max_branching.pow(remaining as u32)
+            };
+            work as u64
+        })
+        .sum::<u64>();
+
+    // Create progress bar with estimated total work
+    let pb = ProgressBar::new(total_work);
     pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec}, {eta})")
             .unwrap()
-            .progress_chars("#>-")
+            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
+                write!(w, "eta:{:.1}s", state.eta().as_secs_f64()).unwrap();
+            })
+            .with_key("per_sec", |state: &ProgressState, w: &mut dyn Write| {
+                write!(w, "{:.1}/s", state.per_sec()).unwrap();
+            })
+            .progress_chars("=>-")
     );
 
+    // Enable steady ticks for spinner animation
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
     // Process combinations in parallel with progress
-    combinations.par_iter()
-        .progress_with(pb)
+    let results = combinations.into_par_iter()
+        .progress_with(pb.clone())
         .flat_map(|(combo, running_sum, running_m2)| {
-            dfs_branch(
+            let pb = pb.clone();
+            let results = dfs_branch(
                 combo.clone(),
-                *running_sum,
-                *running_m2,
+                running_sum,
+                running_m2,
                 n_usize,
                 target_sum_upper,
                 target_sum_lower,
@@ -152,9 +180,15 @@ where
                 &scale_max_sum_t,
                 n_minus_1,
                 scale_max_plus_1,
-            )
+            );
+            pb.inc(1);
+            results
         })
-        .collect()
+        .collect();
+
+    pb.finish_with_message("Done!");
+
+    results
 }
 
 // Collect all valid combinations from a starting point
