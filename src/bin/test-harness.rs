@@ -11,7 +11,7 @@ fn main() -> std::io::Result<()> {
     println!("Running test harness...");
 
     // Call library function to test
-    write_closure_csv(3.5, 1.0, 120, 1, 5, 0.05, 0.05, "parallel_results.csv")?;
+    write_closure_csv(3.5, 1.0, 80, 1, 7, 0.05, 0.05, "parallel_results.csv")?;
 
     println!("Test completed successfully");
     Ok(())

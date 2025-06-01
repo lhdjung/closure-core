@@ -10,12 +10,17 @@
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-use indicatif::ParallelProgressIterator;
-use indicatif::{ProgressBar, ProgressStyle}; // ProgressState
+//use indicatif::ParallelProgressIterator;
+//use indicatif::{ProgressBar, ProgressStyle}; // ProgressState
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use rayon::prelude::*;
-use std::collections::VecDeque; // Add this line
-                                //use std::fmt::Write;
+use std::collections::VecDeque;
+use extendr_api::{rprintln, print_r_output};
+//use std::io::Write;
+//use std::sync::Arc;
+//use extendr_api::prelude::*;
+//use std::sync::atomic::{AtomicUsize, Ordering};
+//use std::time::{Duration, Instant};
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
@@ -129,74 +134,83 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Instead of using combinations.len(), let's estimate total work more conservatively
-    let total_work = combinations
-        .iter()
-        .map(|(combo, _, _)| {
-            // Each initial combo of size 2 needs to be expanded to size n
-            let remaining = n_usize - combo.len();
-            // Use very conservative estimates to avoid misleading ETAs
-            if remaining > 10 {
-                50 // Fixed estimate for deep trees
-            } else {
-                2_u64.saturating_pow(remaining as u32) // Use 2 as branching factor
-            }
-        })
-        .sum::<u64>();
+    //// Instead of using combinations.len(), let's estimate total work more conservatively
+    //let total_work = combinations
+    //    .iter()
+    //    .map(|(combo, _, _)| {
+    //        // Each initial combo of size 2 needs to be expanded to size n
+    //        let remaining = n_usize - combo.len();
+    //        // Use very conservative estimates to avoid misleading ETAs
+    //        if remaining > 10 {
+    //            50 // Fixed estimate for deep trees
+    //        } else {
+    //            2_u64.saturating_pow(remaining as u32) // Use 2 as branching factor
+    //        }
+    //    })
+    //    .sum::<u64>();
 
-    // Create progress bar with estimated total work
-    let pb = ProgressBar::new(total_work);
-    pb.set_style(
-        ProgressStyle::default_bar()
-        // The "msg" part represents pb.finish_with_message() below
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {human_pos}/{human_len} | Remaining: {per_sec} {msg}")
-        .unwrap()
-        .progress_chars("=>-")
-    );
+    //// Create progress bar with estimated total work
+    //let pb = ProgressBar::new(total_work);
+    //pb.set_style(
+    //    ProgressStyle::default_bar()
+    //    // The "msg" part represents pb.finish_with_message() below
+    //    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {human_pos}/{human_len} | Remaining: {per_sec} {msg}")
+    //    .unwrap()
+    //    .progress_chars("=>-")
+    //);
 
-    // Set minimum update interval to 50ms to prevent too frequent updates
-    pb.set_message("Processing combinations...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(50));
+    //// Set minimum update interval to 50ms to prevent too frequent updates
+    //pb.set_message("Processing combinations...");
+    //pb.enable_steady_tick(std::time::Duration::from_millis(50));
 
-    // Process combinations in parallel with progress
-    let results: Vec<Vec<U>> = combinations
-        .into_par_iter()
-        .progress_with(pb.clone())
-        .flat_map(|(combo, running_sum, running_m2)| {
-            let pb = pb.clone();
-            // Calculate estimated work for this combination
-            let remaining = n_usize - combo.len();
-            let estimated_work = if remaining > 10 {
-                50
-            } else {
-                2_u64.pow(remaining as u32)
-            };
-            let results = dfs_branch(
-                combo.clone(),
-                running_sum,
-                running_m2,
-                n_usize,
-                target_sum_upper,
-                target_sum_lower,
-                sd_upper,
-                sd_lower,
-                &scale_min_sum_t,
-                &scale_max_sum_t,
-                n_minus_1,
-                scale_max_plus_1,
-            );
-            pb.inc(estimated_work);
-            results
-        })
-        .collect();
+    //// Update every 5% if possible
+    //let n_combos = combinations.len();
+    //let milestone = if n_combos / 20 == 0 {
+    //    1 // Avoid division by zero
+    //} else {
+    //    ((n_combos / 20) as f64).round() as usize
+    //};
 
-    pb.finish_with_message(format!(
-        "\n✓ Completed in {:.2?} | Found {} samples\n",
-        pb.elapsed(),
-        results.len()
-    ));
+    //std::io::stdout().flush().unwrap();
 
-    results
+    //println!("Total combinations: {}", n_combos);
+    //println!("Milestone: {}", milestone);
+
+    let chunk_size = 50; // Process in chunks
+    let total = combinations.len();
+    let mut all_results: Vec<Vec<U>> = Vec::new();
+    
+    for (chunk_num, chunk) in combinations.chunks(chunk_size).enumerate() {
+        // Process chunk in parallel
+        let chunk_results: Vec<Vec<U>> = chunk.par_iter()
+            .flat_map(|(combo, running_sum, running_m2)| {
+                dfs_branch(
+                    combo.clone(),
+                    *running_sum,
+                    *running_m2,
+                    n_usize,
+                    target_sum_upper,
+                    target_sum_lower,
+                    sd_upper,
+                    sd_lower,
+                    &scale_min_sum_t,
+                    &scale_max_sum_t,
+                    n_minus_1,
+                    scale_max_plus_1,
+                )
+            })
+            .collect();
+        
+        all_results.extend(chunk_results);
+        
+        // Safe progress reporting between chunks
+        let processed = (chunk_num + 1) * chunk_size;
+        let percent = (processed.min(total) * 100) / total;
+        rprintln!("Progress: {}% ({}/{})", percent, processed.min(total), total);
+    }
+    
+    rprintln!("✓ Complete! Found {} valid combinations", all_results.len());
+    all_results
 }
 
 // Collect all valid combinations from a starting point

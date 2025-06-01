@@ -13,6 +13,7 @@ readme = "README.md"
 indicatif = { version = "0.17", features = ["rayon"] }
 rayon = "1.7"
 num = "0.4.3"
+extendr-api = "0.8.0"
 
 
 [[bin]]
