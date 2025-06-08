@@ -1,8 +1,10 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
-use crate::grimmer::{decimal_places_scalar, rust_round, grim_rust};
-use core::f64;
 use std::cmp::max;
+use crate::grimmer::{decimal_places_scalar, grim_rust, grimmer_scalar, rust_round};
+use crate::sprite_types::RestrictionsOption;
+use core::f64;
+use std::collections::{HashMap, HashSet};
 use std::iter::once;
 use statrs::statistics::Statistics;
 
@@ -18,8 +20,8 @@ pub fn set_parameters(
     m_prec: Option<i32>, 
     sd_prec: Option<i32>, 
     n_items: u32, 
-    restrictions_exact: Option<f64>,
-    restrictions_minimum: Option<f64>, 
+    restrictions_exact: Option<HashMap<i32, usize>>,
+    restrictions_minimum: RestrictionsOption,
     dont_test: bool) {
 
     let m_prec: i32 = m_prec.unwrap_or_else(|| 
@@ -45,11 +47,12 @@ pub fn set_parameters(
     )[0] {
         panic!("The mean is not consistent with this number of observations (fails GRIM test). 
 You can use grim_scalar() to identify the closest possible mean and try again")
-    }
+    } else if !dont_test
+    && !grimmer_scalar(&mean.to_string(), &sd.to_string(), n_obs, n_items, vec![false, false, false], "up_or_down", 5.0, f64::EPSILON.powf(0.5)) {
+        panic!("The standard deviation is not consistent with this mean and number of observations (fails GRIMMER test)")
+    };
 
-    // add GRIMMER test warning
-    
-    let sd_limits = sd_limits(n_obs, mean, min_val, max_val, Some(sd_prec), n_items);
+    let sd_limits: (f64, f64) = sd_limits(n_obs, mean, min_val, max_val, Some(sd_prec), n_items);
 
     if !(sd > sd_limits.0 && sd <= sd_limits.1) {
         panic!("The standard deviation is outside the possible range, givent he other parameters. 
@@ -58,14 +61,39 @@ It should be between {} and {}.", sd_limits.0, sd_limits.1)
 
     if !(mean >= min_val as f64 && mean <= max_val as f64) {
         panic!("The mean is outside the possible range, which is impossible - please check inputs.")
-    }
+    };
 
-    // implement checkmate warning commented below
-    //  if (isTRUE(checkmate::check_choice(restrictions_minimum, "range"))) {
-    //    restrictions_minimum <- list(1, 1)
-    //    names(restrictions_minimum) <- c(min_val, max_val)
-    //  }
+    // if it's default, construct from range. 
+    // if it's a Some(T), extract T
+    // if it's a None, do nothing?
+
+
+    let restrictions_minimum = match restrictions_minimum {
+        RestrictionsOption::Default() => Some(restrictions_minimum.construct_from_default(min_val, max_val).extract()),
+        RestrictionsOption::Opt(t) => t,
+        RestrictionsOption::Null() => None,
+    };
+
+
     
+    
+
+    
+
+
+    // // awkward, replicating an R pattern. Once we have a good idea what 
+    // // restrictions_minimum is used for, translate to more idiomatic form
+    // let new_restrictions_min: Option<(i32, i32)> = if let Some(res_min) = restrictions_minimum.clone() {
+    //     if res_min == "range".to_string() {
+    //         Some((1, 1))
+    //     } else {
+    //         None
+    //     }
+    // } else {
+    //     None
+    // };
+    
+
     let mut poss_values = vec![max_val as f64];
 
     for i in 0..n_items {
@@ -73,6 +101,65 @@ It should be between {} and {}.", sd_limits.0, sd_limits.1)
     }
 
     poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let poss_values_chr = poss_values.iter().map(
+        |&x| rust_round(x, 2)
+    ).collect::<Vec<f64>>();
+
+
+
+    let exact_keys: HashSet<i32> = restrictions_exact.clone().unwrap().keys().copied().collect();
+    let min_keys: HashSet<i32> = restrictions_minimum.clone().unwrap().keys().copied().collect();
+
+    if restrictions_minimum.is_some() && restrictions_exact.is_some() {
+        // check to see if their keys overlap
+
+        let conflicts: Vec<i32> = exact_keys.intersection(&min_keys).copied().collect();
+        if !conflicts.is_empty() {
+            panic!("Conflict: values with both exact and minimum restrictions: {:?}", conflicts);
+        }
+    }
+
+    if restrictions_minimum.is_some() {
+
+        let allowed_values: HashSet<i32> = poss_values_chr
+            .iter()
+            .map(|f| (f * 100.0).round() as i32) 
+            // emulate rounding to 2 decimal places
+            .collect();
+
+        let min_keys: Vec<f64> = restrictions_minimum.clone().unwrap().keys().map(|&k| k as f64).collect();
+
+        let invalid_keys: Vec<i32> = min_keys.iter().map(|k| (k * 100.0).round() as i32 / 100).filter(|k| !allowed_values.contains(k)).collect();
+
+
+        if !invalid_keys.is_empty() {
+            panic!("Invalid keys in restrictions_minimum: {:?}", invalid_keys);
+        }
+
+        // ensure restrictions are ordered
+        // take the values of poss_values_chr which also exist as the keys of restrictions_minimum
+        
+        let restrictions_minimum = filter_restrictions_exact(&restrictions_minimum.unwrap().extract(), &poss_values_chr);
+
+        let fixed_responses = fixed_responses_from_minimum(&restrictions_minimum, poss_values_chr, poss_values);
+    }
+
+    if restrictions_exact.is_some() {
+        // get keys, round them to second place, if any is NOT in poss_values_chr, then ...
+        let j = restrictions_exact.unwrap().keys().map();
+
+    }
+    // do the same for restrictions_exact
+
+
+
+    // if new_restrictions_min.is_some() && restrictions_exact.is_some() {
+    //
+    // }
+
+    
+
 
 //restrictions_minimum <- restrictions_minimum[as.character(poss_values_chr[poss_values_chr %in% names(restrictions_minimum)])]
 
@@ -169,5 +256,46 @@ fn generate_sequence(min_val: i32, max_val: i32, n_items: u32, i: u32) -> Vec<f6
     let increment = (1.0 / n_items as f64) * (i as f64 - 1.0);
     (min_val..max_val)
         .map(|val| val as f64 + increment)
+        .collect()
+}
+fn scale_2dp(x: f64) -> i32 {
+    (x * 100.0).round() as i32
+}
+
+fn filter_restrictions_exact(
+    restrictions_exact: &HashMap<i32, usize>,
+    poss_values_chr: &Vec<f64>,
+) -> HashMap<i32, usize> {
+    // Convert allowed f64 values to scaled integers
+    let allowed_scaled: HashSet<i32> = poss_values_chr.iter().map(|&v| scale_2dp(v)).collect();
+
+    // Filter: retain only keys that, when scaled, match allowed values
+    restrictions_exact
+        .iter()
+        .filter_map(|(&k, &v)| {
+            let k_scaled = scale_2dp(k as f64);
+            if allowed_scaled.contains(&k_scaled) {
+                Some((k, v))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+
+fn fixed_responses_from_minimum(
+    restrictions_minimum: &HashMap<i32, usize>,
+    poss_values_chr: Vec<f64>,
+    poss_values: Vec<f64>,
+) -> Vec<f64> {
+    poss_values_chr
+        .into_iter()
+        .zip(poss_values.into_iter())
+        .filter_map(|(chr, val)| {
+            let scaled = scale_2dp(chr);
+            restrictions_minimum.get(&scaled).map(|&count| vec![val; count])
+        })
+        .flatten()
         .collect()
 }
