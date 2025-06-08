@@ -11,6 +11,7 @@
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
 pub mod sprite;
+pub mod sprite_types;
 pub mod grimmer;
 
 use std::collections::VecDeque;
