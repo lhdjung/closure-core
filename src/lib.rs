@@ -13,7 +13,6 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use std::path::Path;
 use std::sync::Mutex;
 use arrow::array::{Int32Array, ArrayRef};
 use arrow::datatypes::{Schema, Field, DataType};
@@ -290,8 +289,13 @@ where
         }
         
         // Close the writer
-        let mut w = writer_mutex.lock().unwrap();
-        let _ = w.close();
+        if let Ok(mut guard) = writer_mutex.lock() {
+            let _metadata = std::mem::replace(&mut *guard, ArrowWriter::try_new(
+                File::create(&parquet_config.as_ref().unwrap().file_path).unwrap(),
+                Arc::new(Schema::new(Vec::<Field>::new())),
+                None,
+            ).unwrap()).close();
+        }
     }
     
     results
