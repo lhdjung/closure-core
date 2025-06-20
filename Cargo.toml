@@ -10,7 +10,9 @@ readme = "README.md"
 
 
 [dependencies]
+arrow = "55.1.0"
 num = "0.4.3"
+parquet = "55.1.0"
 rayon = "1.8"
 
 
