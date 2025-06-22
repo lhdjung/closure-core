@@ -178,10 +178,10 @@ where
     // Convert to usize for range operations
     let n_usize = U::to_usize(&n).unwrap();
     
-    // NEW: Create 2D array for min_scale_sum like in Python
-    // min_scale_sum[value][n_left] = value * n_left
+    // NEW: Create 2D array for scale_min_sum like in Python
+    // scale_min_sum[value][n_left] = value * n_left
     let scale_range = U::to_usize(&(scale_max - scale_min + U::one())).unwrap();
-    let mut min_scale_sum_t: Vec<Vec<T>> = Vec::with_capacity(scale_range);
+    let mut scale_min_sum_t: Vec<Vec<T>> = Vec::with_capacity(scale_range);
     
     // For each possible value from scale_min to scale_max
     for value in range_u(scale_min, scale_max + U::one()) {
@@ -189,7 +189,7 @@ where
         let row: Vec<T> = (0..n_usize)
             .map(|n_left| value_float * T::from(n_left).unwrap())
             .collect();
-        min_scale_sum_t.push(row);
+        scale_min_sum_t.push(row);
     }
     
     // max_scale_sum remains 1D as in the original
@@ -243,7 +243,7 @@ where
                 target_sum_lower,
                 sd_upper,
                 sd_lower,
-                &min_scale_sum_t,
+                &scale_min_sum_t,
                 &scale_max_sum_t,
                 n_minus_1,
                 scale_max_plus_1,
@@ -313,7 +313,7 @@ fn dfs_branch<T, U>(
     target_sum_lower: T,
     sd_upper: T,
     sd_lower: T,
-    min_scale_sum_t: &[Vec<T>],  // Now 2D array
+    scale_min_sum_t: &[Vec<T>],  // Now 2D array
     scale_max_sum_t: &[T],
     _n_minus_1: U,
     scale_max_plus_1: U,
@@ -362,9 +362,9 @@ where
             let value_index = U::to_usize(&(next_value - scale_min)).unwrap();
             
             // Safe indexing with bounds check
-            if value_index < min_scale_sum_t.len() && n_left < min_scale_sum_t[value_index].len() {
-                // Access as min_scale_sum_t[next_value-scale_min][n_left]
-                let minmean = next_sum + min_scale_sum_t[value_index][n_left];
+            if value_index < scale_min_sum_t.len() && n_left < scale_min_sum_t[value_index].len() {
+                // Access as scale_min_sum_t[next_value-scale_min][n_left]
+                let minmean = next_sum + scale_min_sum_t[value_index][n_left];
                 if minmean > target_sum_upper {
                     break; // Early termination
                 }
