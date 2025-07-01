@@ -5,7 +5,8 @@
 //! about the Rust feature called closure.
 //! 
 //! The crate is mostly meant to serve as a backend for the R package [unsum](https://lhdjung.github.io/unsum/).
-//! The only API users are likely to need is `dfs_parallel()`.
+//! The main APIs users need are `dfs_parallel()` for in-memory results and 
+//! `dfs_parallel_streaming()` for memory-efficient file output.
 //! 
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
@@ -13,6 +14,7 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
+use std::path::Path;
 use arrow::array::{Int32Array, ArrayRef};
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
@@ -20,13 +22,29 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-/// Configuration for optional Parquet output
+/// Configuration for Parquet output in memory mode
+/// Used with `dfs_parallel()` to optionally save results while returning them
 pub struct ParquetConfig {
     pub file_path: String,
     pub batch_size: usize,
+}
+
+/// Configuration for streaming mode
+/// Used with `dfs_parallel_streaming()` for memory-efficient processing
+pub struct StreamingConfig {
+    pub file_path: String,
+    pub batch_size: usize,
+    pub show_progress: bool,
+}
+
+/// Result of streaming operation
+pub struct StreamingResult {
+    pub total_combinations: usize,
+    pub file_path: String,
 }
 
 /// Implements range over Rint-friendly generic integer type U
@@ -133,24 +151,8 @@ where
     RecordBatch::try_new(schema, arrays).map_err(|e| e.into())
 }
 
-/// Generate all valid combinations
-/// 
-/// `dfs_parallel()` computes all valid combinations of integers that
-/// match the given summary statistics.
-///
-/// # Arguments
-/// * `mean` - The mean of the target distribution.
-/// * `sd` - The standard deviation of the target distribution.
-/// * `n` - The number of elements in the target distribution.
-/// * `scale_min` - The minimum value of the scale.
-/// * `scale_max` - The maximum value of the scale.
-/// * `rounding_error_mean` - The rounding error for the mean.
-/// * `rounding_error_sd` - The rounding error for the standard deviation.
-/// * `parquet_config` - Optional configuration for writing results to a Parquet file.
-/// # Returns
-/// A vector of vectors, where each inner vector represents a valid combination of integers
-/// that matches the given summary statistics.
-pub fn dfs_parallel<T, U>(
+/// Internal function to prepare computation parameters
+fn prepare_computation<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -158,11 +160,10 @@ pub fn dfs_parallel<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
-    parquet_config: Option<ParquetConfig>,
-) -> Vec<Vec<U>>
+) -> (T, T, T, T, usize, Vec<Vec<T>>, Vec<T>, U, U)
 where
     T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
+    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
 {
     // Convert integer `n` to float to enable multiplication with other floats
     let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
@@ -179,7 +180,7 @@ where
     // Convert to usize for range operations
     let n_usize = U::to_usize(&n).unwrap();
     
-    // NEW: Create 2D array for min_scale_sum like in Python
+    // Create 2D array for min_scale_sum like in Python
     // min_scale_sum[value][n_left] = value * n_left
     let scale_range = U::to_usize(&(scale_max - scale_min + U::one())).unwrap();
     let mut min_scale_sum_t: Vec<Vec<T>> = Vec::with_capacity(scale_range);
@@ -200,6 +201,68 @@ where
     
     let n_minus_1 = n - U::one();
     let scale_max_plus_1 = scale_max + U::one();
+    
+    (target_sum_upper, target_sum_lower, sd_upper, sd_lower, n_usize, 
+     min_scale_sum_t, scale_max_sum_t, n_minus_1, scale_max_plus_1)
+}
+
+/// Generate initial combinations for parallel processing
+fn generate_initial_combinations<T, U>(
+    scale_min: U,
+    scale_max_plus_1: U,
+) -> Vec<(Vec<U>, T, T)>
+where
+    T: Float + FromPrimitive + Send + Sync,
+    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+{
+    range_u(scale_min, scale_max_plus_1)
+        .flat_map(|i| {
+            range_u(i, scale_max_plus_1).map(move |j| {
+                let initial_combination = vec![i, j];
+
+                let i_float = T::from(i).unwrap();
+                let j_float = T::from(j).unwrap();
+                let sum = i_float + j_float;
+                let current_mean = sum / T::from(2).unwrap();
+
+                let diff_i = i_float - current_mean;
+                let diff_j = j_float - current_mean;
+                let current_m2 = diff_i * diff_i + diff_j * diff_j;
+
+                (initial_combination, sum, current_m2)
+            })
+        })
+        .collect()
+}
+
+/// Generate all valid combinations (memory mode)
+/// 
+/// This function computes all valid combinations and returns them in memory.
+/// Optionally writes to a Parquet file if config is provided.
+/// 
+/// Use this when:
+/// - Result sets are reasonably sized (< 1GB)
+/// - You need to process results in memory after generation
+/// - You want both file output and in-memory access
+/// 
+/// For large result sets, use `dfs_parallel_streaming()` instead.
+pub fn dfs_parallel<T, U>(
+    mean: T,
+    sd: T,
+    n: U,
+    scale_min: U,
+    scale_max: U,
+    rounding_error_mean: T,
+    rounding_error_sd: T,
+    parquet_config: Option<ParquetConfig>,
+) -> Vec<Vec<U>>
+where
+    T: Float + FromPrimitive + Send + Sync,
+    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+{
+    let (target_sum_upper, target_sum_lower, sd_upper, sd_lower, n_usize, 
+         min_scale_sum_t, scale_max_sum_t, n_minus_1, scale_max_plus_1) = 
+        prepare_computation(mean, sd, n, scale_min, scale_max, rounding_error_mean, rounding_error_sd);
 
     // Setup channel for sending results to writer thread if configured
     let (tx, rx) = if parquet_config.is_some() {
@@ -251,24 +314,7 @@ where
     };
 
     // Generate initial combinations
-    let combinations = range_u(scale_min, scale_max_plus_1)
-        .flat_map(|i| {
-            range_u(i, scale_max_plus_1).map(move |j| {
-                let initial_combination = vec![i, j];
-
-                let i_float = T::from(i).unwrap();
-                let j_float = T::from(j).unwrap();
-                let sum = i_float + j_float;
-                let current_mean = sum / T::from(2).unwrap();
-
-                let diff_i = i_float - current_mean;
-                let diff_j = j_float - current_mean;
-                let current_m2 = diff_i * diff_i + diff_j * diff_j;
-
-                (initial_combination, sum, current_m2)
-            })
-        })
-        .collect::<Vec<_>>();
+    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
 
     // Process combinations in parallel
     let results: Vec<Vec<U>> = combinations.par_iter()
@@ -292,7 +338,6 @@ where
             // Send results to writer thread if configured
             if let Some(ref sender) = tx {
                 // Clone the results to send to writer
-                // This is done outside the critical path
                 let results_for_writer = branch_results.clone();
                 // Send can fail if receiver is dropped, but we ignore it
                 let _ = sender.send(results_for_writer);
@@ -315,6 +360,137 @@ where
     results
 }
 
+/// Generate all valid combinations (streaming mode)
+/// 
+/// This function computes all valid combinations and streams them directly to a Parquet file
+/// without keeping them in memory. This is essential for large result sets.
+/// 
+/// Use this when:
+/// - Result sets are very large (> 1GB)
+/// - You only need file output, not in-memory processing
+/// - Memory efficiency is critical
+/// 
+/// Returns a StreamingResult with the total count and file path.
+pub fn dfs_parallel_streaming<T, U>(
+    mean: T,
+    sd: T,
+    n: U,
+    scale_min: U,
+    scale_max: U,
+    rounding_error_mean: T,
+    rounding_error_sd: T,
+    config: StreamingConfig,
+) -> StreamingResult
+where
+    T: Float + FromPrimitive + Send + Sync,
+    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+{
+    let (target_sum_upper, target_sum_lower, sd_upper, sd_lower, n_usize, 
+         min_scale_sum_t, scale_max_sum_t, n_minus_1, scale_max_plus_1) = 
+        prepare_computation(mean, sd, n, scale_min, scale_max, rounding_error_mean, rounding_error_sd);
+
+    // Setup channel for streaming results
+    let (tx, rx) = channel::<Vec<Vec<U>>>();
+    
+    // Counter for total combinations found
+    let total_counter = Arc::new(AtomicUsize::new(0));
+    let counter_for_thread = total_counter.clone();
+    
+    // Spawn dedicated writer thread
+    let file_path_clone = config.file_path.clone();
+    let n_for_writer = n;
+    
+    let writer_handle = thread::spawn(move || {
+        let mut writer = create_parquet_writer::<U>(&file_path_clone, n_for_writer)
+            .expect("Failed to create Parquet writer");
+        
+        let mut buffer: Vec<Vec<U>> = Vec::with_capacity(config.batch_size * 2);
+        let mut total_written = 0;
+        let mut last_progress_report = 0;
+        
+        // Process incoming results
+        while let Ok(batch) = rx.recv() {
+            let batch_size = batch.len();
+            buffer.extend(batch);
+            
+            // Update counter
+            counter_for_thread.fetch_add(batch_size, Ordering::Relaxed);
+            
+            // Write when buffer reaches threshold
+            if buffer.len() >= config.batch_size {
+                if let Ok(record_batch) = combinations_to_record_batch(&buffer, U::to_usize(&n_for_writer).unwrap()) {
+                    let _ = writer.write(&record_batch);
+                    total_written += buffer.len();
+                    
+                    // Progress reporting
+                    if config.show_progress && total_written - last_progress_report >= 100_000 {
+                        eprintln!("Progress: {} combinations written...", total_written);
+                        last_progress_report = total_written;
+                    }
+                }
+                buffer.clear();
+            }
+        }
+        
+        // Write any remaining results
+        if !buffer.is_empty() {
+            if let Ok(record_batch) = combinations_to_record_batch(&buffer, U::to_usize(&n_for_writer).unwrap()) {
+                let _ = writer.write(&record_batch);
+                total_written += buffer.len();
+            }
+        }
+        
+        let _ = writer.close();
+        
+        if config.show_progress {
+            eprintln!("Streaming complete: {} total combinations written", total_written);
+        }
+        
+        total_written
+    });
+
+    // Generate initial combinations
+    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
+
+    // Process combinations in parallel (without collecting results)
+    combinations.par_iter()
+        .for_each(|(combo, running_sum, running_m2)| {
+            let branch_results = dfs_branch(
+                combo.clone(),
+                *running_sum,
+                *running_m2,
+                n_usize,
+                target_sum_upper,
+                target_sum_lower,
+                sd_upper,
+                sd_lower,
+                &min_scale_sum_t,
+                &scale_max_sum_t,
+                n_minus_1,
+                scale_max_plus_1,
+                scale_min,
+            );
+            
+            // Send results directly to writer thread
+            // No cloning needed since we're not keeping them
+            if !branch_results.is_empty() {
+                let _ = tx.send(branch_results);
+            }
+        });
+    
+    // Close the channel to signal writer thread to finish
+    drop(tx);
+    
+    // Wait for writer thread to complete
+    let total_written = writer_handle.join()
+        .expect("Writer thread panicked");
+    
+    StreamingResult {
+        total_combinations: total_written,
+        file_path: config.file_path,
+    }
+}
+
 // Collect all valid combinations from a starting point
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -331,7 +507,7 @@ fn dfs_branch<T, U>(
     scale_max_sum_t: &[T],
     _n_minus_1: U,
     scale_max_plus_1: U,
-    scale_min: U,  // NEW: Need this to calculate indices
+    scale_min: U,  // Need this to calculate indices
 ) -> Vec<Vec<U>>
 where
     T: Float + FromPrimitive + Send + Sync,
@@ -371,7 +547,7 @@ where
             let next_value_as_t = T::from(next_value).unwrap();
             let next_sum = current.running_sum + next_value_as_t;
             
-            // NEW: Calculate index for 2D array access
+            // Calculate index for 2D array access
             // Index is (next_value - scale_min) to map to 0-based array
             let value_index = U::to_usize(&(next_value - scale_min)).unwrap();
             
@@ -463,5 +639,32 @@ mod tests {
         
         // Clean up test file
         let _ = std::fs::remove_file("test_output.parquet");
+    }
+    
+    #[test]
+    fn test_dfs_parallel_streaming() {
+        // Test streaming mode
+        let config = StreamingConfig {
+            file_path: "test_streaming.parquet".to_string(),
+            batch_size: 100,
+            show_progress: false,
+        };
+        
+        let result = dfs_parallel_streaming::<f64, i32>(
+            3.0,  // mean
+            1.0,  // sd
+            5,    // n
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            config,
+        );
+        
+        assert!(result.total_combinations > 0);
+        assert_eq!(result.file_path, "test_streaming.parquet");
+        
+        // Clean up test file
+        let _ = std::fs::remove_file("test_streaming.parquet");
     }
 }
