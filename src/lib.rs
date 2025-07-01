@@ -14,7 +14,6 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use std::path::Path;
 use arrow::array::{Int32Array, ArrayRef};
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
@@ -22,7 +21,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::channel;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
@@ -258,7 +257,7 @@ pub fn dfs_parallel<T, U>(
 ) -> Vec<Vec<U>>
 where
     T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
 {
     let (target_sum_upper, target_sum_lower, sd_upper, sd_lower, n_usize, 
          min_scale_sum_t, scale_max_sum_t, n_minus_1, scale_max_plus_1) = 
@@ -383,7 +382,7 @@ pub fn dfs_parallel_streaming<T, U>(
 ) -> StreamingResult
 where
     T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
 {
     let (target_sum_upper, target_sum_lower, sd_upper, sd_lower, n_usize, 
          min_scale_sum_t, scale_max_sum_t, n_minus_1, scale_max_plus_1) = 
