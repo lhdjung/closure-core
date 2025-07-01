@@ -13,7 +13,7 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use std::sync::Mutex;
+use std::path::Path;
 use arrow::array::{Int32Array, ArrayRef};
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
@@ -21,6 +21,8 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::sync::Arc;
+use std::sync::mpsc::{channel, Sender};
+use std::thread;
 
 /// Configuration for optional Parquet output
 pub struct ParquetConfig {
@@ -178,10 +180,10 @@ where
     // Convert to usize for range operations
     let n_usize = U::to_usize(&n).unwrap();
     
-    // NEW: Create 2D array for scale_min_sum like in Python
-    // scale_min_sum[value][n_left] = value * n_left
+    // NEW: Create 2D array for min_scale_sum like in Python
+    // min_scale_sum[value][n_left] = value * n_left
     let scale_range = U::to_usize(&(scale_max - scale_min + U::one())).unwrap();
-    let mut scale_min_sum_t: Vec<Vec<T>> = Vec::with_capacity(scale_range);
+    let mut min_scale_sum_t: Vec<Vec<T>> = Vec::with_capacity(scale_range);
     
     // For each possible value from scale_min to scale_max
     for value in range_u(scale_min, scale_max + U::one()) {
@@ -189,7 +191,7 @@ where
         let row: Vec<T> = (0..n_usize)
             .map(|n_left| value_float * T::from(n_left).unwrap())
             .collect();
-        scale_min_sum_t.push(row);
+        min_scale_sum_t.push(row);
     }
     
     // max_scale_sum remains 1D as in the original
@@ -200,16 +202,54 @@ where
     let n_minus_1 = n - U::one();
     let scale_max_plus_1 = scale_max + U::one();
 
-    // Setup Parquet writer if configured
-    let writer = parquet_config.as_ref().map(|config| {
-        Arc::new(Mutex::new(
-            create_parquet_writer::<U>(&config.file_path, n)
-                .expect("Failed to create Parquet writer")
-        ))
-    });
+    // Setup channel for sending results to writer thread if configured
+    let (tx, rx) = if parquet_config.is_some() {
+        let (tx, rx) = channel::<Vec<Vec<U>>>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     
-    let batch_size = parquet_config.as_ref().map(|c| c.batch_size).unwrap_or(1000);
-    let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batch_size)));
+    // Spawn dedicated writer thread if we have a parquet config
+    let writer_handle = if let Some(config) = parquet_config {
+        let rx = rx.unwrap();
+        let n_for_writer = n;
+        
+        Some(thread::spawn(move || {
+            let mut writer = create_parquet_writer::<U>(&config.file_path, n_for_writer)
+                .expect("Failed to create Parquet writer");
+            
+            let mut buffer: Vec<Vec<U>> = Vec::with_capacity(config.batch_size * 2);
+            let mut total_written = 0;
+            
+            // Process incoming results
+            while let Ok(batch) = rx.recv() {
+                buffer.extend(batch);
+                
+                // Write when buffer reaches threshold
+                if buffer.len() >= config.batch_size {
+                    if let Ok(record_batch) = combinations_to_record_batch(&buffer, U::to_usize(&n_for_writer).unwrap()) {
+                        let _ = writer.write(&record_batch);
+                        total_written += buffer.len();
+                    }
+                    buffer.clear();
+                }
+            }
+            
+            // Write any remaining results
+            if !buffer.is_empty() {
+                if let Ok(record_batch) = combinations_to_record_batch(&buffer, U::to_usize(&n_for_writer).unwrap()) {
+                    let _ = writer.write(&record_batch);
+                    total_written += buffer.len();
+                }
+            }
+            
+            let _ = writer.close();
+            total_written
+        }))
+    } else {
+        None
+    };
 
     // Generate initial combinations
     let combinations = range_u(scale_min, scale_max_plus_1)
@@ -243,58 +283,33 @@ where
                 target_sum_lower,
                 sd_upper,
                 sd_lower,
-                &scale_min_sum_t,
+                &min_scale_sum_t,
                 &scale_max_sum_t,
                 n_minus_1,
                 scale_max_plus_1,
                 scale_min,
             );
             
-            // If we have a writer, batch the results for writing
-            if let Some(ref writer_mutex) = writer {
-                let mut buffer = batch_buffer.lock().unwrap();
-                for result in &branch_results {
-                    buffer.push(result.clone());
-                    
-                    // Write batch when buffer is full
-                    if buffer.len() >= batch_size {
-                        let batch_to_write: Vec<Vec<U>> = buffer.drain(..).collect();
-                        drop(buffer); // Release lock before writing
-                        
-                        if let Ok(record_batch) = combinations_to_record_batch(&batch_to_write, n_usize) {
-                            let mut w = writer_mutex.lock().unwrap();
-                            let _ = w.write(&record_batch);
-                        }
-                        
-                        buffer = batch_buffer.lock().unwrap();
-                    }
-                }
+            // Send results to writer thread if configured
+            if let Some(ref sender) = tx {
+                // Clone the results to send to writer
+                // This is done outside the critical path
+                let results_for_writer = branch_results.clone();
+                // Send can fail if receiver is dropped, but we ignore it
+                let _ = sender.send(results_for_writer);
             }
             
             branch_results
         })
         .collect();
     
-    // Write any remaining results in the buffer
-    if let Some(ref writer_mutex) = writer {
-        let buffer = batch_buffer.lock().unwrap();
-        if !buffer.is_empty() {
-            let final_batch: Vec<Vec<U>> = buffer.clone();
-            drop(buffer);
-            
-            if let Ok(record_batch) = combinations_to_record_batch(&final_batch, n_usize) {
-                let mut w = writer_mutex.lock().unwrap();
-                let _ = w.write(&record_batch);
-            }
-        }
-        
-        // Close the writer
-        if let Ok(mut guard) = writer_mutex.lock() {
-            let _metadata = std::mem::replace(&mut *guard, ArrowWriter::try_new(
-                File::create(&parquet_config.as_ref().unwrap().file_path).unwrap(),
-                Arc::new(Schema::new(Vec::<Field>::new())),
-                None,
-            ).unwrap()).close();
+    // Close the channel to signal writer thread to finish
+    drop(tx);
+    
+    // Wait for writer thread to complete if it exists
+    if let Some(handle) = writer_handle {
+        if let Ok(total_written) = handle.join() {
+            eprintln!("Total combinations written to Parquet: {}", total_written);
         }
     }
     
@@ -313,7 +328,7 @@ fn dfs_branch<T, U>(
     target_sum_lower: T,
     sd_upper: T,
     sd_lower: T,
-    scale_min_sum_t: &[Vec<T>],  // Now 2D array
+    min_scale_sum_t: &[Vec<T>],  // Now 2D array
     scale_max_sum_t: &[T],
     _n_minus_1: U,
     scale_max_plus_1: U,
@@ -362,9 +377,9 @@ where
             let value_index = U::to_usize(&(next_value - scale_min)).unwrap();
             
             // Safe indexing with bounds check
-            if value_index < scale_min_sum_t.len() && n_left < scale_min_sum_t[value_index].len() {
-                // Access as scale_min_sum_t[next_value-scale_min][n_left]
-                let minmean = next_sum + scale_min_sum_t[value_index][n_left];
+            if value_index < min_scale_sum_t.len() && n_left < min_scale_sum_t[value_index].len() {
+                // Access as min_scale_sum_t[next_value-scale_min][n_left]
+                let minmean = next_sum + min_scale_sum_t[value_index][n_left];
                 if minmean > target_sum_upper {
                     break; // Early termination
                 }
