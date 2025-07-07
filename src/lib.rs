@@ -13,7 +13,7 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::{VecDeque, HashMap};
 use rayon::prelude::*;
-use arrow::array::{Int32Array, Float64Array, StringArray, ArrayRef};
+use arrow::array::{Int32Array, Int64Array, Float64Array, StringArray, ArrayRef};
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -364,7 +364,14 @@ where
 }
 
 /// Create writers for statistics tables
-fn create_stats_writers(base_path: &str) -> Result<(ArrowWriter<File>, ArrowWriter<File>, ArrowWriter<File>), Box<dyn std::error::Error>> {
+fn create_stats_writers(base_path: &str) -> Result<(
+    ArrowWriter<File>, 
+    ArrowWriter<File>, 
+    ArrowWriter<File>,
+    Arc<Schema>,
+    Arc<Schema>,
+    Arc<Schema>
+), Box<dyn std::error::Error>> {
     // Metrics main writer
     let metrics_main_schema = Arc::new(Schema::new(vec![
         Field::new("samples_initial", DataType::Int32, false),
@@ -400,7 +407,14 @@ fn create_stats_writers(base_path: &str) -> Result<(ArrowWriter<File>, ArrowWrit
     let frequency_file = File::create(format!("{}_frequency.parquet", base_path))?;
     let frequency_writer = ArrowWriter::try_new(frequency_file, frequency_schema.clone(), None)?;
     
-    Ok((metrics_main_writer, metrics_horns_writer, frequency_writer))
+    Ok((
+        metrics_main_writer, 
+        metrics_horns_writer, 
+        frequency_writer,
+        metrics_main_schema,
+        metrics_horns_schema,
+        frequency_schema
+    ))
 }
 
 /// Convert combinations with horns to a RecordBatch for Parquet writing
@@ -604,10 +618,10 @@ where
         
         // Write statistics tables
         let base_path = config.file_path.trim_end_matches(".parquet");
-        if let Ok((mut mm_writer, mut mh_writer, mut freq_writer)) = create_stats_writers(base_path) {
+        if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) = create_stats_writers(base_path) {
             // Write metrics_main
             let mm_batch = RecordBatch::try_new(
-                mm_writer.schema().clone(),
+                mm_schema,
                 vec![
                     Arc::new(Int32Array::from(vec![closure_results.metrics_main.samples_initial])),
                     Arc::new(Int32Array::from(vec![closure_results.metrics_main.samples_all as i32])),
@@ -621,7 +635,7 @@ where
             
             // Write metrics_horns
             let mh_batch = RecordBatch::try_new(
-                mh_writer.schema().clone(),
+                mh_schema,
                 vec![
                     Arc::new(Float64Array::from(vec![closure_results.metrics_horns.mean])),
                     Arc::new(Float64Array::from(vec![closure_results.metrics_horns.uniform])),
@@ -649,7 +663,7 @@ where
                 let samples_col = vec![label.to_string(); n_rows];
                 
                 let freq_batch = RecordBatch::try_new(
-                    freq_writer.schema().clone(),
+                    freq_schema.clone(),
                     vec![
                         Arc::new(StringArray::from(samples_col)),
                         Arc::new(Int32Array::from(freq_table.value.clone())),
@@ -850,7 +864,7 @@ where
     
     // Now write the statistics files
     let base_path = config.file_path.trim_end_matches(".parquet");
-    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer)) = create_stats_writers(base_path) {
+    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) = create_stats_writers(base_path) {
         // Calculate final statistics
         let samples_all = all_horns.len();
         let values_all = samples_all * n_usize;
@@ -873,7 +887,7 @@ where
         
         // Write metrics_main
         let mm_batch = RecordBatch::try_new(
-            mm_writer.schema().clone(),
+            mm_schema,
             vec![
                 Arc::new(Int32Array::from(vec![count_initial_combinations(scale_min_i32, scale_max_i32)])),
                 Arc::new(Int32Array::from(vec![samples_all as i32])),
@@ -887,7 +901,7 @@ where
         
         // Write metrics_horns
         let mh_batch = RecordBatch::try_new(
-            mh_writer.schema().clone(),
+            mh_schema,
             vec![
                 Arc::new(Float64Array::from(vec![horns_mean])),
                 Arc::new(Float64Array::from(vec![calculate_horns_uniform(scale_min_i32, scale_max_i32)])),
@@ -913,7 +927,7 @@ where
             let count = frequency_map.get(&scale_value).unwrap_or(&0);
             
             let freq_batch = RecordBatch::try_new(
-                freq_writer.schema().clone(),
+                freq_schema.clone(),
                 vec![
                     Arc::new(StringArray::from(vec!["all"])),
                     Arc::new(Int32Array::from(vec![scale_value])),
