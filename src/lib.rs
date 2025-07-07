@@ -591,7 +591,7 @@ where
         .collect();
 
     // Calculate all statistics
-    let mut closure_results = calculate_all_statistics(results, scale_min, scale_max);
+    let closure_results = calculate_all_statistics(results, scale_min, scale_max);
     
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -723,8 +723,6 @@ where
     // Spawn dedicated writer thread
     let file_path_clone = config.file_path.clone();
     let n_for_writer = n;
-    let scale_min_for_writer = scale_min;
-    let scale_max_for_writer = scale_max;
     
     let writer_handle = thread::spawn(move || {
         let mut writer = create_parquet_writer::<U>(&file_path_clone, n_for_writer)
