@@ -386,9 +386,10 @@ where
 fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
 {
     // Create schema with id column, samples as list column, plus horns column
+    // Note: List items are marked as nullable to match what Arrow's ListBuilder produces
     let fields = vec![
         Field::new("id", DataType::Int32, false),
-        Field::new("samples", DataType::List(Arc::new(Field::new("item", DataType::Int32, false))), false),
+        Field::new("samples", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false), // true for nullable items
         Field::new("horns", DataType::Float64, false),
     ];
     
@@ -468,32 +469,35 @@ where
     // Create arrays for each column
     let mut arrays: Vec<ArrayRef> = Vec::new();
     
-    // Add ID column (adjusted for batch)
+    // Add ID column
     let id_data: Vec<i32> = results.id[start_idx..end_idx]
         .iter()
         .map(|&id| id as i32)
         .collect();
     arrays.push(Arc::new(Int32Array::from(id_data)));
     
-    // Add samples column as a list
+    // Add samples column as a list using the standard ListBuilder
     let mut list_builder = ListBuilder::new(Int32Builder::new());
+    
     for sample in &results.samples[start_idx..end_idx] {
-        let sample_i32: Vec<i32> = sample.iter()
-            .map(|&val| U::to_i32(&val).unwrap())
-            .collect();
-        list_builder.values().append_slice(&sample_i32);
+        // Append all values for this sample
+        for &val in sample {
+            list_builder.values().append_value(U::to_i32(&val).unwrap());
+        }
+        // Mark the end of this list
         list_builder.append(true);
     }
+    
     arrays.push(Arc::new(list_builder.finish()));
     
     // Add horns column
     let horns_data: Vec<f64> = results.horns_values[start_idx..end_idx].to_vec();
     arrays.push(Arc::new(Float64Array::from(horns_data)));
     
-    // Create schema
+    // Create schema - matching the schema from create_results_writer
     let fields = vec![
         Field::new("id", DataType::Int32, false),
-        Field::new("samples", DataType::List(Arc::new(Field::new("item", DataType::Int32, false))), false),
+        Field::new("samples", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false), // true for nullable items
         Field::new("horns", DataType::Float64, false),
     ];
     
