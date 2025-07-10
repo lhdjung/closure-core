@@ -13,7 +13,7 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::{VecDeque, HashMap};
 use rayon::prelude::*;
-use arrow::array::{Int32Array, Int64Array, Float64Array, StringArray, ArrayRef};
+use arrow::array::{Int32Array, Int64Array, Float64Array, StringArray, ArrayRef, ListBuilder, Int32Builder};
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -22,6 +22,7 @@ use std::fs::File;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::thread;
 
 /// Configuration for Parquet output in memory mode
@@ -381,21 +382,15 @@ where
 }
 
 /// Create a Parquet writer for the results table with appropriate schema
-fn create_results_writer<U>(file_path: &str, n: U) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
-where
-    U: Integer + ToPrimitive + Copy,
+/// Now stores samples as a list column instead of expanding them
+fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
 {
-    let n_usize = U::to_usize(&n).unwrap();
-    
-    // Create schema with id column, n columns named n1, n2, ..., n{n}, plus horns column
-    let mut fields: Vec<Field> = vec![Field::new("id", DataType::Int32, false)];
-    
-    // Add sample columns
-    fields.extend((1..=n_usize)
-        .map(|i| Field::new(&format!("n{}", i), DataType::Int32, false)));
-    
-    // Add horns column
-    fields.push(Field::new("horns", DataType::Float64, false));
+    // Create schema with id column, samples as list column, plus horns column
+    let fields = vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("samples", DataType::List(Arc::new(Field::new("item", DataType::Int32, false))), false),
+        Field::new("horns", DataType::Float64, false),
+    ];
     
     let schema = Arc::new(Schema::new(fields));
     
@@ -421,7 +416,7 @@ fn create_stats_writers(base_path: &str) -> Result<(
         Field::new("samples_all", DataType::Int32, false),
         Field::new("values_all", DataType::Int32, false),
     ]));
-    let metrics_main_file = File::create(format!("{}/metrics_main.parquet", base_path))?;
+    let metrics_main_file = File::create(format!("{}metrics_main.parquet", base_path))?;
     let metrics_main_writer = ArrowWriter::try_new(metrics_main_file, metrics_main_schema.clone(), None)?;
     
     // Metrics horns writer
@@ -436,7 +431,7 @@ fn create_stats_writers(base_path: &str) -> Result<(
         Field::new("max", DataType::Float64, false),
         Field::new("range", DataType::Float64, false),
     ]));
-    let metrics_horns_file = File::create(format!("{}/metrics_horns.parquet", base_path))?;
+    let metrics_horns_file = File::create(format!("{}metrics_horns.parquet", base_path))?;
     let metrics_horns_writer = ArrowWriter::try_new(metrics_horns_file, metrics_horns_schema.clone(), None)?;
     
     // Frequency writer with samples column first
@@ -447,7 +442,7 @@ fn create_stats_writers(base_path: &str) -> Result<(
         Field::new("f_absolute", DataType::Int64, false),
         Field::new("f_relative", DataType::Float64, false),
     ]));
-    let frequency_file = File::create(format!("{}/frequency.parquet", base_path))?;
+    let frequency_file = File::create(format!("{}frequency.parquet", base_path))?;
     let frequency_writer = ArrowWriter::try_new(frequency_file, frequency_schema.clone(), None)?;
     
     Ok((
@@ -461,15 +456,15 @@ fn create_stats_writers(base_path: &str) -> Result<(
 }
 
 /// Convert results table to a RecordBatch for Parquet writing
+/// Now properly handles samples as a list column
 fn results_to_record_batch<U>(
     results: &ResultsTable<U>,
     start_idx: usize,
     end_idx: usize,
-    n: usize,
 ) -> Result<RecordBatch, Box<dyn std::error::Error>>
 where
     U: Integer + ToPrimitive + Copy,
-{    
+{
     // Create arrays for each column
     let mut arrays: Vec<ArrayRef> = Vec::new();
     
@@ -480,25 +475,27 @@ where
         .collect();
     arrays.push(Arc::new(Int32Array::from(id_data)));
     
-    // Add sample columns
-    for col_idx in 0..n {
-        let column_data: Vec<i32> = results.samples[start_idx..end_idx]
-            .iter()
-            .map(|combo| U::to_i32(&combo[col_idx]).unwrap())
+    // Add samples column as a list
+    let mut list_builder = ListBuilder::new(Int32Builder::new());
+    for sample in &results.samples[start_idx..end_idx] {
+        let sample_i32: Vec<i32> = sample.iter()
+            .map(|&val| U::to_i32(&val).unwrap())
             .collect();
-        
-        arrays.push(Arc::new(Int32Array::from(column_data)));
+        list_builder.values().append_slice(&sample_i32);
+        list_builder.append(true);
     }
+    arrays.push(Arc::new(list_builder.finish()));
     
     // Add horns column
     let horns_data: Vec<f64> = results.horns_values[start_idx..end_idx].to_vec();
     arrays.push(Arc::new(Float64Array::from(horns_data)));
     
     // Create schema
-    let mut fields: Vec<Field> = vec![Field::new("id", DataType::Int32, false)];
-    fields.extend((1..=n)
-        .map(|i| Field::new(&format!("n{}", i), DataType::Int32, false)));
-    fields.push(Field::new("horns", DataType::Float64, false));
+    let fields = vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("samples", DataType::List(Arc::new(Field::new("item", DataType::Int32, false))), false),
+        Field::new("horns", DataType::Float64, false),
+    ];
     
     let schema = Arc::new(Schema::new(fields));
     
@@ -648,14 +645,16 @@ where
     
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
-        let base_path = config.file_path.trim_end_matches('/');
-        
-        // Create output directory
-        let _ = std::fs::create_dir_all(base_path);
+        // Ensure base_path ends with / for consistent file naming
+        let base_path = if config.file_path.ends_with('/') {
+            config.file_path.clone()
+        } else {
+            format!("{}/", config.file_path)
+        };
         
         // Write results table
-        let results_path = format!("{}/results.parquet", base_path);
-        if let Ok(mut writer) = create_results_writer::<U>(&results_path, n) {
+        let results_path = format!("{}results.parquet", base_path);
+        if let Ok(mut writer) = create_results_writer(&results_path) {
             let batch_size = config.batch_size;
             let total_samples = closure_results.results.samples.len();
             
@@ -666,7 +665,6 @@ where
                     &closure_results.results,
                     start,
                     end,
-                    U::to_usize(&n).unwrap()
                 ) {
                     let _ = writer.write(&record_batch);
                 }
@@ -675,7 +673,7 @@ where
         }
         
         // Write statistics tables
-        if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) = create_stats_writers(base_path) {
+        if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) = create_stats_writers(&base_path) {
             // Write metrics_main
             let mm_batch = RecordBatch::try_new(
                 mm_schema,
@@ -731,6 +729,17 @@ where
     closure_results
 }
 
+/// Structure to hold streaming frequency state
+struct StreamingFrequencyState {
+    current_min_horns: f64,
+    current_max_horns: f64,
+    all_freq: HashMap<i32, i64>,
+    min_freq: HashMap<i32, i64>,
+    max_freq: HashMap<i32, i64>,
+    min_count: usize,
+    max_count: usize,
+}
+
 /// Generate all valid combinations (streaming mode) with summary statistics
 /// 
 /// This function computes all valid combinations and streams them directly to Parquet files
@@ -768,16 +777,30 @@ where
     let total_counter = Arc::new(AtomicUsize::new(0));
     let counter_for_thread = total_counter.clone();
     
-    // Create output directory
-    let base_path = config.file_path.trim_end_matches('/');
-    let _ = std::fs::create_dir_all(base_path);
+    // Shared state for tracking min/max horns frequencies
+    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
+        current_min_horns: f64::INFINITY,
+        current_max_horns: f64::NEG_INFINITY,
+        all_freq: HashMap::new(),
+        min_freq: HashMap::new(),
+        max_freq: HashMap::new(),
+        min_count: 0,
+        max_count: 0,
+    }));
+    let freq_state_for_thread = freq_state.clone();
+    
+    // Ensure base path ends with /
+    let base_path = if config.file_path.ends_with('/') {
+        config.file_path.clone()
+    } else {
+        format!("{}/", config.file_path)
+    };
     
     // Spawn dedicated writer thread
-    let file_path_clone = format!("{}/results.parquet", base_path);
-    let n_for_writer = n;
+    let file_path_clone = format!("{}results.parquet", base_path);
     
     let writer_handle = thread::spawn(move || {
-        let mut writer = create_results_writer::<U>(&file_path_clone, n_for_writer)
+        let mut writer = create_results_writer(&file_path_clone)
             .expect("Failed to create Parquet writer");
         
         let mut buffer_results = ResultsTable {
@@ -806,7 +829,6 @@ where
                     &buffer_results,
                     0,
                     batch_len,
-                    U::to_usize(&n_for_writer).unwrap()
                 ) {
                     let _ = writer.write(&record_batch);
                     total_written += batch_len;
@@ -830,7 +852,6 @@ where
                 &buffer_results,
                 0,
                 batch_len,
-                U::to_usize(&n_for_writer).unwrap()
             ) {
                 let _ = writer.write(&record_batch);
                 total_written += batch_len;
@@ -847,18 +868,15 @@ where
     });
     
     // Spawn statistics collector thread
+    let freq_state_for_stats = freq_state.clone();
     let stats_handle = thread::spawn(move || {
         let mut all_horns = Vec::new();
-        let mut frequency_map: HashMap<i32, i64> = HashMap::new();
         
-        while let Ok((horns_batch, freq_batch)) = rx_stats.recv() {
+        while let Ok((horns_batch, _)) = rx_stats.recv() {
             all_horns.extend(horns_batch);
-            for (k, v) in freq_batch {
-                *frequency_map.entry(k).or_insert(0) += v;
-            }
         }
         
-        (all_horns, frequency_map)
+        (all_horns, freq_state_for_stats)
     });
 
     // Generate initial combinations
@@ -889,17 +907,63 @@ where
             if !branch_results.is_empty() {
                 let mut samples_with_horns = Vec::with_capacity(branch_results.len());
                 let mut horns_batch = Vec::with_capacity(branch_results.len());
-                let mut freq_batch: HashMap<i32, i64> = HashMap::new();
                 
-                // Calculate horns for each sample
+                // Calculate horns for each sample and update frequency state
                 for (idx, sample) in branch_results.into_iter().enumerate() {
                     let mut freqs = vec![0.0; (scale_max_i32 - scale_min_i32 + 1) as usize];
+                    let mut sample_freq: HashMap<i32, i64> = HashMap::new();
+                    
                     for &value in &sample {
                         let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
                         freqs[idx] += 1.0;
-                        *freq_batch.entry(U::to_i32(&value).unwrap()).or_insert(0) += 1;
+                        *sample_freq.entry(U::to_i32(&value).unwrap()).or_insert(0) += 1;
                     }
+                    
                     let horns = calculate_horns(&freqs, scale_min_i32, scale_max_i32);
+                    
+                    // Update frequency state with proper locking
+                    {
+                        let mut state = freq_state_for_thread.lock().unwrap();
+                        
+                        // Update all frequencies
+                        for (&val, &count) in &sample_freq {
+                            *state.all_freq.entry(val).or_insert(0) += count;
+                        }
+                        
+                        // Check if this is a new min or max
+                        if (horns - state.current_min_horns).abs() < 1e-10 {
+                            // Equal to current min
+                            for (&val, &count) in &sample_freq {
+                                *state.min_freq.entry(val).or_insert(0) += count;
+                            }
+                            state.min_count += 1;
+                        } else if horns < state.current_min_horns {
+                            // New minimum found
+                            state.current_min_horns = horns;
+                            state.min_freq.clear();
+                            for (&val, &count) in &sample_freq {
+                                state.min_freq.insert(val, count);
+                            }
+                            state.min_count = 1;
+                        }
+                        
+                        if (horns - state.current_max_horns).abs() < 1e-10 {
+                            // Equal to current max
+                            for (&val, &count) in &sample_freq {
+                                *state.max_freq.entry(val).or_insert(0) += count;
+                            }
+                            state.max_count += 1;
+                        } else if horns > state.current_max_horns {
+                            // New maximum found
+                            state.current_max_horns = horns;
+                            state.max_freq.clear();
+                            for (&val, &count) in &sample_freq {
+                                state.max_freq.insert(val, count);
+                            }
+                            state.max_count = 1;
+                        }
+                    }
+                    
                     horns_batch.push(horns);
                     samples_with_horns.push((sample, horns, idx));
                 }
@@ -909,7 +973,7 @@ where
                 
                 // Send to writer and stats collector
                 let _ = tx_samples.send(samples_with_horns);
-                let _ = tx_stats.send((horns_batch, freq_batch));
+                let _ = tx_stats.send((horns_batch, HashMap::new())); // Empty map since we're handling frequencies differently
             }
         });
     
@@ -921,11 +985,11 @@ where
     let total_written = writer_handle.join()
         .expect("Writer thread panicked");
     
-    let (all_horns, frequency_map) = stats_handle.join()
+    let (all_horns, final_freq_state) = stats_handle.join()
         .expect("Stats thread panicked");
     
     // Now write the statistics files
-    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) = create_stats_writers(base_path) {
+    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) = create_stats_writers(&base_path) {
         // Calculate final statistics
         let samples_all = all_horns.len();
         let values_all = samples_all * n_usize;
@@ -980,13 +1044,15 @@ where
         }
         let _ = mh_writer.close();
         
-        // Calculate frequency table for all samples
+        // Extract frequency data from final state
+        let state = final_freq_state.lock().unwrap();
         let total_values = values_all as f64;
         let n_samples = samples_all as f64;
         
-        // Write frequency table with "all" label only
+        // Write frequency table with all three categories
+        // First write "all" frequencies
         for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = frequency_map.get(&scale_value).unwrap_or(&0);
+            let count = state.all_freq.get(&scale_value).unwrap_or(&0);
             
             let freq_batch = RecordBatch::try_new(
                 freq_schema.clone(),
@@ -1003,8 +1069,47 @@ where
             }
         }
         
-        // Note: For streaming mode, we don't calculate frequency_horns_min/max
-        // as that would require keeping all samples in memory
+        // Write "horns_min" frequencies
+        let min_n_samples = state.min_count as f64;
+        let min_total_values = (state.min_count * n_usize) as f64;
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = state.min_freq.get(&scale_value).unwrap_or(&0);
+            
+            let freq_batch = RecordBatch::try_new(
+                freq_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["horns_min"])),
+                    Arc::new(Int32Array::from(vec![scale_value])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / min_n_samples])),
+                    Arc::new(Int64Array::from(vec![*count])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / min_total_values])),
+                ],
+            );
+            if let Ok(batch) = freq_batch {
+                let _ = freq_writer.write(&batch);
+            }
+        }
+        
+        // Write "horns_max" frequencies
+        let max_n_samples = state.max_count as f64;
+        let max_total_values = (state.max_count * n_usize) as f64;
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = state.max_freq.get(&scale_value).unwrap_or(&0);
+            
+            let freq_batch = RecordBatch::try_new(
+                freq_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["horns_max"])),
+                    Arc::new(Int32Array::from(vec![scale_value])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / max_n_samples])),
+                    Arc::new(Int64Array::from(vec![*count])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / max_total_values])),
+                ],
+            );
+            if let Ok(batch) = freq_batch {
+                let _ = freq_writer.write(&batch);
+            }
+        }
         
         let _ = freq_writer.close();
     }
@@ -1187,9 +1292,11 @@ mod tests {
     fn test_dfs_parallel_with_file() {
         // Test with Parquet output
         let config = ParquetConfig {
-            file_path: "test_output".to_string(),
+            file_path: "test_output/".to_string(),
             batch_size: 100,
         };
+        
+        let _ = std::fs::create_dir("test_output");
         
         let results = dfs_parallel::<f64, i32>(
             3.0,  // mean
@@ -1216,10 +1323,12 @@ mod tests {
     fn test_dfs_parallel_streaming() {
         // Test streaming mode
         let config = StreamingConfig {
-            file_path: "test_streaming".to_string(),
+            file_path: "test_streaming/".to_string(),
             batch_size: 100,
             show_progress: false,
         };
+        
+        let _ = std::fs::create_dir("test_streaming");
         
         let result = dfs_parallel_streaming::<f64, i32>(
             3.0,  // mean
@@ -1233,7 +1342,7 @@ mod tests {
         );
         
         assert!(result.total_combinations > 0);
-        assert_eq!(result.file_path, "test_streaming");
+        assert_eq!(result.file_path, "test_streaming/");
         
         // Clean up test files
         let _ = std::fs::remove_file("test_streaming/results.parquet");
