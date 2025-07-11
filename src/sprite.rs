@@ -9,6 +9,8 @@ use std::iter::once;
 use statrs::statistics::Statistics;
 use rand::prelude::*;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 // Loop iteration limits, u32 is a good choice for these counts.
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
@@ -442,11 +444,12 @@ pub struct DistributionResult {
 /// 1. Generating a random set of starting data.
 /// 2. Iteratively adjusting the data to match the target mean.
 /// 3. Iteratively shifting values to match the target standard deviation.
+/// **[REVISED]** The main function to find a single distribution matching the given parameters.
+/// Now includes a mean-correction feedback loop.
 pub fn find_possible_distribution(
     params: &SpriteParameters,
     rng: &mut impl Rng,
 ) -> Result<DistributionResult, String> {
-    // 1. Generate random starting data.
     let r_n = params.n_obs - params.n_fixed as u32;
     if params.possible_values.is_empty() && r_n > 0 {
         return Err("No possible values to sample from for initialization.".to_string());
@@ -455,30 +458,21 @@ pub fn find_possible_distribution(
         .map(|_| *params.possible_values.choose(rng).unwrap())
         .collect();
 
-    // 2. Adjust mean of starting data.
-    let max_loops_mean = params.n_obs * params.possible_values.len() as u32;
-    adjust_mean(
-        vec.clone(),
-        &params.fixed_responses,
-        &params.possible_values,
-        params.mean,
-        params.m_prec,
-        max_loops_mean,
-        rng,
-    )?; // Propagate error if mean adjustment fails
+    // Initial mean adjustment
+    let max_loops_mean = params.n_obs as u32 * params.possible_values.len() as u32;
+    adjust_mean(&mut vec, &params.fixed_responses, &params.possible_values, params.mean, params.m_prec, max_loops_mean, rng)?;
 
-    // 3. Find distribution that also matches SD.
-    let max_loops_sd = (params.n_obs * (params.possible_values.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
-        
+    let max_loops_sd = (params.n_obs as u32 * (params.possible_values.len().pow(2) as u32))
+        .max(MAX_DELTA_LOOPS_LOWER).min(MAX_DELTA_LOOPS_UPPER);
     let granule_sd = (0.1f64.powi(params.sd_prec)) / 2.0 + DUST;
 
     for i in 1..=max_loops_sd {
         let mut full_vec = vec.clone();
         full_vec.extend_from_slice(&params.fixed_responses);
         
+        // Check for success
         if let Some(current_sd) = std_dev(&full_vec) {
             if (current_sd - params.sd).abs() <= granule_sd {
-                // Success!
                 return Ok(DistributionResult {
                     outcome: Outcome::Success,
                     values: full_vec.clone(),
@@ -489,15 +483,26 @@ pub fn find_possible_distribution(
             }
         }
 
-        // If not successful, shift values and try again.
+        // --- Main Loop Logic ---
+        // 1. Shift values to adjust SD
         shift_values(&mut vec, params, rng);
+
+        // 2. Check for and correct mean drift
+        let current_mean = mean(&[vec.as_slice(), params.fixed_responses.as_slice()].concat());
+        if !equalish(rust_round(current_mean, params.m_prec), params.mean) {
+            // The mean has drifted. Pull it back.
+            adjust_mean(&mut vec, &params.fixed_responses, &params.possible_values, params.mean, params.m_prec, 20, rng)
+                .unwrap_or_else(|_| {
+                    // If correction fails, it's not fatal, just log it and continue.
+                    // The next iteration might fix it.
+                });
+        }
     }
 
     // If loop finishes, we have failed to find a solution.
     let mut final_vec = vec;
     final_vec.extend_from_slice(&params.fixed_responses);
     let final_sd = std_dev(&final_vec).unwrap_or(0.0);
-
     Ok(DistributionResult {
         outcome: Outcome::Failure,
         values: final_vec.clone(),
@@ -506,6 +511,75 @@ pub fn find_possible_distribution(
         iterations: max_loops_sd,
     })
 }
+// pub fn find_possible_distribution(
+//     params: &SpriteParameters,
+//     rng: &mut impl Rng,
+// ) -> Result<DistributionResult, String> {
+//     // 1. Generate random starting data.
+//     let r_n = params.n_obs - params.n_fixed as u32;
+//     if params.possible_values.is_empty() && r_n > 0 {
+//         return Err("No possible values to sample from for initialization.".to_string());
+//     }
+//     let mut vec: Vec<f64> = (0..r_n)
+//         .map(|_| *params.possible_values.choose(rng).unwrap())
+//         .collect();
+//
+//     // 2. Adjust mean of starting data.
+//     let max_loops_mean = params.n_obs * params.possible_values.len() as u32;
+//     adjust_mean(
+//         vec.clone(),
+//         &params.fixed_responses,
+//         &params.possible_values,
+//         params.mean,
+//         params.m_prec,
+//         max_loops_mean,
+//         rng,
+//     )?; // Propagate error if mean adjustment fails
+//     dbg!(params.mean);
+//
+//     // 3. Find distribution that also matches SD.
+//     let max_loops_sd = (params.n_obs * (params.possible_values.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
+//
+//     let granule_sd = (0.1f64.powi(params.sd_prec)) / 2.0 + DUST;
+//
+//     for i in 1..=max_loops_sd {
+//         if i%10 == 0 {
+//             dbg!(params.mean);
+//         }
+//
+//         let mut full_vec = vec.clone();
+//         full_vec.extend_from_slice(&params.fixed_responses);
+//
+//         if let Some(current_sd) = std_dev(&full_vec) {
+//             if (current_sd - params.sd).abs() <= granule_sd {
+//                 // Success!
+//                 return Ok(DistributionResult {
+//                     outcome: Outcome::Success,
+//                     values: full_vec.clone(),
+//                     mean: mean(&full_vec),
+//                     sd: current_sd,
+//                     iterations: i,
+//                 });
+//             }
+//         }
+//
+//         // If not successful, shift values and try again.
+//         shift_values(&mut vec, params, rng);
+//     }
+//
+//     // If loop finishes, we have failed to find a solution.
+//     let mut final_vec = vec;
+//     final_vec.extend_from_slice(&params.fixed_responses);
+//     let final_sd = std_dev(&final_vec).unwrap_or(0.0);
+//
+//     Ok(DistributionResult {
+//         outcome: Outcome::Failure,
+//         values: final_vec.clone(),
+//         mean: mean(&final_vec),
+//         sd: final_sd,
+//         iterations: max_loops_sd,
+//     })
+// }
 
 
 
@@ -594,130 +668,191 @@ pub fn find_possible_distributions(
     results
 }
 
+// --- DEBUGGING GLOBAL ---
+// A simple counter to limit debug output to the first few swaps.
+static SWAP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Attempts to shift values within a vector to better match a target standard deviation,
 /// while keeping the mean approximately constant.
 ///
 /// This is a core part of the SPRITE algorithm's search process.
 #[allow(clippy::too_many_arguments)]
-pub fn shift_values(
-    vec: &mut Vec<f64>,
-    params: &SpriteParameters,
-    rng: &mut impl Rng,
-) -> bool { // Returns true if vec was modified, false otherwise.
-    
-    let vec_original = vec.clone();
+/// **[REVISED DEBUGGING VERSION]** Attempts to shift values to match a target standard deviation
+/// while strictly preserving the mean. Includes logging to detect mean drift.
+pub fn shift_values(vec: &mut Vec<f64>, params: &SpriteParameters, rng: &mut impl Rng) -> bool {
+    let sum_before: f64 = vec.iter().sum(); 
 
-    // Combine all possible values and sort them.
-    let mut poss_values = [params.possible_values.as_slice(), params.fixed_responses.as_slice()].concat();
-    poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    poss_values.dedup();
-
-    if poss_values.len() < 2 { return false; } // Cannot shift if there aren't at least two options.
-
-    // Determine direction of shift.
-    let inc_first: bool = rng.random();
     let mut full_vec = vec.clone();
     full_vec.extend_from_slice(&params.fixed_responses);
-    
-    let current_sd = match std_dev(&full_vec) {
-        Some(sd) => sd,
-        None => return false, // Not enough data to calculate SD.
-    };
+    let current_sd = match std_dev(&full_vec) { Some(sd) => sd, None => return false };
     let increase_sd = current_sd < params.sd;
 
-    let max_to_inc = poss_values[poss_values.len() - 2];
-    let min_to_dec = poss_values[1];
-
-    // --- First Bump ---
-    
-    // Find unique elements that are eligible for the first bump.
-    let mut seen = HashSet::new();
-
-    // TODO: resolve this hacky solution to the hash trait error
-    let unique_indices: Vec<usize> = (0..vec.len())
-        .filter(|&i| {
-            let scaled_val = (vec[i] * 1_000_000.0).round() as i64;
-            seen.insert(scaled_val)
-        })
-        .collect();
-    // let unique_indices: Vec<usize> = (0..vec.len()).filter(|&i| seen.insert(vec[i])).collect();
-
-    let mut index_can_bump1: Vec<usize> = unique_indices.into_iter().filter(|&i| {
-        if inc_first { vec[i] <= max_to_inc } else { vec[i] >= min_to_dec }
-    }).collect();
-
-    if index_can_bump1.is_empty() { return false; }
-
-    // Filter out "pointless" moves if possible.
-    let pointless_filter = |i: &usize| {
-        let val = vec[*i];
-        if increase_sd {
-            if inc_first { !equalish(val, vec.iter().copied().fold(f64::INFINITY, f64::min)) } 
-            else { !equalish(val, vec.iter().copied().fold(f64::NEG_INFINITY, f64::max)) }
-        } else if inc_first { 
-            !equalish(val, max_to_inc) 
-        } else { 
-            !equalish(val, min_to_dec) 
-        }
-        
-    };
-
-    let better_options: Vec<usize> = index_can_bump1.iter().copied().filter(pointless_filter).collect();
-    if !better_options.is_empty() {
-        index_can_bump1 = better_options;
-    }
-
-    // Select a value to change.
-    let &which_will_bump1 = index_can_bump1.choose(rng).unwrap();
-    let will_bump1 = vec[which_will_bump1];
-
-    // Find the new value from the list of non-restricted possibilities.
-    let new1 = match params.possible_values.iter().position(|&v| equalish(v, will_bump1)) {
-        Some(pos) => {
-            let new_pos = if inc_first { pos + 1 } else { pos - 1 };
-            params.possible_values.get(new_pos).copied()
-        },
-        None => None,
-    };
-    
-    let new1 = if let Some(val) = new1 { val } else { return false; }; // Could not find a value to shift to.
-    
-    vec[which_will_bump1] = new1;
-
-    // --- Check Mean and Decide on Second Bump ---
-
-    full_vec = vec.clone();
-    full_vec.extend_from_slice(&params.fixed_responses);
-    let new_mean = mean(&full_vec);
-    let mean_changed = !equalish(rust_round(new_mean, params.m_prec), params.mean);
-
-    // If mean is now inconsistent OR with some probability, perform a second, compensating bump.
-    if mean_changed || rng.random::<f64>() < 0.4 {
-        // ... (Second bump logic would go here)
-        // For now, if a second bump is needed but fails, we revert.
-        // The full logic for the second bump is complex and involves the gap resolution.
-        // A simplified approach is to revert if the mean changed.
-        if mean_changed {
-            // TODO: do proper second bump
-            *vec = vec_original;
-            return false;
+    let mut possible_swaps = Vec::new();
+    for i in 0..vec.len() {
+        for j in 0..vec.len() {
+            if i == j { continue; }
+            possible_swaps.push((i, j));
         }
     }
+    possible_swaps.shuffle(rng);
 
-    // --- Final Check ---
-    // The R code has a final check for mean drift.
-    full_vec = vec.clone();
-    full_vec.extend_from_slice(&params.fixed_responses);
-    let final_mean = mean(&full_vec);
-    if !equalish(rust_round(final_mean, params.m_prec), params.mean) {
-        *vec = vec_original; // Revert on mean drift.
-        return false;
+    for (i, j) in possible_swaps {
+        let val1 = vec[i];
+        let val2 = vec[j];
+
+        let val1_new_opt = params.possible_values.iter().find(|&&v| v > val1 && !equalish(v, val1));
+        let val2_new_opt = params.possible_values.iter().rev().find(|&&v| v < val2 && !equalish(v, val2));
+
+        if let (Some(&val1_new), Some(&val2_new)) = (val1_new_opt, val2_new_opt) {
+            if equalish(val1_new - val1, val2 - val2_new) {
+                let sd_before = std_dev(&[val1, val2]).unwrap_or(0.0);
+                let sd_after = std_dev(&[val1_new, val2_new]).unwrap_or(0.0);
+                
+                let is_pointless = if increase_sd { sd_after <= sd_before } else { sd_after >= sd_before };
+
+                if !is_pointless {
+                    vec[i] = val1_new;
+                    vec[j] = val2_new;
+                    
+                    // DEBUG: Log the first few successful swaps to check for drift.
+                    if SWAP_COUNT.load(Ordering::SeqCst) < 5 {
+                        SWAP_COUNT.fetch_add(1, Ordering::SeqCst);
+                        let sum_after: f64 = vec.iter().sum();
+                        println!("\n==== SHIFT_VALUES SWAP DEBUG (Swap #{}) ====", SWAP_COUNT.load(Ordering::SeqCst));
+                        println!("  - Sum Before: {}", sum_before);
+                        println!("  - Sum After:  {}", sum_after);
+                        println!("  - Swap: (vec[{}]: {} -> {}), (vec[{}]: {} -> {})", i, val1, val1_new, j, val2, val2_new);
+                        println!("  - Drift Detected: {}", !equalish(sum_before, sum_after));
+                        println!("==========================================\n");
+                    }
+                    return true;
+                }
+            }
+        }
     }
-
-    // If we've reached here, the vector was successfully modified.
-    true
+    false
 }
+
+
+// pub fn shift_values(
+//     vec: &mut Vec<f64>,
+//     params: &SpriteParameters,
+//     rng: &mut impl Rng,
+// ) -> bool { 
+//     // Returns true if vec was modified, false otherwise.
+//
+//     let vec_original = vec.clone();
+//
+//     // Combine all possible values and sort them.
+//     let mut poss_values = [params.possible_values.as_slice(), params.fixed_responses.as_slice()].concat();
+//     poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+//     poss_values.dedup();
+//
+//     if poss_values.len() < 2 { return false; } // Cannot shift if there aren't at least two options.
+//
+//     // Determine direction of shift.
+//     let inc_first: bool = rng.random();
+//     let mut full_vec = vec.clone();
+//     full_vec.extend_from_slice(&params.fixed_responses);
+//
+//     let current_sd = match std_dev(&full_vec) {
+//         Some(sd) => sd,
+//         None => return false, // Not enough data to calculate SD.
+//     };
+//     let increase_sd = current_sd < params.sd;
+//
+//     let max_to_inc = poss_values[poss_values.len() - 2];
+//     let min_to_dec = poss_values[1];
+//
+//     // --- First Bump ---
+//
+//     // Find unique elements that are eligible for the first bump.
+//     let mut seen = HashSet::new();
+//
+//     // TODO: resolve this hacky solution to the hash trait error
+//     let unique_indices: Vec<usize> = (0..vec.len())
+//         .filter(|&i| {
+//             let scaled_val = (vec[i] * 1_000_000.0).round() as i64;
+//             seen.insert(scaled_val)
+//         })
+//         .collect();
+//     // let unique_indices: Vec<usize> = (0..vec.len()).filter(|&i| seen.insert(vec[i])).collect();
+//
+//     let mut index_can_bump1: Vec<usize> = unique_indices.into_iter().filter(|&i| {
+//         if inc_first { vec[i] <= max_to_inc } else { vec[i] >= min_to_dec }
+//     }).collect();
+//
+//     if index_can_bump1.is_empty() { return false; }
+//
+//     // Filter out "pointless" moves if possible.
+//     let pointless_filter = |i: &usize| {
+//         let val = vec[*i];
+//         if increase_sd {
+//             if inc_first { !equalish(val, vec.iter().copied().fold(f64::INFINITY, f64::min)) } 
+//             else { !equalish(val, vec.iter().copied().fold(f64::NEG_INFINITY, f64::max)) }
+//         } else if inc_first { 
+//             !equalish(val, max_to_inc) 
+//         } else { 
+//             !equalish(val, min_to_dec) 
+//         }
+//
+//     };
+//
+//     let better_options: Vec<usize> = index_can_bump1.iter().copied().filter(pointless_filter).collect();
+//     if !better_options.is_empty() {
+//         index_can_bump1 = better_options;
+//     }
+//
+//     // Select a value to change.
+//     let &which_will_bump1 = index_can_bump1.choose(rng).unwrap();
+//     let will_bump1 = vec[which_will_bump1];
+//
+//     // Find the new value from the list of non-restricted possibilities.
+//     let new1 = match params.possible_values.iter().position(|&v| equalish(v, will_bump1)) {
+//         Some(pos) => {
+//             let new_pos = if inc_first { pos + 1 } else { pos - 1 };
+//             params.possible_values.get(new_pos).copied()
+//         },
+//         None => None,
+//     };
+//
+//     let new1 = if let Some(val) = new1 { val } else { return false; }; // Could not find a value to shift to.
+//
+//     vec[which_will_bump1] = new1;
+//
+//     // --- Check Mean and Decide on Second Bump ---
+//
+//     full_vec = vec.clone();
+//     full_vec.extend_from_slice(&params.fixed_responses);
+//     let new_mean = mean(&full_vec);
+//     let mean_changed = !equalish(rust_round(new_mean, params.m_prec), params.mean);
+//
+//     // If mean is now inconsistent OR with some probability, perform a second, compensating bump.
+//     if mean_changed || rng.random::<f64>() < 0.4 {
+//         // ... (Second bump logic would go here)
+//         // For now, if a second bump is needed but fails, we revert.
+//         // The full logic for the second bump is complex and involves the gap resolution.
+//         // A simplified approach is to revert if the mean changed.
+//         if mean_changed {
+//             // TODO: do proper second bump
+//             *vec = vec_original;
+//             return false;
+//         }
+//     }
+//
+//     // --- Final Check ---
+//     // The R code has a final check for mean drift.
+//     full_vec = vec.clone();
+//     full_vec.extend_from_slice(&params.fixed_responses);
+//     let final_mean = mean(&full_vec);
+//     if !equalish(rust_round(final_mean, params.m_prec), params.mean) {
+//         *vec = vec_original; // Revert on mean drift.
+//         return false;
+//     }
+//
+//     // If we've reached here, the vector was successfully modified.
+//     true
+// }
 
 /// Iteratively adjusts a vector's values to match a target mean.
 ///
@@ -725,7 +860,7 @@ pub fn shift_values(
 /// to a list of possible values until the rounded mean of the full dataset
 /// matches the target.
 pub fn adjust_mean(
-    mut vec: Vec<f64>,
+    vec: &mut Vec<f64>,
     fixed_vals: &[f64],
     poss_values: &[f64],
     target_mean: f64,
