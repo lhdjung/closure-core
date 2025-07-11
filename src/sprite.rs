@@ -9,8 +9,6 @@ use std::iter::once;
 use statrs::statistics::Statistics;
 use rand::prelude::*;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 // Loop iteration limits, u32 is a good choice for these counts.
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
@@ -444,8 +442,6 @@ pub struct DistributionResult {
 /// 1. Generating a random set of starting data.
 /// 2. Iteratively adjusting the data to match the target mean.
 /// 3. Iteratively shifting values to match the target standard deviation.
-/// **[REVISED]** The main function to find a single distribution matching the given parameters.
-/// Now includes a mean-correction feedback loop.
 pub fn find_possible_distribution(
     params: &SpriteParameters,
     rng: &mut impl Rng,
@@ -459,11 +455,10 @@ pub fn find_possible_distribution(
         .collect();
 
     // Initial mean adjustment
-    let max_loops_mean = params.n_obs as u32 * params.possible_values.len() as u32;
+    let max_loops_mean = params.n_obs * params.possible_values.len() as u32;
     adjust_mean(&mut vec, &params.fixed_responses, &params.possible_values, params.mean, params.m_prec, max_loops_mean, rng)?;
 
-    let max_loops_sd = (params.n_obs as u32 * (params.possible_values.len().pow(2) as u32))
-        .max(MAX_DELTA_LOOPS_LOWER).min(MAX_DELTA_LOOPS_UPPER);
+    let max_loops_sd = (params.n_obs * (params.possible_values.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
     let granule_sd = (0.1f64.powi(params.sd_prec)) / 2.0 + DUST;
 
     for i in 1..=max_loops_sd {
@@ -668,10 +663,6 @@ pub fn find_possible_distributions(
     results
 }
 
-// --- DEBUGGING GLOBAL ---
-// A simple counter to limit debug output to the first few swaps.
-static SWAP_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 /// Attempts to shift values within a vector to better match a target standard deviation,
 /// while keeping the mean approximately constant.
 ///
@@ -680,7 +671,6 @@ static SWAP_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// **[REVISED DEBUGGING VERSION]** Attempts to shift values to match a target standard deviation
 /// while strictly preserving the mean. Includes logging to detect mean drift.
 pub fn shift_values(vec: &mut Vec<f64>, params: &SpriteParameters, rng: &mut impl Rng) -> bool {
-    let sum_before: f64 = vec.iter().sum(); 
 
     let mut full_vec = vec.clone();
     full_vec.extend_from_slice(&params.fixed_responses);
@@ -713,18 +703,6 @@ pub fn shift_values(vec: &mut Vec<f64>, params: &SpriteParameters, rng: &mut imp
                 if !is_pointless {
                     vec[i] = val1_new;
                     vec[j] = val2_new;
-                    
-                    // DEBUG: Log the first few successful swaps to check for drift.
-                    if SWAP_COUNT.load(Ordering::SeqCst) < 5 {
-                        SWAP_COUNT.fetch_add(1, Ordering::SeqCst);
-                        let sum_after: f64 = vec.iter().sum();
-                        println!("\n==== SHIFT_VALUES SWAP DEBUG (Swap #{}) ====", SWAP_COUNT.load(Ordering::SeqCst));
-                        println!("  - Sum Before: {}", sum_before);
-                        println!("  - Sum After:  {}", sum_after);
-                        println!("  - Swap: (vec[{}]: {} -> {}), (vec[{}]: {} -> {})", i, val1, val1_new, j, val2, val2_new);
-                        println!("  - Drift Detected: {}", !equalish(sum_before, sum_after));
-                        println!("==========================================\n");
-                    }
                     return true;
                 }
             }
