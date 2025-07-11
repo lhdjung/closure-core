@@ -7,6 +7,7 @@ use core::f64;
 use std::collections::{HashMap, HashSet};
 use std::iter::once;
 use statrs::statistics::Statistics;
+use rand::prelude::*;
 
 
 // Loop iteration limits, u32 is a good choice for these counts.
@@ -407,9 +408,213 @@ fn abm_internal(total: f64, n_obs: f64, a: f64, b: f64) -> Vec<f64>{
     combined_vec
 }
 
+
+/// Attempts to shift values within a vector to better match a target standard deviation,
+/// while keeping the mean approximately constant.
+///
+/// This is a core part of the SPRITE algorithm's search process.
+#[allow(clippy::too_many_arguments)]
+pub fn shift_values(
+    vec: &mut Vec<f64>,
+    params: &SpriteParameters,
+    rng: &mut impl Rng,
+) -> bool { // Returns true if vec was modified, false otherwise.
+    
+    let vec_original = vec.clone();
+
+    // Combine all possible values and sort them.
+    let mut poss_values = [params.possible_values.as_slice(), params.fixed_responses.as_slice()].concat();
+    poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    poss_values.dedup();
+
+    if poss_values.len() < 2 { return false; } // Cannot shift if there aren't at least two options.
+
+    // Determine direction of shift.
+    let inc_first: bool = rng.random();
+    let mut full_vec = vec.clone();
+    full_vec.extend_from_slice(&params.fixed_responses);
+    
+    let current_sd = match std_dev(&full_vec) {
+        Some(sd) => sd,
+        None => return false, // Not enough data to calculate SD.
+    };
+    let increase_sd = current_sd < params.sd;
+
+    let max_to_inc = poss_values[poss_values.len() - 2];
+    let min_to_dec = poss_values[1];
+
+    // --- First Bump ---
+    
+    // Find unique elements that are eligible for the first bump.
+    let mut seen = HashSet::new();
+
+    // TODO: resolve this hacky solution to the hash trait error
+    let unique_indices: Vec<usize> = (0..vec.len())
+        .filter(|&i| {
+            let scaled_val = (vec[i] * 1_000_000.0).round() as i64;
+            seen.insert(scaled_val)
+        })
+        .collect();
+    // let unique_indices: Vec<usize> = (0..vec.len()).filter(|&i| seen.insert(vec[i])).collect();
+
+    let mut index_can_bump1: Vec<usize> = unique_indices.into_iter().filter(|&i| {
+        if inc_first { vec[i] <= max_to_inc } else { vec[i] >= min_to_dec }
+    }).collect();
+
+    if index_can_bump1.is_empty() { return false; }
+
+    // Filter out "pointless" moves if possible.
+    let pointless_filter = |i: &usize| {
+        let val = vec[*i];
+        if increase_sd {
+            if inc_first { !equalish(val, vec.iter().copied().fold(f64::INFINITY, f64::min)) } 
+            else { !equalish(val, vec.iter().copied().fold(f64::NEG_INFINITY, f64::max)) }
+        } else if inc_first { 
+            !equalish(val, max_to_inc) 
+        } else { 
+            !equalish(val, min_to_dec) 
+        }
+        
+    };
+
+    let better_options: Vec<usize> = index_can_bump1.iter().copied().filter(pointless_filter).collect();
+    if !better_options.is_empty() {
+        index_can_bump1 = better_options;
+    }
+
+    // Select a value to change.
+    let &which_will_bump1 = index_can_bump1.choose(rng).unwrap();
+    let will_bump1 = vec[which_will_bump1];
+
+    // Find the new value from the list of non-restricted possibilities.
+    let new1 = match params.possible_values.iter().position(|&v| equalish(v, will_bump1)) {
+        Some(pos) => {
+            let new_pos = if inc_first { pos + 1 } else { pos - 1 };
+            params.possible_values.get(new_pos).copied()
+        },
+        None => None,
+    };
+    
+    let new1 = if let Some(val) = new1 { val } else { return false; }; // Could not find a value to shift to.
+    
+    vec[which_will_bump1] = new1;
+
+    // --- Check Mean and Decide on Second Bump ---
+
+    full_vec = vec.clone();
+    full_vec.extend_from_slice(&params.fixed_responses);
+    let new_mean = mean(&full_vec);
+    let mean_changed = !equalish(rust_round(new_mean, params.m_prec), params.mean);
+
+    // If mean is now inconsistent OR with some probability, perform a second, compensating bump.
+    if mean_changed || rng.random::<f64>() < 0.4 {
+        todo!();
+        // ... (Second bump logic would go here)
+        // For now, if a second bump is needed but fails, we revert.
+        // The full logic for the second bump is complex and involves the gap resolution.
+        // A simplified approach is to revert if the mean changed.
+        if mean_changed {
+            *vec = vec_original;
+            return false;
+        }
+    }
+
+    // --- Final Check ---
+    // The R code has a final check for mean drift.
+    full_vec = vec.clone();
+    full_vec.extend_from_slice(&params.fixed_responses);
+    let final_mean = mean(&full_vec);
+    if !equalish(rust_round(final_mean, params.m_prec), params.mean) {
+        *vec = vec_original; // Revert on mean drift.
+        return false;
+    }
+
+    // If we've reached here, the vector was successfully modified.
+    true
+}
+
+
+
 fn equalish(x: f64, y: f64) -> bool {
   x <= (y + DUST) &&
     x >= (y - DUST)
+}
+
+/// Calculates the mean (average) of a slice of f64 values.
+/// Returns 0.0 if the slice is empty.
+pub fn mean(data: &[f64]) -> f64 {
+    let sum: f64 = data.iter().sum();
+    if data.is_empty() {
+        0.0
+    } else {
+        sum / (data.len() as f64)
+    }
+}
+
+/// Calculates the sample standard deviation of a slice of f64 values.
+/// Returns `None` if the slice has fewer than two elements, as SD is not defined.
+pub fn std_dev(data: &[f64]) -> Option<f64> {
+    let n = data.len();
+    if n < 2 {
+        return None;
+    }
+
+    let data_mean = mean(data);
+    let variance = data.iter().map(|value| {
+        let diff = value - data_mean;
+        diff * diff
+    }).sum::<f64>() / (n - 1) as f64; // Use n-1 for sample standard deviation
+
+    Some(variance.sqrt())
+}
+
+/// Calculates the difference between adjacent elements in a slice.
+/// `diff(c(a, b, c))` in R is equivalent to `c(b-a, c-b)`.
+pub fn diff(data: &[f64]) -> Vec<f64> {
+    if data.len() < 2 {
+        return Vec::new();
+    }
+    // `windows(2)` creates an iterator over overlapping sub-slices of length 2.
+    data.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// A struct to hold the results of a run-length encoding.
+#[derive(Debug, PartialEq)]
+pub struct Rle<T> {
+    pub values: Vec<T>,
+    pub lengths: Vec<usize>,
+}
+
+/// Performs run-length encoding on a slice.
+/// It identifies consecutive runs of identical values and returns a struct
+/// containing the values and the length of each run.
+pub fn rle<T: PartialEq + Copy>(data: &[T]) -> Option<Rle<T>> {
+    if data.is_empty() {
+        return None;
+    }
+
+    let mut values = Vec::new();
+    let mut lengths = Vec::new();
+
+    let mut current_val = data[0];
+    let mut current_len = 1;
+
+    for &item in &data[1..] {
+        if item == current_val {
+            current_len += 1;
+        } else {
+            values.push(current_val);
+            lengths.push(current_len);
+            current_val = item;
+            current_len = 1;
+        }
+    }
+
+    // Push the last run
+    values.push(current_val);
+    lengths.push(current_len);
+
+    Some(Rle { values, lengths })
 }
 
 fn generate_sequence(min_val: i32, max_val: i32, n_items: u32, i: u32) -> Vec<f64> {
