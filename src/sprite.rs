@@ -699,6 +699,7 @@ pub fn shift_values(
         // The full logic for the second bump is complex and involves the gap resolution.
         // A simplified approach is to revert if the mean changed.
         if mean_changed {
+            // TODO: do proper second bump
             *vec = vec_original;
             return false;
         }
