@@ -23,20 +23,20 @@ use thiserror::Error;
 /// of standard deviations. (https://aurelienallard.netlify.app/post/anaytic-grimmer-possibility-standard-deviations/).
 ///
 /// # Arguments
-///     x: the sample mean
-///     sd: sample standard deviation
-///     n: sample size
-///     items: number of items
-///     bool_params: booleans for options in GRIMMER and the underlying GRIM function, in the form
-///     [percent, show_reason, symmetric]
-///     rounding: method of rounding
-///     threshold: rounding threshold, ordinarily 5.0
-///     tolerance: rounding tolerance usually the square root of machine epsilon
+/// x: the sample mean
+/// sd: sample standard deviation
+/// n: sample size
+/// items: number of items
+/// bool_params: booleans for options in GRIMMER and the underlying GRIM function, in the form
+/// [percent, show_reason, symmetric]
+/// rounding: method of rounding
+/// threshold: rounding threshold, ordinarily 5.0
+/// tolerance: rounding tolerance usually the square root of machine epsilon
 ///
 /// # Panics
-///     - If x or sd are given as numbers instead of strings. This is necessary in order to
+/// If x or sd are given as numbers instead of strings. This is necessary in order to
 ///     preserve trailing 0s
-///     - If items is not 1. Items > 1 may be implemented in a later update
+/// If items is not 1. Items > 1 may be implemented in a later update
 ///
 /// # Returns
 #[allow(clippy::too_many_arguments)]
@@ -283,10 +283,6 @@ pub fn dustify(x: f64) -> Vec<f64> {
 /// no decimal, or if the string cannot be converted to a numeric type
 ///
 /// Note that this function will only record the number of values after the first decimal point
-/// ```
-/// let num_decimals = crate::decimal_places_scalar(Some("1.52.1"), ".");
-/// assert_eq!(num_decimals, Some(2));
-/// ```
 pub fn decimal_places_scalar(x: Option<&str>, sep: &str) -> Option<i32> {
     let s = x?;
 

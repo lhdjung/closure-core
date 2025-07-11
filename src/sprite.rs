@@ -889,14 +889,22 @@ pub mod tests {
     use rand::rngs::StdRng;
 
     #[test]
-    #[allow(unused_must_use)]
-    fn sprite_test() {
+    fn sprite_test_mean() {
         let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default(), false).unwrap();
         let results = find_possible_distributions(&sprite_parameters, 5, false, &mut StdRng::seed_from_u64(1234));
 
-        format!("{results:?}");
+        assert_eq!(results[0].mean, 2.2);
+        // assert_eq!(results[0].values, vec![1.0; 20])
+        // format!("{results:?}");
     }
 
+    #[test]
+    fn sprite_test_sd() {
+        let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default(), false).unwrap();
+        let results = find_possible_distributions(&sprite_parameters, 5, false, &mut StdRng::seed_from_u64(1234));
+
+        assert_eq!(results[0].sd, 1.32);
+    }
 }
 
 
