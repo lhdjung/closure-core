@@ -402,6 +402,87 @@ fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn s
     Ok(writer)
 }
 
+/// Create a simple Parquet writer for samples only
+/// Each sample is stored as a list in a single column
+fn create_samples_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
+{
+    // Schema with just a samples column containing lists of integers
+    let fields = vec![
+        Field::new("sample", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false),
+    ];
+    
+    let schema = Arc::new(Schema::new(fields));
+    
+    let file = File::create(file_path)?;
+    let props = WriterProperties::builder().build();
+    let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    
+    Ok(writer)
+}
+
+/// Create a simple Parquet writer for horns values only
+fn create_horns_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
+{
+    // Schema with just a horns column
+    let fields = vec![
+        Field::new("horns", DataType::Float64, false),
+    ];
+    
+    let schema = Arc::new(Schema::new(fields));
+    
+    let file = File::create(file_path)?;
+    let props = WriterProperties::builder().build();
+    let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    
+    Ok(writer)
+}
+
+/// Convert samples to a RecordBatch for the samples-only file
+fn samples_to_record_batch<U>(
+    samples: &[Vec<U>],
+) -> Result<RecordBatch, Box<dyn std::error::Error>>
+where
+    U: Integer + ToPrimitive + Copy,
+{
+    // Create a list builder for the samples
+    let mut list_builder = ListBuilder::new(Int32Builder::new());
+    
+    for sample in samples {
+        // Append all values for this sample
+        for &val in sample {
+            list_builder.values().append_value(U::to_i32(&val).unwrap());
+        }
+        // Mark the end of this list
+        list_builder.append(true);
+    }
+    
+    let samples_array = Arc::new(list_builder.finish());
+    
+    // Create schema
+    let fields = vec![
+        Field::new("sample", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false),
+    ];
+    let schema = Arc::new(Schema::new(fields));
+    
+    RecordBatch::try_new(schema, vec![samples_array]).map_err(|e| e.into())
+}
+
+/// Convert horns values to a RecordBatch
+fn horns_to_record_batch(
+    horns_values: &[f64],
+) -> Result<RecordBatch, Box<dyn std::error::Error>>
+{
+    let horns_array = Arc::new(Float64Array::from(horns_values.to_vec()));
+    
+    // Create schema
+    let fields = vec![
+        Field::new("horns", DataType::Float64, false),
+    ];
+    let schema = Arc::new(Schema::new(fields));
+    
+    RecordBatch::try_new(schema, vec![horns_array]).map_err(|e| e.into())
+}
+
 /// Create writers for statistics tables
 fn create_stats_writers(base_path: &str) -> Result<(
     ArrowWriter<File>, 
@@ -774,7 +855,7 @@ where
         prepare_computation(mean, sd, n, scale_min, scale_max, rounding_error_mean, rounding_error_sd);
 
     // Setup channels for streaming results
-    let (tx_samples, rx_samples) = channel::<Vec<(Vec<U>, f64, usize)>>();
+    let (tx_results, rx_results) = channel::<Vec<(Vec<U>, f64)>>();
     let (tx_stats, rx_stats) = channel::<(Vec<f64>, HashMap<i32, i64>)>();
     
     // Add a flag to track writer thread status
@@ -785,6 +866,10 @@ where
     // Counter for total combinations found
     let total_counter = Arc::new(AtomicUsize::new(0));
     let counter_for_thread = total_counter.clone();
+    
+    // Counter for tracking progress through initial combinations
+    let initial_combo_counter = Arc::new(AtomicUsize::new(0));
+    let initial_combo_total = count_initial_combinations(U::to_i32(&scale_min).unwrap(), U::to_i32(&scale_max).unwrap()) as usize;
     
     // Shared state for tracking min/max horns frequencies
     let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
@@ -799,25 +884,13 @@ where
     let freq_state_for_thread = freq_state.clone();
     
     // Handle file paths more carefully
-    // If the path ends with .parquet, treat it as a file prefix
-    // Otherwise, treat it as a directory
-    let (base_path, ensure_dir) = if config.file_path.ends_with(".parquet") {
-        // User provided a file name like "output.parquet"
-        // Strip the .parquet and use as prefix
-        let base = config.file_path.trim_end_matches(".parquet");
-        (format!("{}_", base), false)
-    } else if config.file_path.ends_with('/') {
-        // User provided a directory with trailing slash
-        (config.file_path.clone(), true)
+    let base_path = if config.file_path.ends_with('/') {
+        config.file_path.clone()
+    } else if std::path::Path::new(&config.file_path).is_dir() {
+        format!("{}/", config.file_path)
     } else {
-        // User provided either a directory without trailing slash or a file prefix
-        // Check if it looks like a directory (exists and is a directory)
-        if std::path::Path::new(&config.file_path).is_dir() {
-            (format!("{}/", config.file_path), false)
-        } else {
-            // Treat as a file prefix
-            (format!("{}_", config.file_path), false)
-        }
+        // If it doesn't exist or isn't a directory, treat as a prefix
+        format!("{}_", config.file_path)
     };
     
     // Create parent directory if needed
@@ -829,130 +902,125 @@ where
         }
     }
     
-    // If we determined this should be a directory, create it
-    if ensure_dir {
-        if let Err(e) = std::fs::create_dir_all(&base_path.trim_end_matches('/')) {
-            eprintln!("Warning: Could not create directory {}: {}", base_path, e);
-        }
-    }
-    
-    // Spawn dedicated writer thread
-    let file_path_clone = format!("{}results.parquet", base_path);
+    // Spawn dedicated writer thread for two separate files
+    let samples_path = format!("{}samples.parquet", base_path);
+    let horns_path = format!("{}horns.parquet", base_path);
     
     let writer_handle = thread::spawn(move || {
-        // Try to create the writer, with better error handling
-        let mut writer = match create_results_writer(&file_path_clone) {
+        // Create two separate writers
+        let mut samples_writer = match create_samples_writer(&samples_path) {
             Ok(w) => w,
             Err(e) => {
-                eprintln!("ERROR: Failed to create Parquet writer for file '{}': {}", file_path_clone, e);
-                eprintln!("Please check that:");
-                eprintln!("  1. The parent directory exists or can be created");
-                eprintln!("  2. You have write permissions for this location");
-                eprintln!("  3. There is sufficient disk space");
-                
-                // Mark writer as failed
+                eprintln!("ERROR: Failed to create samples writer for file '{}': {}", samples_path, e);
                 writer_failed_for_thread.store(1, Ordering::Relaxed);
-                
-                // Return 0 to indicate failure
                 return 0;
             }
         };
         
-        let mut buffer_results = ResultsTable {
-            id: Vec::with_capacity(config.batch_size * 2),
-            samples: Vec::with_capacity(config.batch_size * 2),
-            horns_values: Vec::with_capacity(config.batch_size * 2),
+        let mut horns_writer = match create_horns_writer(&horns_path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("ERROR: Failed to create horns writer for file '{}': {}", horns_path, e);
+                writer_failed_for_thread.store(1, Ordering::Relaxed);
+                return 0;
+            }
         };
+        
+        // Buffers for batching
+        let mut samples_buffer: Vec<Vec<U>> = Vec::with_capacity(config.batch_size * 2);
+        let mut horns_buffer: Vec<f64> = Vec::with_capacity(config.batch_size * 2);
         
         let mut total_written = 0;
         let mut last_progress_report = 0;
-        let mut current_id = 1usize;
-        let mut channel_closed = false;
         
         // Process incoming results
         loop {
-            match rx_samples.recv() {
+            match rx_results.recv() {
                 Ok(batch) => {
-                    for (sample, horns, _) in batch {
-                        buffer_results.id.push(current_id);
-                        buffer_results.samples.push(sample);
-                        buffer_results.horns_values.push(horns);
-                        current_id += 1;
+                    // Add to buffers, maintaining order
+                    for (sample, horns) in batch {
+                        samples_buffer.push(sample);
+                        horns_buffer.push(horns);
                     }
                     
-                    // Write when buffer reaches threshold
-                    if buffer_results.samples.len() >= config.batch_size {
-                        let batch_len = buffer_results.samples.len();
-                        match results_to_record_batch(
-                            &buffer_results,
-                            0,
-                            batch_len,
-                        ) {
+                    // Write when buffers reach threshold
+                    if samples_buffer.len() >= config.batch_size {
+                        // Write samples batch
+                        match samples_to_record_batch(&samples_buffer) {
                             Ok(record_batch) => {
-                                if let Err(e) = writer.write(&record_batch) {
-                                    eprintln!("ERROR: Failed to write batch to Parquet file: {}", e);
+                                if let Err(e) = samples_writer.write(&record_batch) {
+                                    eprintln!("ERROR: Failed to write samples batch: {}", e);
                                     return total_written;
-                                }
-                                total_written += batch_len;
-                                
-                                // Progress reporting
-                                if config.show_progress && total_written - last_progress_report >= 100_000 {
-                                    eprintln!("Progress: {} combinations written...", total_written);
-                                    last_progress_report = total_written;
                                 }
                             },
                             Err(e) => {
-                                eprintln!("ERROR: Failed to create record batch: {}", e);
+                                eprintln!("ERROR: Failed to create samples batch: {}", e);
                                 return total_written;
                             }
                         }
-                        buffer_results.id.clear();
-                        buffer_results.samples.clear();
-                        buffer_results.horns_values.clear();
+                        
+                        // Write horns batch
+                        match horns_to_record_batch(&horns_buffer) {
+                            Ok(record_batch) => {
+                                if let Err(e) = horns_writer.write(&record_batch) {
+                                    eprintln!("ERROR: Failed to write horns batch: {}", e);
+                                    return total_written;
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("ERROR: Failed to create horns batch: {}", e);
+                                return total_written;
+                            }
+                        }
+                        
+                        total_written += samples_buffer.len();
+                        
+                        // Progress reporting
+                        if config.show_progress && total_written - last_progress_report >= 100_000 {
+                            eprintln!("Progress: {} combinations written...", total_written);
+                            last_progress_report = total_written;
+                        }
+                        
+                        samples_buffer.clear();
+                        horns_buffer.clear();
                     }
                 },
                 Err(_) => {
-                    // Channel has been closed, this is normal when processing is complete
-                    channel_closed = true;
+                    // Channel closed, write remaining data
                     break;
                 }
             }
         }
         
         // Write any remaining results
-        if !buffer_results.samples.is_empty() {
-            let batch_len = buffer_results.samples.len();
-            match results_to_record_batch(
-                &buffer_results,
-                0,
-                batch_len,
-            ) {
-                Ok(record_batch) => {
-                    if let Err(e) = writer.write(&record_batch) {
-                        eprintln!("ERROR: Failed to write final batch to Parquet file: {}", e);
-                    } else {
-                        total_written += batch_len;
+        if !samples_buffer.is_empty() {
+            // Write final samples batch
+            if let Ok(record_batch) = samples_to_record_batch(&samples_buffer) {
+                if let Err(e) = samples_writer.write(&record_batch) {
+                    eprintln!("ERROR: Failed to write final samples batch: {}", e);
+                } else {
+                    // Write final horns batch
+                    if let Ok(record_batch) = horns_to_record_batch(&horns_buffer) {
+                        if let Err(e) = horns_writer.write(&record_batch) {
+                            eprintln!("ERROR: Failed to write final horns batch: {}", e);
+                        } else {
+                            total_written += samples_buffer.len();
+                        }
                     }
-                },
-                Err(e) => {
-                    eprintln!("ERROR: Failed to create final record batch: {}", e);
                 }
             }
         }
         
-        if let Err(e) = writer.close() {
-            eprintln!("ERROR: Failed to properly close Parquet file: {}", e);
+        // Close both writers
+        if let Err(e) = samples_writer.close() {
+            eprintln!("ERROR: Failed to close samples file: {}", e);
+        }
+        if let Err(e) = horns_writer.close() {
+            eprintln!("ERROR: Failed to close horns file: {}", e);
         }
         
         if config.show_progress {
-            if channel_closed && total_written > 0 {
-                eprintln!("Streaming complete: {} total combinations written", total_written);
-            } else if total_written == 0 {
-                eprintln!("WARNING: No combinations were written. This might indicate:");
-                eprintln!("  - The search parameters are too restrictive");
-                eprintln!("  - There was an error in file creation");
-                eprintln!("  - The computation found no valid combinations");
-            }
+            eprintln!("Streaming complete: {} total combinations written", total_written);
         }
         
         total_written
@@ -984,6 +1052,13 @@ where
                 return;
             }
             
+            // Track progress through initial combinations
+            let current_initial = initial_combo_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if config.show_progress && current_initial % 10 == 0 {
+                let percentage = (current_initial as f64 / initial_combo_total as f64) * 100.0;
+                eprintln!("Progress: {:.1}% of initial combinations explored...", percentage);
+            }
+            
             let branch_results = dfs_branch(
                 combo.clone(),
                 *running_sum,
@@ -1006,11 +1081,11 @@ where
                     return;
                 }
                 
-                let mut samples_with_horns = Vec::with_capacity(branch_results.len());
+                let mut results_with_horns = Vec::with_capacity(branch_results.len());
                 let mut horns_batch = Vec::with_capacity(branch_results.len());
                 
                 // Calculate horns for each sample and update frequency state
-                for (idx, sample) in branch_results.into_iter().enumerate() {
+                for sample in branch_results.into_iter() {
                     let mut freqs = vec![0.0; (scale_max_i32 - scale_min_i32 + 1) as usize];
                     let mut sample_freq: HashMap<i32, i64> = HashMap::new();
                     
@@ -1066,23 +1141,18 @@ where
                     }
                     
                     horns_batch.push(horns);
-                    samples_with_horns.push((sample, horns, idx));
+                    results_with_horns.push((sample, horns));
                 }
                 
                 // Update counter
-                counter_for_thread.fetch_add(samples_with_horns.len(), Ordering::Relaxed);
+                counter_for_thread.fetch_add(results_with_horns.len(), Ordering::Relaxed);
                 
                 // Send to writer and stats collector
-                // Check if the send fails (channel closed due to writer failure)
-                if tx_samples.send(samples_with_horns).is_err() {
+                if tx_results.send(results_with_horns).is_err() {
                     // Channel is closed, writer must have failed
-                    if config.show_progress {
-                        eprintln!("WARNING: Cannot send results to writer - channel closed");
-                    }
                     return;
                 }
                 
-                // Same for stats channel
                 if tx_stats.send((horns_batch, HashMap::new())).is_err() {
                     return;
                 }
@@ -1090,7 +1160,7 @@ where
         });
     
     // Close channels
-    drop(tx_samples);
+    drop(tx_results);
     drop(tx_stats);
     
     // Wait for threads to complete
@@ -1109,11 +1179,6 @@ where
     // Check if we successfully wrote any results
     if total_written == 0 {
         eprintln!("\nERROR: No results were written to disk.");
-        eprintln!("This could be due to:");
-        eprintln!("  1. File system errors (check the error messages above)");
-        eprintln!("  2. No valid combinations found with the given parameters");
-        eprintln!("  3. Parameters that are too restrictive");
-        
         return StreamingResult {
             total_combinations: 0,
             file_path: config.file_path,
@@ -1452,8 +1517,8 @@ mod tests {
     }
     
     #[test]
-    fn test_dfs_parallel_streaming() {
-        // Test streaming mode
+    fn test_dfs_parallel_streaming_separate_files() {
+        // Test streaming mode with separate files
         let config = StreamingConfig {
             file_path: "test_streaming/".to_string(),
             batch_size: 100,
@@ -1476,8 +1541,13 @@ mod tests {
         assert!(result.total_combinations > 0);
         assert_eq!(result.file_path, "test_streaming/");
         
+        // Check that both files were created
+        assert!(std::path::Path::new("test_streaming/samples.parquet").exists());
+        assert!(std::path::Path::new("test_streaming/horns.parquet").exists());
+        
         // Clean up test files
-        let _ = std::fs::remove_file("test_streaming/results.parquet");
+        let _ = std::fs::remove_file("test_streaming/samples.parquet");
+        let _ = std::fs::remove_file("test_streaming/horns.parquet");
         let _ = std::fs::remove_file("test_streaming/metrics_main.parquet");
         let _ = std::fs::remove_file("test_streaming/metrics_horns.parquet");
         let _ = std::fs::remove_file("test_streaming/frequency.parquet");
