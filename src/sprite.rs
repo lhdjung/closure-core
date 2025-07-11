@@ -409,6 +409,95 @@ fn abm_internal(total: f64, n_obs: f64, a: f64, b: f64) -> Vec<f64>{
 }
 
 
+/// Represents the outcome of the `find_possible_distribution` function.
+#[derive(Debug)]
+pub enum FindDistributionResult {
+    Success {
+        values: Vec<f64>,
+        mean: f64,
+        sd: f64,
+        iterations: u32,
+    },
+    Failure {
+        values: Vec<f64>,
+        mean: f64,
+        sd: f64,
+        iterations: u32,
+    },
+}
+
+
+/// The main function to find a distribution matching the given parameters.
+///
+/// It works by:
+/// 1. Generating a random set of starting data.
+/// 2. Iteratively adjusting the data to match the target mean.
+/// 3. Iteratively shifting values to match the target standard deviation.
+pub fn find_possible_distribution(
+    params: &SpriteParameters,
+    rng: &mut impl Rng,
+) -> Result<FindDistributionResult, String> {
+    // 1. Generate random starting data.
+    let r_n = params.n_obs - params.n_fixed as u32;
+    if params.possible_values.is_empty() && r_n > 0 {
+        return Err("No possible values to sample from for initialization.".to_string());
+    }
+    let mut vec: Vec<f64> = (0..r_n)
+        .map(|_| *params.possible_values.choose(rng).unwrap())
+        .collect();
+
+    // 2. Adjust mean of starting data.
+    let max_loops_mean = params.n_obs * params.possible_values.len() as u32;
+    adjust_mean(
+        vec.clone(),
+        &params.fixed_responses,
+        &params.possible_values,
+        params.mean,
+        params.m_prec,
+        max_loops_mean,
+        rng,
+    )?; // Propagate error if mean adjustment fails
+
+    // 3. Find distribution that also matches SD.
+    let max_loops_sd = (params.n_obs * (params.possible_values.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
+        
+    let granule_sd = (0.1f64.powi(params.sd_prec)) / 2.0 + DUST;
+
+    for i in 1..=max_loops_sd {
+        let mut full_vec = vec.clone();
+        full_vec.extend_from_slice(&params.fixed_responses);
+        
+        if let Some(current_sd) = std_dev(&full_vec) {
+            if (current_sd - params.sd).abs() <= granule_sd {
+                // Success!
+                return Ok(FindDistributionResult::Success {
+                    values: full_vec.clone(),
+                    mean: mean(&full_vec),
+                    sd: current_sd,
+                    iterations: i,
+                });
+            }
+        }
+
+        // If not successful, shift values and try again.
+        shift_values(&mut vec, params, rng);
+    }
+
+    // If loop finishes, we have failed to find a solution.
+    let mut final_vec = vec;
+    final_vec.extend_from_slice(&params.fixed_responses);
+    let final_sd = std_dev(&final_vec).unwrap_or(0.0);
+
+    Ok(FindDistributionResult::Failure {
+        values: final_vec.clone(),
+        mean: mean(&final_vec),
+        sd: final_sd,
+        iterations: max_loops_sd,
+    })
+}
+
+
+
 /// Attempts to shift values within a vector to better match a target standard deviation,
 /// while keeping the mean approximately constant.
 ///
