@@ -90,7 +90,7 @@ pub fn grimmer_scalar(
 
     if !pass_grim {
         if show_rec {
-            println!("{} is GRIM inconsistent", x)
+            println!("{x} is GRIM inconsistent")
         };
         return false;
     };
@@ -290,7 +290,7 @@ pub fn dustify(x: f64) -> Vec<f64> {
 pub fn decimal_places_scalar(x: Option<&str>, sep: &str) -> Option<i32> {
     let s = x?;
 
-    let pattern = format!("{}(\\d+)", sep);
+    let pattern = format!("{sep}(\\d+)");
     let re = Regex::new(&pattern).ok()?;
     let caps = re.captures(s)?;
 
@@ -709,7 +709,7 @@ pub fn grim_scalar(
 ) -> bool {
     let x: String = match x {
         GRIMInput::Str(s) => s,
-        GRIMInput::Num(n) => format!("{}", n),
+        GRIMInput::Num(n) => format!("{n}"),
     };
     // accounting for the possibility that we might receive either a String or numeric type,
     // turning the numeric possibility into a String, which we later turn into a &str to
