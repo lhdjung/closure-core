@@ -9,7 +9,6 @@ use std::iter::once;
 use statrs::statistics::Statistics;
 use rand::prelude::*;
 
-
 // Loop iteration limits, u32 is a good choice for these counts.
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
@@ -20,13 +19,9 @@ const MAX_DUP_LOOPS: u32 = 20;
 const DUST: f64 = 1e-12;
 
 // A very large number, represented as a 64-bit float.
-const HUGE: f64 = 1e15;
-// rSprite.maxDeltaLoopsLower <- 20000
-// rSprite.maxDeltaLoopsUpper <- 1000000
-// rSprite.maxDupLoops <- 20
-//
-// rSprite.dust <- 1e-12 #To account for rounding errors
-// rSprite.huge <- 1e15 #Should this not be Inf?
+// not actually used in our code or in the original rsprite2
+// const HUGE: f64 = 1e15;
+
 
 
 #[derive(Debug)]
@@ -410,22 +405,36 @@ fn abm_internal(total: f64, n_obs: f64, a: f64, b: f64) -> Vec<f64>{
 
 
 /// Represents the outcome of the `find_possible_distribution` function.
-#[derive(Debug)]
-pub enum FindDistributionResult {
-    Success {
-        values: Vec<f64>,
-        mean: f64,
-        sd: f64,
-        iterations: u32,
-    },
-    Failure {
-        values: Vec<f64>,
-        mean: f64,
-        sd: f64,
-        iterations: u32,
-    },
+// #[derive(Debug)]
+// pub enum FindDistributionResult {
+//     Success {
+//         values: Vec<f64>,
+//         mean: f64,
+//         sd: f64,
+//         iterations: u32,
+//     },
+//     Failure {
+//         values: Vec<f64>,
+//         mean: f64,
+//         sd: f64,
+//         iterations: u32,
+//     },
+// }
+#[derive(Debug, PartialEq, Clone)]
+pub enum Outcome {
+    Success,
+    Failure,
 }
 
+/// Holds the detailed results of a single distribution search.
+#[derive(Debug, Clone)]
+pub struct DistributionResult {
+    pub outcome: Outcome,
+    pub values: Vec<f64>,
+    pub mean: f64,
+    pub sd: f64,
+    pub iterations: u32,
+}
 
 /// The main function to find a distribution matching the given parameters.
 ///
@@ -436,7 +445,7 @@ pub enum FindDistributionResult {
 pub fn find_possible_distribution(
     params: &SpriteParameters,
     rng: &mut impl Rng,
-) -> Result<FindDistributionResult, String> {
+) -> Result<DistributionResult, String> {
     // 1. Generate random starting data.
     let r_n = params.n_obs - params.n_fixed as u32;
     if params.possible_values.is_empty() && r_n > 0 {
@@ -470,7 +479,8 @@ pub fn find_possible_distribution(
         if let Some(current_sd) = std_dev(&full_vec) {
             if (current_sd - params.sd).abs() <= granule_sd {
                 // Success!
-                return Ok(FindDistributionResult::Success {
+                return Ok(DistributionResult {
+                    outcome: Outcome::Success,
                     values: full_vec.clone(),
                     mean: mean(&full_vec),
                     sd: current_sd,
@@ -488,7 +498,8 @@ pub fn find_possible_distribution(
     final_vec.extend_from_slice(&params.fixed_responses);
     let final_sd = std_dev(&final_vec).unwrap_or(0.0);
 
-    Ok(FindDistributionResult::Failure {
+    Ok(DistributionResult {
+        outcome: Outcome::Failure,
         values: final_vec.clone(),
         mean: mean(&final_vec),
         sd: final_sd,
@@ -496,6 +507,92 @@ pub fn find_possible_distribution(
     })
 }
 
+
+
+/// Finds multiple possible distributions that match the given parameters.
+///
+/// This function repeatedly calls `find_possible_distribution` to gather a set of
+/// unique, successful distributions. It includes logic to stop if the search stalls
+/// or finds too many consecutive duplicates.
+pub fn find_possible_distributions(
+    params: &SpriteParameters,
+    n_distributions: usize,
+    return_failures: bool,
+    rng: &mut impl Rng,
+) -> Vec<DistributionResult> {
+    let mut results: Vec<DistributionResult> = Vec::new();
+    let mut unique_distributions = HashSet::<Vec<i64>>::new();
+    let mut consecutive_failures = 0;
+    let mut consecutive_duplicates = 0;
+
+    for _ in 0..(n_distributions * MAX_DUP_LOOPS as usize) {
+        if unique_distributions.len() >= n_distributions {
+            break;
+        }
+
+        // Stop if the search seems to be stalled.
+        if consecutive_failures >= 10 {
+            println!("Warning: No successful distribution found in the last 10 attempts. Exiting.");
+            break;
+        }
+        
+        // Calculate max duplicates allowed before stopping.
+        let n_found = unique_distributions.len() as f64;
+        let max_duplications = if n_found > 0.0 {
+            (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32
+        } else {
+            100 // Default if no successes yet
+        }.max(100);
+
+        if consecutive_duplicates > max_duplications {
+            println!("Warning: Found too many consecutive duplicate distributions. Exiting.");
+            break;
+        }
+
+        match find_possible_distribution(params, rng) {
+            Ok(mut res) => {
+                match res.outcome {
+                    Outcome::Success => {
+                        res.values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        // Convert to scaled integers for hashing
+                        let hashable_values: Vec<i64> = res.values.iter().map(|v| (v * 1_000_000.0).round() as i64).collect();
+
+                        if unique_distributions.insert(hashable_values) {
+                            // This is a new, unique distribution
+                            results.push(res);
+                            consecutive_failures = 0;
+                            consecutive_duplicates = 0;
+                        } else {
+                            // This is a duplicate
+                            consecutive_duplicates += 1;
+                        }
+                    }
+                    Outcome::Failure => {
+                        consecutive_failures += 1;
+                        if return_failures {
+                            results.push(res);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // This indicates a fatal error in the setup, like mean adjustment failing.
+                eprintln!("Fatal error during distribution search: {e}");
+                break;
+            }
+        }
+    }
+
+    if unique_distributions.len() < n_distributions {
+        println!("Only {} matching distributions could be found.", unique_distributions.len());
+    }
+    
+    if !return_failures {
+        results.retain(|r| r.outcome == Outcome::Success);
+    }
+
+    results
+}
 
 
 /// Attempts to shift values within a vector to better match a target standard deviation,
@@ -597,12 +694,12 @@ pub fn shift_values(
 
     // If mean is now inconsistent OR with some probability, perform a second, compensating bump.
     if mean_changed || rng.random::<f64>() < 0.4 {
-        todo!();
         // ... (Second bump logic would go here)
         // For now, if a second bump is needed but fails, we revert.
         // The full logic for the second bump is complex and involves the gap resolution.
         // A simplified approach is to revert if the mean changed.
         if mean_changed {
+            todo!();
             *vec = vec_original;
             return false;
         }
@@ -784,6 +881,31 @@ fn generate_sequence(min_val: i32, max_val: i32, n_items: u32, i: u32) -> Vec<f6
         .map(|val| val as f64 + increment)
         .collect()
 }
+
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use rand::rngs::StdRng;
+
+    #[test]
+    #[allow(unused_must_use)]
+    fn sprite_test() {
+        let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default(), false).unwrap();
+        let results = find_possible_distributions(&sprite_parameters, 5, false, &mut StdRng::seed_from_u64(1234));
+
+        format!("{results:?}");
+    }
+
+}
+
+
+// #' sprite_parameters <- set_parameters(mean = 2.2, sd = 1.3, n_obs = 20,
+// #'                                     min_val = 1, max_val = 5)
+// #'
+// #' find_possible_distributions(sprite_parameters, 5, seed = 1234)
+
+
 // fn scale_2dp(x: f64) -> i32 {
 //     (x * 100.0).round() as i32
 // }
