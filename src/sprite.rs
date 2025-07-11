@@ -533,6 +533,78 @@ pub fn shift_values(
     true
 }
 
+/// Iteratively adjusts a vector's values to match a target mean.
+///
+/// This function randomly selects elements and nudges them up or down according
+/// to a list of possible values until the rounded mean of the full dataset
+/// matches the target.
+pub fn adjust_mean(
+    mut vec: Vec<f64>,
+    fixed_vals: &[f64],
+    poss_values: &[f64],
+    target_mean: f64,
+    m_prec: i32,
+    max_iter: u32,
+    rng: &mut impl Rng,
+) -> Result<(), String> {
+    if poss_values.is_empty() {
+        return Err("Cannot adjust mean with no possible values.".to_string());
+    }
+
+    for _ in 0..max_iter {
+        let mut full_vec = vec.clone();
+        full_vec.extend_from_slice(fixed_vals);
+        let current_mean = mean(&full_vec);
+
+        if equalish(rust_round(current_mean, m_prec), target_mean) {
+            return Ok(()); // Success
+        }
+
+        let increase_mean = current_mean < target_mean;
+        
+        let min_poss_val = poss_values[0];
+        let max_poss_val = poss_values[poss_values.len() - 1];
+
+        // Find indices of elements in `vec` that can be bumped.
+        let possible_bump_indices: Vec<usize> = vec
+            .iter()
+            .enumerate()
+            .filter(|(_, &val)| {
+                if increase_mean { val < max_poss_val } else { val > min_poss_val }
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if possible_bump_indices.is_empty() {
+            // No more values can be adjusted in the desired direction.
+            // Break the loop and let the final error handle it.
+            break;
+        }
+
+        // Randomly select an index to change.
+        if let Some(&index_to_bump) = possible_bump_indices.choose(rng) {
+            let current_val = vec[index_to_bump];
+            
+            // Find the position of the current value in the `poss_values` list.
+            if let Some(pos) = poss_values.iter().position(|&p| equalish(p, current_val)) {
+                let new_pos = if increase_mean { pos + 1 } else { pos.saturating_sub(1) };
+                
+                // Get the new value and update the vector.
+                if let Some(&new_val) = poss_values.get(new_pos) {
+                    vec[index_to_bump] = new_val;
+                }
+            }
+        }
+    }
+
+    // If the loop finishes without success, return an error.
+    let err_msg = if !fixed_vals.is_empty() {
+        "Couldn't initialize data with correct mean. This *might* be because the restrictions cannot be satisfied."
+    } else {
+        "Couldn't initialize data with correct mean. This might indicate a coding error if the mean is in range."
+    };
+    Err(err_msg.to_string())
+}
 
 
 fn equalish(x: f64, y: f64) -> bool {
