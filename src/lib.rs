@@ -13,6 +13,7 @@
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
+use num::{Float, Integer, ToPrimitive, FromPrimitive, NumCast};
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
@@ -70,7 +71,6 @@ pub fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
     (range_size * (range_size + 1)) / 2
 }
 
-
 /// Generate all valid combinations
 /// 
 /// `dfs_parallel()` computes all valid combinations of integers that
@@ -101,7 +101,9 @@ where
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
 {
     // Convert integer `n` to float to enable multiplication with other floats
-    let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
+    let n_float = T::from(
+        U::to_i32(&n)
+            .unwrap()).unwrap();
     
     // Target sum calculations
     let target_sum = mean * n_float;
