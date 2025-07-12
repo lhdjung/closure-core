@@ -64,25 +64,25 @@ impl RestrictionsMinimum {
 
 #[derive(Debug, Clone)]
 pub enum RestrictionsOption {
-    Default(),
+    Default,
     Opt(Option<RestrictionsMinimum>),
-    Null(),
+    Null,
 }
 
 impl RestrictionsOption {
     pub fn is_default(&self) -> bool {
         match self {
-            RestrictionsOption::Default() => true,
+            RestrictionsOption::Default => true,
             RestrictionsOption::Opt(_) => false,
-            RestrictionsOption::Null() => false,
+            RestrictionsOption::Null => false,
         }
     }
 
     pub fn is_null(&self) -> bool {
         match self {
             RestrictionsOption::Opt(s) => s.is_none(),
-            RestrictionsOption::Default() => false,
-            RestrictionsOption::Null() => true,
+            RestrictionsOption::Default => false,
+            RestrictionsOption::Null => true,
         }
     }
 
@@ -91,7 +91,7 @@ impl RestrictionsOption {
     }
 
     pub fn new_default() -> Self {
-        RestrictionsOption::Default()
+        RestrictionsOption::Default
     }
 
     pub fn construct_from_default(self, min: i32, max: i32) -> Self {

@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::iter::once;
 use statrs::statistics::Statistics;
 use rand::prelude::*;
+use thiserror::Error;
 
 // Loop iteration limits, u32 is a good choice for these counts.
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
@@ -22,12 +23,13 @@ const DUST: f64 = 1e-12;
 // not actually used in our code or in the original rsprite2
 // const HUGE: f64 = 1e15;
 
-
-
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ParameterError {
+    #[error("{0}")]
     InputValidation(String),
+    #[error("{0}")]
     Consistency(String),
+    #[error("{0}")]
     Conflict(String),
 }
 
@@ -98,9 +100,9 @@ pub fn set_parameters(
 
     let restrictions_exact = restrictions_exact.unwrap_or_default();
     let restrictions_minimum = match restrictions_minimum {
-        RestrictionsOption::Default() => Some(RestrictionsMinimum::from_range(min_val * 100, max_val * 100).extract()),
+        RestrictionsOption::Default => Some(RestrictionsMinimum::from_range(min_val * 100, max_val * 100).extract()),
         RestrictionsOption::Opt(opt_map) => opt_map.map(|rm| rm.extract()),
-        RestrictionsOption::Null() => None,
+        RestrictionsOption::Null => None,
     };
 
     if let Some(ref min_map) = restrictions_minimum {
@@ -156,180 +158,6 @@ pub fn set_parameters(
         n_fixed,
     })
 }
-
-
-
-// #[allow(clippy::too_many_arguments)]
-// #[allow(unused_variables)]
-// pub fn set_parameters(
-//     mean: f64, 
-//     sd: f64, 
-//     n_obs: u32, 
-//     min_val: i32, 
-//     max_val: i32, 
-//     m_prec: Option<i32>, 
-//     sd_prec: Option<i32>, 
-//     n_items: u32, 
-//     restrictions_exact: Option<HashMap<i32, usize>>,
-//     restrictions_minimum: RestrictionsOption,
-//     dont_test: bool) {
-//
-//     let m_prec: i32 = m_prec.unwrap_or_else(|| 
-//         max(decimal_places_scalar(Some(&mean.to_string()), ".").unwrap() - 1, 0)
-//     );
-//     let sd_prec: i32 = sd_prec.unwrap_or_else(|| 
-//         max(decimal_places_scalar(Some(&sd.to_string()), ".").unwrap() - 1, 0)
-//     );
-//
-//     assert!(min_val < max_val, "min_val was not less than max_val");
-//
-//
-//     if !dont_test 
-//     && n_obs as f64 * n_items as f64 <= 10.0f64.powi(m_prec) 
-//     && !grim_rust(
-//         vec![&mean.to_string()], 
-//         vec![n_obs], 
-//         vec![false, false, false], 
-//         vec![n_items], 
-//         "up_or_down", 
-//         5.0, 
-//         f64::EPSILON.powf(0.5)
-//     )[0] {
-//         panic!("The mean is not consistent with this number of observations (fails GRIM test). 
-// You can use grim_scalar() to identify the closest possible mean and try again")
-//     } else if !dont_test
-//     && !grimmer_scalar(&mean.to_string(), &sd.to_string(), n_obs, n_items, vec![false, false, false], "up_or_down", 5.0, f64::EPSILON.powf(0.5)) {
-//         panic!("The standard deviation is not consistent with this mean and number of observations (fails GRIMMER test)")
-//     };
-//
-//     let sd_limits: (f64, f64) = sd_limits(n_obs, mean, min_val, max_val, Some(sd_prec), n_items);
-//
-//     if !(sd > sd_limits.0 && sd <= sd_limits.1) {
-//         panic!("The standard deviation is outside the possible range, givent he other parameters. 
-// It should be between {} and {}.", sd_limits.0, sd_limits.1)
-//     }
-//
-//     if !(mean >= min_val as f64 && mean <= max_val as f64) {
-//         panic!("The mean is outside the possible range, which is impossible - please check inputs.")
-//     };
-//
-//     // if it's default, construct from range. 
-//     // if it's a Some(T), extract T
-//     // if it's a None, do nothing?
-//
-//
-//     let restrictions_minimum = match restrictions_minimum {
-//         RestrictionsOption::Default() => Some(restrictions_minimum.construct_from_default(min_val, max_val).extract()),
-//         RestrictionsOption::Opt(t) => t,
-//         RestrictionsOption::Null() => None,
-//     };
-//
-//
-//
-//
-//
-//
-//
-//
-//     // // awkward, replicating an R pattern. Once we have a good idea what 
-//     // // restrictions_minimum is used for, translate to more idiomatic form
-//     // let new_restrictions_min: Option<(i32, i32)> = if let Some(res_min) = restrictions_minimum.clone() {
-//     //     if res_min == "range".to_string() {
-//     //         Some((1, 1))
-//     //     } else {
-//     //         None
-//     //     }
-//     // } else {
-//     //     None
-//     // };
-//
-//
-//     let mut poss_values = vec![max_val as f64];
-//
-//     for i in 0..n_items {
-//         generate_sequence(min_val, max_val, n_items, i).append(&mut poss_values)
-//     }
-//
-//     poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-//
-//     let poss_values_chr = poss_values.iter().map(
-//         |&x| rust_round(x, 2)
-//     ).collect::<Vec<f64>>();
-//
-//
-//
-//     let exact_keys: HashSet<i32> = restrictions_exact.clone().unwrap().keys().copied().collect();
-//     let min_keys: HashSet<i32> = restrictions_minimum.clone().unwrap().keys().copied().collect();
-//
-//     if restrictions_minimum.is_some() && restrictions_exact.is_some() {
-//         // check to see if their keys overlap
-//
-//         let conflicts: Vec<i32> = exact_keys.intersection(&min_keys).copied().collect();
-//         if !conflicts.is_empty() {
-//             panic!("Conflict: values with both exact and minimum restrictions: {:?}", conflicts);
-//         }
-//     }
-//
-//     if restrictions_minimum.is_some() {
-//
-//         let allowed_values: HashSet<i32> = poss_values_chr
-//             .iter()
-//             .map(|f| (f * 100.0).round() as i32) 
-//             // emulate rounding to 2 decimal places
-//             .collect();
-//
-//         let min_keys: Vec<f64> = restrictions_minimum.clone().unwrap().keys().map(|&k| k as f64).collect();
-//
-//         let invalid_keys: Vec<i32> = min_keys.iter().map(|k| (k * 100.0).round() as i32 / 100).filter(|k| !allowed_values.contains(k)).collect();
-//
-//
-//         if !invalid_keys.is_empty() {
-//             panic!("Invalid keys in restrictions_minimum: {:?}", invalid_keys);
-//         }
-//
-//         // ensure restrictions are ordered
-//         // take the values of poss_values_chr which also exist as the keys of restrictions_minimum
-//
-//         let restrictions_minimum = filter_restrictions_exact(&restrictions_minimum.unwrap().extract(), &poss_values_chr);
-//
-//         let fixed_responses = fixed_responses_from_minimum(&restrictions_minimum, poss_values_chr, poss_values);
-//     }
-//
-//     if restrictions_exact.is_some() {
-//         // get keys, round them to second place, if any is NOT in poss_values_chr, then ...
-//         let j = restrictions_exact.unwrap().keys().map();
-//         // ... translating line 154, restrictions_exact <- restrictions_exact[as.character(poss_values_chr[poss_values_chr %in% names(restrictions_exact)])]
-//
-//     }
-//     // do the same for restrictions_exact
-//
-//
-//
-//     // if new_restrictions_min.is_some() && restrictions_exact.is_some() {
-//     //
-//     // }
-//
-//
-//
-//
-// //restrictions_minimum <- restrictions_minimum[as.character(poss_values_chr[poss_values_chr %in% names(restrictions_minimum)])]
-//
-//
-//     // double check implementation here
-//
-//
-//     //poss_values <- max_val
-//     //  for (i in seq_len(n_items)) {
-//     //    poss_values <- c(poss_values, min_val:(max_val-1) + (1 / n_items) * (i - 1))
-//     //  }
-//     //  poss_values <- sort(poss_values)
-//     //
-//     //  poss_values_chr <- round(poss_values, 2)
-//     //
-//     //  fixed_responses <- numeric()
-//     //  fixed_values <- NA
-//
-// }
 
 
 pub fn sd_limits(n_obs: u32, mean: f64, min_val: i32, max_val: i32, sd_prec: Option<i32>, n_items: u32) -> (f64, f64) {
@@ -404,22 +232,6 @@ fn abm_internal(total: f64, n_obs: f64, a: f64, b: f64) -> Vec<f64>{
 }
 
 
-/// Represents the outcome of the `find_possible_distribution` function.
-// #[derive(Debug)]
-// pub enum FindDistributionResult {
-//     Success {
-//         values: Vec<f64>,
-//         mean: f64,
-//         sd: f64,
-//         iterations: u32,
-//     },
-//     Failure {
-//         values: Vec<f64>,
-//         mean: f64,
-//         sd: f64,
-//         iterations: u32,
-//     },
-// }
 #[derive(Debug, PartialEq, Clone)]
 pub enum Outcome {
     Success,
@@ -436,6 +248,81 @@ pub struct DistributionResult {
     pub iterations: u32,
 }
 
+/// Iteratively adjusts a vector's values to match a target mean
+///
+/// This function randomly selects elements and nudges them up or down according
+/// to a list of possible values until the rounded mean of the full dataset
+/// matches the target
+pub fn adjust_mean(
+    vec: &mut [f64],
+    fixed_vals: &[f64],
+    poss_values: &[f64],
+    target_mean: f64,
+    m_prec: i32,
+    max_iter: u32,
+    rng: &mut impl Rng,
+) -> Result<(), String> {
+    if poss_values.is_empty() {
+        return Err("Cannot adjust mean with no possible values.".to_string());
+    }
+
+    let sum_fixed: f64 = fixed_vals.iter().sum();
+    let len_fixed = fixed_vals.len();
+    let total_len = vec.len() + len_fixed;
+
+    for _ in 0..max_iter {
+        let sum_vec: f64 = vec.iter().sum();
+        let current_mean = (sum_vec + sum_fixed) / total_len as f64;
+
+        if equalish(rust_round(current_mean, m_prec), target_mean) {
+            return Ok(()); // Success
+        }
+
+        let increase_mean = current_mean < target_mean;
+        let min_poss_val = poss_values[0];
+        let max_poss_val = poss_values[poss_values.len() - 1];
+
+        // A reasonable number of attempts to find a valid value to bump
+        let max_attempts = vec.len().max(1) * 4;
+        let mut changed = false;
+
+        for _ in 0..max_attempts {
+            let index_to_try = rng.random_range(0..vec.len());
+            let current_val = vec[index_to_try];
+
+            let is_valid_to_bump = if increase_mean {
+                current_val < max_poss_val
+            } else {
+                current_val > min_poss_val
+            };
+
+            if is_valid_to_bump {
+                if let Some(pos) = poss_values.iter().position(|&p| equalish(p, current_val)) {
+                    let new_pos = if increase_mean { pos + 1 } else { pos.saturating_sub(1) };
+                    if let Some(&new_val) = poss_values.get(new_pos) {
+                        vec[index_to_try] = new_val;
+                        changed = true;
+                        break; // Found a valid change, break from attempt loop
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            // If after many attempts we couldn't find a value to change, we're probably stuck
+            break;
+        }
+    }
+
+    let err_msg = if !fixed_vals.is_empty() {
+        "Couldn't initialize data with correct mean. This *might* be because the restrictions cannot be satisfied."
+    } else {
+        "Couldn't initialize data with correct mean. This might indicate a coding error if the mean is in range."
+    };
+    Err(err_msg.to_string())
+}
+
+
 /// The main function to find a distribution matching the given parameters.
 ///
 /// It works by:
@@ -446,6 +333,7 @@ pub fn find_possible_distribution(
     params: &SpriteParameters,
     rng: &mut impl Rng,
 ) -> Result<DistributionResult, String> {
+
     let r_n = params.n_obs - params.n_fixed as u32;
     if params.possible_values.is_empty() && r_n > 0 {
         return Err("No possible values to sample from for initialization.".to_string());
@@ -461,21 +349,35 @@ pub fn find_possible_distribution(
     let max_loops_sd = (params.n_obs * (params.possible_values.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
     let granule_sd = (0.1f64.powi(params.sd_prec)) / 2.0 + DUST;
 
+    let sum_fixed: f64 = params.fixed_responses.iter().sum();
+    let len_fixed: usize = params.fixed_responses.len();
+
     for i in 1..=max_loops_sd {
-        let mut full_vec = vec.clone();
-        full_vec.extend_from_slice(&params.fixed_responses);
+
+        let sum_vec: f64 = vec.iter().sum();
+        let len_vec: usize = vec.len();
+        let total_len = len_vec + len_fixed;
+        let total_sum = sum_vec + sum_fixed;
+        let combined_mean = total_sum / total_len as f64;
+
+       // Check for success
+        let sum_sq_diff_vec: f64 = vec.iter().map(|&v| (v - combined_mean).powi(2)).sum();
+        let sum_sq_diff_fixed: f64 = params.fixed_responses.iter().map(|&v| (v - combined_mean).powi(2)).sum();
         
-        // Check for success
-        if let Some(current_sd) = std_dev(&full_vec) {
-            if (current_sd - params.sd).abs() <= granule_sd {
-                return Ok(DistributionResult {
-                    outcome: Outcome::Success,
-                    values: full_vec.clone(),
-                    mean: mean(&full_vec),
-                    sd: current_sd,
-                    iterations: i,
-                });
-            }
+        let variance = (sum_sq_diff_vec + sum_sq_diff_fixed) / (total_len - 1) as f64;
+        let current_sd = variance.sqrt();
+        
+        if (current_sd - params.sd).abs() <= granule_sd {
+            // Only now, on success, do we allocate the final vector.
+            let mut full_vec = vec.clone();
+            full_vec.extend_from_slice(&params.fixed_responses);
+            return Ok(DistributionResult {
+                outcome: Outcome::Success,
+                values: full_vec,
+                mean: combined_mean,
+                sd: current_sd,
+                iterations: i,
+            });
         }
 
         // --- Main Loop Logic ---
@@ -486,11 +388,15 @@ pub fn find_possible_distribution(
         let current_mean = mean(&[vec.as_slice(), params.fixed_responses.as_slice()].concat());
         if !equalish(rust_round(current_mean, params.m_prec), params.mean) {
             // The mean has drifted. Pull it back.
-            adjust_mean(&mut vec, &params.fixed_responses, &params.possible_values, params.mean, params.m_prec, 20, rng)
-                .unwrap_or_else(|_| {
-                    // If correction fails, it's not fatal, just log it and continue.
-                    // The next iteration might fix it.
-                });
+            adjust_mean(
+                &mut vec, 
+                &params.fixed_responses, 
+                &params.possible_values, 
+                params.mean, 
+                params.m_prec, 
+                20, 
+                rng
+            ).unwrap_or(());
         }
     }
 
@@ -498,85 +404,15 @@ pub fn find_possible_distribution(
     let mut final_vec = vec;
     final_vec.extend_from_slice(&params.fixed_responses);
     let final_sd = std_dev(&final_vec).unwrap_or(0.0);
+    let vec_mean = mean(&final_vec);
     Ok(DistributionResult {
         outcome: Outcome::Failure,
-        values: final_vec.clone(),
-        mean: mean(&final_vec),
+        values: final_vec,
+        mean: vec_mean,
         sd: final_sd,
         iterations: max_loops_sd,
     })
 }
-// pub fn find_possible_distribution(
-//     params: &SpriteParameters,
-//     rng: &mut impl Rng,
-// ) -> Result<DistributionResult, String> {
-//     // 1. Generate random starting data.
-//     let r_n = params.n_obs - params.n_fixed as u32;
-//     if params.possible_values.is_empty() && r_n > 0 {
-//         return Err("No possible values to sample from for initialization.".to_string());
-//     }
-//     let mut vec: Vec<f64> = (0..r_n)
-//         .map(|_| *params.possible_values.choose(rng).unwrap())
-//         .collect();
-//
-//     // 2. Adjust mean of starting data.
-//     let max_loops_mean = params.n_obs * params.possible_values.len() as u32;
-//     adjust_mean(
-//         vec.clone(),
-//         &params.fixed_responses,
-//         &params.possible_values,
-//         params.mean,
-//         params.m_prec,
-//         max_loops_mean,
-//         rng,
-//     )?; // Propagate error if mean adjustment fails
-//     dbg!(params.mean);
-//
-//     // 3. Find distribution that also matches SD.
-//     let max_loops_sd = (params.n_obs * (params.possible_values.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
-//
-//     let granule_sd = (0.1f64.powi(params.sd_prec)) / 2.0 + DUST;
-//
-//     for i in 1..=max_loops_sd {
-//         if i%10 == 0 {
-//             dbg!(params.mean);
-//         }
-//
-//         let mut full_vec = vec.clone();
-//         full_vec.extend_from_slice(&params.fixed_responses);
-//
-//         if let Some(current_sd) = std_dev(&full_vec) {
-//             if (current_sd - params.sd).abs() <= granule_sd {
-//                 // Success!
-//                 return Ok(DistributionResult {
-//                     outcome: Outcome::Success,
-//                     values: full_vec.clone(),
-//                     mean: mean(&full_vec),
-//                     sd: current_sd,
-//                     iterations: i,
-//                 });
-//             }
-//         }
-//
-//         // If not successful, shift values and try again.
-//         shift_values(&mut vec, params, rng);
-//     }
-//
-//     // If loop finishes, we have failed to find a solution.
-//     let mut final_vec = vec;
-//     final_vec.extend_from_slice(&params.fixed_responses);
-//     let final_sd = std_dev(&final_vec).unwrap_or(0.0);
-//
-//     Ok(DistributionResult {
-//         outcome: Outcome::Failure,
-//         values: final_vec.clone(),
-//         mean: mean(&final_vec),
-//         sd: final_sd,
-//         iterations: max_loops_sd,
-//     })
-// }
-
-
 
 /// Finds multiple possible distributions that match the given parameters.
 ///
@@ -587,79 +423,38 @@ pub fn find_possible_distributions(
     params: &SpriteParameters,
     n_distributions: usize,
     return_failures: bool,
-    rng: &mut impl Rng,
+    rng: &mut impl Rng, // Require a thread-safe RNG
 ) -> Vec<DistributionResult> {
     let mut results: Vec<DistributionResult> = Vec::new();
     let mut unique_distributions = HashSet::<Vec<i64>>::new();
     let mut consecutive_failures = 0;
     let mut consecutive_duplicates = 0;
-
     for _ in 0..(n_distributions * MAX_DUP_LOOPS as usize) {
-        if unique_distributions.len() >= n_distributions {
-            break;
-        }
-
-        // Stop if the search seems to be stalled.
-        if consecutive_failures >= 10 {
-            println!("Warning: No successful distribution found in the last 10 attempts. Exiting.");
-            break;
-        }
-        
-        // Calculate max duplicates allowed before stopping.
+        if unique_distributions.len() >= n_distributions { break; }
+        if consecutive_failures >= 10 { println!("Warning: No successful distribution found in the last 10 attempts. Exiting."); break; }
         let n_found = unique_distributions.len() as f64;
-        let max_duplications = if n_found > 0.0 {
-            (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32
-        } else {
-            100 // Default if no successes yet
-        }.max(100);
-
-        if consecutive_duplicates > max_duplications {
-            println!("Warning: Found too many consecutive duplicate distributions. Exiting.");
-            break;
-        }
-
-        match find_possible_distribution(params, rng) {
-            Ok(mut res) => {
-                match res.outcome {
-                    Outcome::Success => {
-                        res.values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        // Convert to scaled integers for hashing
-                        let hashable_values: Vec<i64> = res.values.iter().map(|v| (v * 1_000_000.0).round() as i64).collect();
-
-                        if unique_distributions.insert(hashable_values) {
-                            // This is a new, unique distribution
-                            results.push(res);
-                            consecutive_failures = 0;
-                            consecutive_duplicates = 0;
-                        } else {
-                            // This is a duplicate
-                            consecutive_duplicates += 1;
-                        }
-                    }
-                    Outcome::Failure => {
-                        consecutive_failures += 1;
-                        if return_failures {
-                            results.push(res);
-                        }
-                    }
+        let max_duplications = if n_found > 0.0 { (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32 } else { 100 }.max(100);
+        if consecutive_duplicates > max_duplications { println!("Warning: Found too many consecutive duplicate distributions. Exiting."); break; }
+        if let Ok(mut res) = find_possible_distribution(params, rng) {
+            match res.outcome {
+                Outcome::Success => {
+                    res.values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let hashable_values: Vec<i64> = res.values.iter().map(|v| (v * 1_000_000.0).round() as i64).collect();
+                    if unique_distributions.insert(hashable_values) {
+                        results.push(res);
+                        consecutive_failures = 0;
+                        consecutive_duplicates = 0;
+                    } else { consecutive_duplicates += 1; }
+                }
+                Outcome::Failure => {
+                    consecutive_failures += 1;
+                    if return_failures { results.push(res); }
                 }
             }
-            Err(e) => {
-                // This indicates a fatal error in the setup, like mean adjustment failing.
-                eprintln!("Fatal error during distribution search: {e}");
-                break;
-            }
         }
     }
-
-    if unique_distributions.len() < n_distributions {
-        println!("Only {} matching distributions could be found.", unique_distributions.len());
-    }
-    
-    if !return_failures {
-        results.retain(|r| r.outcome == Outcome::Success);
-    }
-
+    if unique_distributions.len() < n_distributions { println!("Only {} matching distributions could be found.", unique_distributions.len()); }
+    if !return_failures { results.retain(|r| r.outcome == Outcome::Success); }
     results
 }
 
@@ -667,26 +462,29 @@ pub fn find_possible_distributions(
 /// while keeping the mean approximately constant.
 ///
 /// This is a core part of the SPRITE algorithm's search process.
-#[allow(clippy::too_many_arguments)]
-/// **[REVISED DEBUGGING VERSION]** Attempts to shift values to match a target standard deviation
-/// while strictly preserving the mean. Includes logging to detect mean drift.
-pub fn shift_values(vec: &mut Vec<f64>, params: &SpriteParameters, rng: &mut impl Rng) -> bool {
-
-    let mut full_vec = vec.clone();
-    full_vec.extend_from_slice(&params.fixed_responses);
-    let current_sd = match std_dev(&full_vec) { Some(sd) => sd, None => return false };
+pub fn shift_values(vec: &mut [f64], params: &SpriteParameters, rng: &mut impl Rng) -> bool {
+    // In-place SD calculation
+    let sum_vec: f64 = vec.iter().sum();
+    let sum_fixed: f64 = params.fixed_responses.iter().sum();
+    let total_len = vec.len() + params.fixed_responses.len();
+    let combined_mean = (sum_vec + sum_fixed) / total_len as f64;
+    let sum_sq_diff_vec: f64 = vec.iter().map(|&v| (v - combined_mean).powi(2)).sum();
+    let sum_sq_diff_fixed: f64 = params.fixed_responses.iter().map(|&v| (v - combined_mean).powi(2)).sum();
+    let variance = (sum_sq_diff_vec + sum_sq_diff_fixed) / (total_len - 1) as f64;
+    let current_sd = variance.sqrt();
     let increase_sd = current_sd < params.sd;
 
-    let mut possible_swaps = Vec::new();
-    for i in 0..vec.len() {
-        for j in 0..vec.len() {
-            if i == j { continue; }
-            possible_swaps.push((i, j));
-        }
-    }
-    possible_swaps.shuffle(rng);
+    // A reasonable number of attempts to find a valid swap
+    let max_attempts = vec.len() * 4; 
 
-    for (i, j) in possible_swaps {
+    for _ in 0..max_attempts {
+        // Randomly sample two distinct indices
+        let i = rng.random_range(0..vec.len());
+        let mut j = rng.random_range(0..vec.len());
+        while i == j {
+            j = rng.random_range(0..vec.len());
+        }
+
         let val1 = vec[i];
         let val2 = vec[j];
 
@@ -711,199 +509,6 @@ pub fn shift_values(vec: &mut Vec<f64>, params: &SpriteParameters, rng: &mut imp
     false
 }
 
-
-// pub fn shift_values(
-//     vec: &mut Vec<f64>,
-//     params: &SpriteParameters,
-//     rng: &mut impl Rng,
-// ) -> bool { 
-//     // Returns true if vec was modified, false otherwise.
-//
-//     let vec_original = vec.clone();
-//
-//     // Combine all possible values and sort them.
-//     let mut poss_values = [params.possible_values.as_slice(), params.fixed_responses.as_slice()].concat();
-//     poss_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-//     poss_values.dedup();
-//
-//     if poss_values.len() < 2 { return false; } // Cannot shift if there aren't at least two options.
-//
-//     // Determine direction of shift.
-//     let inc_first: bool = rng.random();
-//     let mut full_vec = vec.clone();
-//     full_vec.extend_from_slice(&params.fixed_responses);
-//
-//     let current_sd = match std_dev(&full_vec) {
-//         Some(sd) => sd,
-//         None => return false, // Not enough data to calculate SD.
-//     };
-//     let increase_sd = current_sd < params.sd;
-//
-//     let max_to_inc = poss_values[poss_values.len() - 2];
-//     let min_to_dec = poss_values[1];
-//
-//     // --- First Bump ---
-//
-//     // Find unique elements that are eligible for the first bump.
-//     let mut seen = HashSet::new();
-//
-//     // TODO: resolve this hacky solution to the hash trait error
-//     let unique_indices: Vec<usize> = (0..vec.len())
-//         .filter(|&i| {
-//             let scaled_val = (vec[i] * 1_000_000.0).round() as i64;
-//             seen.insert(scaled_val)
-//         })
-//         .collect();
-//     // let unique_indices: Vec<usize> = (0..vec.len()).filter(|&i| seen.insert(vec[i])).collect();
-//
-//     let mut index_can_bump1: Vec<usize> = unique_indices.into_iter().filter(|&i| {
-//         if inc_first { vec[i] <= max_to_inc } else { vec[i] >= min_to_dec }
-//     }).collect();
-//
-//     if index_can_bump1.is_empty() { return false; }
-//
-//     // Filter out "pointless" moves if possible.
-//     let pointless_filter = |i: &usize| {
-//         let val = vec[*i];
-//         if increase_sd {
-//             if inc_first { !equalish(val, vec.iter().copied().fold(f64::INFINITY, f64::min)) } 
-//             else { !equalish(val, vec.iter().copied().fold(f64::NEG_INFINITY, f64::max)) }
-//         } else if inc_first { 
-//             !equalish(val, max_to_inc) 
-//         } else { 
-//             !equalish(val, min_to_dec) 
-//         }
-//
-//     };
-//
-//     let better_options: Vec<usize> = index_can_bump1.iter().copied().filter(pointless_filter).collect();
-//     if !better_options.is_empty() {
-//         index_can_bump1 = better_options;
-//     }
-//
-//     // Select a value to change.
-//     let &which_will_bump1 = index_can_bump1.choose(rng).unwrap();
-//     let will_bump1 = vec[which_will_bump1];
-//
-//     // Find the new value from the list of non-restricted possibilities.
-//     let new1 = match params.possible_values.iter().position(|&v| equalish(v, will_bump1)) {
-//         Some(pos) => {
-//             let new_pos = if inc_first { pos + 1 } else { pos - 1 };
-//             params.possible_values.get(new_pos).copied()
-//         },
-//         None => None,
-//     };
-//
-//     let new1 = if let Some(val) = new1 { val } else { return false; }; // Could not find a value to shift to.
-//
-//     vec[which_will_bump1] = new1;
-//
-//     // --- Check Mean and Decide on Second Bump ---
-//
-//     full_vec = vec.clone();
-//     full_vec.extend_from_slice(&params.fixed_responses);
-//     let new_mean = mean(&full_vec);
-//     let mean_changed = !equalish(rust_round(new_mean, params.m_prec), params.mean);
-//
-//     // If mean is now inconsistent OR with some probability, perform a second, compensating bump.
-//     if mean_changed || rng.random::<f64>() < 0.4 {
-//         // ... (Second bump logic would go here)
-//         // For now, if a second bump is needed but fails, we revert.
-//         // The full logic for the second bump is complex and involves the gap resolution.
-//         // A simplified approach is to revert if the mean changed.
-//         if mean_changed {
-//             // TODO: do proper second bump
-//             *vec = vec_original;
-//             return false;
-//         }
-//     }
-//
-//     // --- Final Check ---
-//     // The R code has a final check for mean drift.
-//     full_vec = vec.clone();
-//     full_vec.extend_from_slice(&params.fixed_responses);
-//     let final_mean = mean(&full_vec);
-//     if !equalish(rust_round(final_mean, params.m_prec), params.mean) {
-//         *vec = vec_original; // Revert on mean drift.
-//         return false;
-//     }
-//
-//     // If we've reached here, the vector was successfully modified.
-//     true
-// }
-
-/// Iteratively adjusts a vector's values to match a target mean.
-///
-/// This function randomly selects elements and nudges them up or down according
-/// to a list of possible values until the rounded mean of the full dataset
-/// matches the target.
-pub fn adjust_mean(
-    vec: &mut Vec<f64>,
-    fixed_vals: &[f64],
-    poss_values: &[f64],
-    target_mean: f64,
-    m_prec: i32,
-    max_iter: u32,
-    rng: &mut impl Rng,
-) -> Result<(), String> {
-    if poss_values.is_empty() {
-        return Err("Cannot adjust mean with no possible values.".to_string());
-    }
-
-    for _ in 0..max_iter {
-        let mut full_vec = vec.clone();
-        full_vec.extend_from_slice(fixed_vals);
-        let current_mean = mean(&full_vec);
-
-        if equalish(rust_round(current_mean, m_prec), target_mean) {
-            return Ok(()); // Success
-        }
-
-        let increase_mean = current_mean < target_mean;
-        
-        let min_poss_val = poss_values[0];
-        let max_poss_val = poss_values[poss_values.len() - 1];
-
-        // Find indices of elements in `vec` that can be bumped.
-        let possible_bump_indices: Vec<usize> = vec
-            .iter()
-            .enumerate()
-            .filter(|(_, &val)| {
-                if increase_mean { val < max_poss_val } else { val > min_poss_val }
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        if possible_bump_indices.is_empty() {
-            // No more values can be adjusted in the desired direction.
-            // Break the loop and let the final error handle it.
-            break;
-        }
-
-        // Randomly select an index to change.
-        if let Some(&index_to_bump) = possible_bump_indices.choose(rng) {
-            let current_val = vec[index_to_bump];
-            
-            // Find the position of the current value in the `poss_values` list.
-            if let Some(pos) = poss_values.iter().position(|&p| equalish(p, current_val)) {
-                let new_pos = if increase_mean { pos + 1 } else { pos.saturating_sub(1) };
-                
-                // Get the new value and update the vector.
-                if let Some(&new_val) = poss_values.get(new_pos) {
-                    vec[index_to_bump] = new_val;
-                }
-            }
-        }
-    }
-
-    // If the loop finishes without success, return an error.
-    let err_msg = if !fixed_vals.is_empty() {
-        "Couldn't initialize data with correct mean. This *might* be because the restrictions cannot be satisfied."
-    } else {
-        "Couldn't initialize data with correct mean. This might indicate a coding error if the mean is in range."
-    };
-    Err(err_msg.to_string())
-}
 
 
 fn equalish(x: f64, y: f64) -> bool {
@@ -995,76 +600,3 @@ fn generate_sequence(min_val: i32, max_val: i32, n_items: u32, i: u32) -> Vec<f6
         .collect()
 }
 
-
-#[cfg(test)]
-pub mod tests {
-    use super::*;
-    use rand::rngs::StdRng;
-
-    #[test]
-    fn sprite_test_mean() {
-        let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default(), false).unwrap();
-        let results = find_possible_distributions(&sprite_parameters, 5, false, &mut StdRng::seed_from_u64(1234));
-
-        assert_eq!(results[0].mean, 2.2);
-        // assert_eq!(results[0].values, vec![1.0; 20])
-        // format!("{results:?}");
-    }
-
-    #[test]
-    fn sprite_test_sd() {
-        let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default(), false).unwrap();
-        let results = find_possible_distributions(&sprite_parameters, 5, false, &mut StdRng::seed_from_u64(1234));
-
-        assert_eq!(results[0].sd, 1.32);
-    }
-}
-
-
-// #' sprite_parameters <- set_parameters(mean = 2.2, sd = 1.3, n_obs = 20,
-// #'                                     min_val = 1, max_val = 5)
-// #'
-// #' find_possible_distributions(sprite_parameters, 5, seed = 1234)
-
-
-// fn scale_2dp(x: f64) -> i32 {
-//     (x * 100.0).round() as i32
-// }
-//
-// fn filter_restrictions_exact(
-//     restrictions_exact: &HashMap<i32, usize>,
-//     poss_values_chr: &Vec<f64>,
-// ) -> HashMap<i32, usize> {
-//     // Convert allowed f64 values to scaled integers
-//     let allowed_scaled: HashSet<i32> = poss_values_chr.iter().map(|&v| scale_2dp(v)).collect();
-//
-//     // Filter: retain only keys that, when scaled, match allowed values
-//     restrictions_exact
-//         .iter()
-//         .filter_map(|(&k, &v)| {
-//             let k_scaled = scale_2dp(k as f64);
-//             if allowed_scaled.contains(&k_scaled) {
-//                 Some((k, v))
-//             } else {
-//                 None
-//             }
-//         })
-//         .collect()
-// }
-
-
-// fn fixed_responses_from_minimum(
-//     restrictions_minimum: &HashMap<i32, usize>,
-//     poss_values_chr: Vec<f64>,
-//     poss_values: Vec<f64>,
-// ) -> Vec<f64> {
-//     poss_values_chr
-//         .into_iter()
-//         .zip(poss_values.into_iter())
-//         .filter_map(|(chr, val)| {
-//             let scaled = scale_2dp(chr);
-//             restrictions_minimum.get(&scaled).map(|&count| vec![val; count])
-//         })
-//         .flatten()
-//         .collect()
-// }
