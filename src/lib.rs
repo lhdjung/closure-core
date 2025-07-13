@@ -403,13 +403,15 @@ fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn s
 }
 
 /// Create a simple Parquet writer for samples only
-/// Each sample is stored as a list in a single column
-fn create_samples_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
+/// For streaming: each row is a sample, with positions as columns (pos1, pos2, ..., posN)
+/// This allows streaming while maintaining a fixed schema
+fn create_samples_writer(file_path: &str, sample_size: usize) -> Result<ArrowWriter<File>, Box<dyn std::error::Error>>
 {
-    // Schema with just a samples column containing lists of integers
-    let fields = vec![
-        Field::new("sample", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false),
-    ];
+    // Create schema where each position in the sample is a column
+    // Column names will be pos1, pos2, pos3, etc.
+    let fields: Vec<Field> = (1..=sample_size)
+        .map(|i| Field::new(&format!("pos{}", i), DataType::Int32, false))
+        .collect();
     
     let schema = Arc::new(Schema::new(fields));
     
@@ -438,33 +440,38 @@ fn create_horns_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn std
 }
 
 /// Convert samples to a RecordBatch for the samples-only file
+/// Each row is a sample, with positions as columns for R compatibility
 fn samples_to_record_batch<U>(
     samples: &[Vec<U>],
 ) -> Result<RecordBatch, Box<dyn std::error::Error>>
 where
     U: Integer + ToPrimitive + Copy,
 {
-    // Create a list builder for the samples
-    let mut list_builder = ListBuilder::new(Int32Builder::new());
-    
-    for sample in samples {
-        // Append all values for this sample
-        for &val in sample {
-            list_builder.values().append_value(U::to_i32(&val).unwrap());
-        }
-        // Mark the end of this list
-        list_builder.append(true);
+    if samples.is_empty() {
+        return Err("No samples to write".into());
     }
     
-    let samples_array = Arc::new(list_builder.finish());
+    let sample_size = samples[0].len();
     
-    // Create schema
-    let fields = vec![
-        Field::new("sample", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false),
-    ];
+    // Create arrays for each position (column)
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(sample_size);
+    
+    // For each position in the samples
+    for pos in 0..sample_size {
+        // Collect values at this position from all samples
+        let values: Vec<i32> = samples.iter()
+            .map(|sample| U::to_i32(&sample[pos]).unwrap())
+            .collect();
+        arrays.push(Arc::new(Int32Array::from(values)));
+    }
+    
+    // Create schema with column names pos1, pos2, pos3, etc.
+    let fields: Vec<Field> = (1..=sample_size)
+        .map(|i| Field::new(&format!("pos{}", i), DataType::Int32, false))
+        .collect();
     let schema = Arc::new(Schema::new(fields));
     
-    RecordBatch::try_new(schema, vec![samples_array]).map_err(|e| e.into())
+    RecordBatch::try_new(schema, arrays).map_err(|e| e.into())
 }
 
 /// Convert horns values to a RecordBatch
@@ -906,9 +913,11 @@ where
     let samples_path = format!("{}samples.parquet", base_path);
     let horns_path = format!("{}horns.parquet", base_path);
     
+    let n_usize_for_writer = n_usize;  // Capture n_usize for the writer thread
+    
     let writer_handle = thread::spawn(move || {
         // Create two separate writers
-        let mut samples_writer = match create_samples_writer(&samples_path) {
+        let mut samples_writer = match create_samples_writer(&samples_path, n_usize_for_writer) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("ERROR: Failed to create samples writer for file '{}': {}", samples_path, e);
