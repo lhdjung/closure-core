@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Keys;
 
-/// references, clone copy
-///
-///
 #[derive(Debug, Clone)]
 pub struct OccurrenceConstraints {
     /// Must have exactly this many of each value
@@ -45,9 +42,6 @@ impl RestrictionsMinimum {
     pub fn keys(&self) -> Keys<'_, i32, usize> {
         self.0.keys()
     }
-    // pub fn keys(&self) -> impl Iterator<Item = i32> + '_ {
-    //     self.0.keys().map(|&k| k)
-    // }
 
     pub fn keys_rounded(&self) -> impl Iterator<Item = f64> + '_ {
         self.0.keys().map(|&k| (k as f64).round())
