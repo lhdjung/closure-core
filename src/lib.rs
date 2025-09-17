@@ -263,6 +263,41 @@ where
 {
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    
+    // Handle empty samples case
+    if samples.is_empty() {
+        return ClosureResults {
+            metrics_main: MetricsMain {
+                samples_initial: 0,
+                samples_all: 0,
+                values_all: 0,
+            },
+            metrics_horns: MetricsHorns {
+                mean: f64::NAN,
+                uniform: f64::NAN,
+                sd: f64::NAN,
+                cv: f64::NAN,
+                mad: f64::NAN,
+                min: f64::NAN,
+                median: f64::NAN,
+                max: f64::NAN,
+                range: f64::NAN,
+            },
+            frequency: FrequencyTable {
+                samples: vec!["all".to_string()],
+                value: (scale_min_i32..=scale_max_i32).collect(),
+                f_average: vec![f64::NAN; (scale_max_i32 - scale_min_i32 + 1) as usize],
+                f_absolute: vec![0; (scale_max_i32 - scale_min_i32 + 1) as usize],
+                f_relative: vec![f64::NAN; (scale_max_i32 - scale_min_i32 + 1) as usize],
+            },
+            results: ResultsTable {
+                id: Vec::new(),
+                samples: Vec::new(),
+                horns_values: Vec::new(),
+            },
+        };
+    }
+    
     let n = samples[0].len();
     let samples_all = samples.len();
     let values_all = samples_all * n;
