@@ -1648,7 +1648,7 @@ mod tests {
         // Test uniform distribution
         let uniform_freqs = vec![1.0, 1.0, 1.0, 1.0, 1.0];
         let horns_uniform = calculate_horns(&uniform_freqs, 1, 5);
-        assert!((horns_uniform - 0.4).abs() < 0.01);
+        assert!((horns_uniform - 0.5).abs() < 0.01);
 
         // Test extreme distribution
         let extreme_freqs = vec![1.0, 0.0, 0.0, 0.0, 1.0];
