@@ -85,7 +85,7 @@ pub struct MetricsHorns {
 #[derive(Clone, Debug)]
 pub struct ResultsTable<U> {
     pub id: Vec<usize>,
-    pub samples: Vec<Vec<U>>,
+    pub sample: Vec<Vec<U>>,
     pub horns_values: Vec<f64>,
 }
 
@@ -292,7 +292,7 @@ where
             },
             results: ResultsTable {
                 id: Vec::new(),
-                samples: Vec::new(),
+                sample: Vec::new(),
                 horns_values: Vec::new(),
             },
         };
@@ -410,7 +410,7 @@ where
         },
         results: ResultsTable {
             id,
-            samples,
+            sample: samples,
             horns_values,
         },
     }
@@ -605,7 +605,7 @@ where
     // Add samples column as a list using the standard ListBuilder
     let mut list_builder = ListBuilder::new(Int32Builder::new());
 
-    for sample in &results.samples[start_idx..end_idx] {
+    for sample in &results.sample[start_idx..end_idx] {
         // Append all values for this sample
         for &val in sample {
             list_builder.values().append_value(U::to_i32(&val).unwrap());
@@ -865,7 +865,7 @@ where
         let results_path = format!("{}results.parquet", base_path);
         if let Ok(mut writer) = create_results_writer(&results_path) {
             let batch_size = config.batch_size;
-            let total_samples = closure_results.results.samples.len();
+            let total_samples = closure_results.results.sample.len();
 
             for start in (0..total_samples).step_by(batch_size) {
                 let end = (start + batch_size).min(total_samples);
@@ -1672,26 +1672,26 @@ mod tests {
         );
 
         // Check that results table is properly formed
-        assert!(!results.results.samples.is_empty());
+        assert!(!results.results.sample.is_empty());
         assert_eq!(
-            results.results.samples.len(),
+            results.results.sample.len(),
             results.results.horns_values.len()
         );
-        assert_eq!(results.results.samples.len(), results.results.id.len());
+        assert_eq!(results.results.sample.len(), results.results.id.len());
         assert_eq!(results.results.id[0], 1);
         assert_eq!(
             results.results.id.last(),
-            Some(&results.results.samples.len())
+            Some(&results.results.sample.len())
         );
 
         // Check metrics
         assert_eq!(
             results.metrics_main.samples_all,
-            results.results.samples.len() as f64
+            results.results.sample.len() as f64
         );
         assert_eq!(
             results.metrics_main.values_all,
-            (results.results.samples.len() * 5) as f64
+            (results.results.sample.len() * 5) as f64
         );
 
         // Check horns metrics
@@ -1754,7 +1754,7 @@ mod tests {
             None, // no stop_after limit
         );
 
-        assert!(!results.results.samples.is_empty());
+        assert!(!results.results.sample.is_empty());
 
         // Clean up test files
         let _ = std::fs::remove_file("test_output/results.parquet");
@@ -1817,7 +1817,7 @@ mod tests {
             None, // no stop_after limit
         );
 
-        let total_samples = results_unlimited.results.samples.len();
+        let total_samples = results_unlimited.results.sample.len();
         assert!(total_samples > 10); // Should have many samples
 
         // Test with limit of 10
@@ -1833,7 +1833,7 @@ mod tests {
             Some(10), // stop after 10 samples
         );
 
-        assert_eq!(results_limited.results.samples.len(), 10);
+        assert_eq!(results_limited.results.sample.len(), 10);
         assert_eq!(results_limited.results.horns_values.len(), 10);
         assert_eq!(results_limited.results.id.len(), 10);
 
@@ -1850,7 +1850,7 @@ mod tests {
             Some(1), // stop after 1 sample
         );
 
-        assert_eq!(results_one.results.samples.len(), 1);
+        assert_eq!(results_one.results.sample.len(), 1);
         assert_eq!(results_one.results.horns_values.len(), 1);
         assert_eq!(results_one.results.id.len(), 1);
     }
