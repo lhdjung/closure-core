@@ -725,6 +725,9 @@ where
 /// - You want both file output and in-memory access
 /// 
 /// For large result sets, use `dfs_parallel_streaming()` instead.
+/// 
+/// # Parameters
+/// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
 pub fn dfs_parallel<T, U>(
     mean: T,
     sd: T,
@@ -734,6 +737,7 @@ pub fn dfs_parallel<T, U>(
     rounding_error_mean: T,
     rounding_error_sd: T,
     parquet_config: Option<ParquetConfig>,
+    stop_after: Option<usize>,
 ) -> ClosureResults<U>
 where
     T: Float + FromPrimitive + Send + Sync,
@@ -746,26 +750,72 @@ where
     // Generate initial combinations
     let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
 
-    // Process combinations in parallel
-    let results: Vec<Vec<U>> = combinations.par_iter()
-        .flat_map(|(combo, running_sum, running_m2)| {
-            dfs_branch(
-                combo.clone(),
-                *running_sum,
-                *running_m2,
-                n_usize,
-                target_sum_upper,
-                target_sum_lower,
-                sd_upper,
-                sd_lower,
-                &min_scale_sum_t,
-                &scale_max_sum_t,
-                n_minus_1,
-                scale_max_plus_1,
-                scale_min,
-            )
-        })
-        .collect();
+    // Process combinations in parallel with optional early termination
+    let results: Vec<Vec<U>> = if let Some(limit) = stop_after {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        
+        let found_count = Arc::new(AtomicUsize::new(0));
+        
+        combinations.par_iter()
+            .flat_map(|(combo, running_sum, running_m2)| {
+                // Check if we've already found enough samples
+                if found_count.load(Ordering::Relaxed) >= limit {
+                    return Vec::new();
+                }
+                
+                let branch_results = dfs_branch(
+                    combo.clone(),
+                    *running_sum,
+                    *running_m2,
+                    n_usize,
+                    target_sum_upper,
+                    target_sum_lower,
+                    sd_upper,
+                    sd_lower,
+                    &min_scale_sum_t,
+                    &scale_max_sum_t,
+                    n_minus_1,
+                    scale_max_plus_1,
+                    scale_min,
+                );
+                
+                // Update counter and potentially truncate results
+                if !branch_results.is_empty() {
+                    let current_count = found_count.fetch_add(branch_results.len(), Ordering::Relaxed);
+                    if current_count >= limit {
+                        return Vec::new(); // We already have enough
+                    } else if current_count + branch_results.len() > limit {
+                        // Take only what we need to reach the limit
+                        let take_count = limit - current_count;
+                        return branch_results.into_iter().take(take_count).collect();
+                    }
+                }
+                
+                branch_results
+            })
+            .collect()
+    } else {
+        combinations.par_iter()
+            .flat_map(|(combo, running_sum, running_m2)| {
+                dfs_branch(
+                    combo.clone(),
+                    *running_sum,
+                    *running_m2,
+                    n_usize,
+                    target_sum_upper,
+                    target_sum_lower,
+                    sd_upper,
+                    sd_lower,
+                    &min_scale_sum_t,
+                    &scale_max_sum_t,
+                    n_minus_1,
+                    scale_max_plus_1,
+                    scale_min,
+                )
+            })
+            .collect()
+    };
 
     // Calculate all statistics
     let closure_results = calculate_all_statistics(results, scale_min, scale_max);
@@ -878,6 +928,9 @@ struct StreamingFrequencyState {
 /// - Memory efficiency is critical
 /// 
 /// Returns a StreamingResult with the total count and file path.
+/// 
+/// # Parameters
+/// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
 pub fn dfs_parallel_streaming<T, U>(
     mean: T,
     sd: T,
@@ -887,6 +940,7 @@ pub fn dfs_parallel_streaming<T, U>(
     rounding_error_mean: T,
     rounding_error_sd: T,
     config: StreamingConfig,
+    stop_after: Option<usize>,
 ) -> StreamingResult
 where
     T: Float + FromPrimitive + Send + Sync,
@@ -1096,6 +1150,13 @@ where
                 return;
             }
             
+            // Check if we've reached the stop_after limit
+            if let Some(limit) = stop_after {
+                if counter_for_thread.load(Ordering::Relaxed) >= limit {
+                    return;
+                }
+            }
+            
             // Track progress through initial combinations
             let current_initial = initial_combo_counter.fetch_add(1, Ordering::Relaxed) + 1;
             if config.show_progress && current_initial % 10 == 0 {
@@ -1188,11 +1249,26 @@ where
                     results_with_horns.push((sample, horns));
                 }
                 
-                // Update counter
-                counter_for_thread.fetch_add(results_with_horns.len(), Ordering::Relaxed);
+                // Update counter and potentially truncate results if we exceed limit
+                let current_count = counter_for_thread.fetch_add(results_with_horns.len(), Ordering::Relaxed);
+                
+                // Truncate results if we've exceeded the stop_after limit
+                let final_results = if let Some(limit) = stop_after {
+                    if current_count >= limit {
+                        return; // We already have enough
+                    } else if current_count + results_with_horns.len() > limit {
+                        // Take only what we need to reach the limit
+                        let take_count = limit - current_count;
+                        results_with_horns.into_iter().take(take_count).collect()
+                    } else {
+                        results_with_horns
+                    }
+                } else {
+                    results_with_horns
+                };
                 
                 // Send to writer and stats collector
-                if tx_results.send(results_with_horns).is_err() {
+                if tx_results.send(final_results).is_err() {
                     // Channel is closed, writer must have failed
                     return;
                 }
@@ -1493,6 +1569,7 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             None, // no parquet config
+            None, // no stop_after limit
         );
         
         // Check that results table is properly formed
@@ -1548,6 +1625,7 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             Some(config),
+            None, // no stop_after limit
         );
         
         assert!(!results.results.samples.is_empty());
@@ -1580,6 +1658,7 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             config,
+            None, // no stop_after limit
         );
         
         assert!(result.total_combinations > 0);
@@ -1596,5 +1675,58 @@ mod tests {
         let _ = std::fs::remove_file("test_streaming/metrics_horns.parquet");
         let _ = std::fs::remove_file("test_streaming/frequency.parquet");
         let _ = std::fs::remove_dir("test_streaming");
+    }
+    
+    #[test]
+    fn test_stop_after_parameter() {
+        // Test that stop_after limits the number of results
+        let results_unlimited = dfs_parallel::<f64, i32>(
+            3.0,  // mean
+            1.0,  // sd
+            80,   // n (increased sample size)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            None, // no parquet config
+            None, // no stop_after limit
+        );
+        
+        let total_samples = results_unlimited.results.samples.len();
+        assert!(total_samples > 10); // Should have many samples
+        
+        // Test with limit of 10
+        let results_limited = dfs_parallel::<f64, i32>(
+            3.0,  // mean
+            1.0,  // sd
+            80,   // n (increased sample size)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            None, // no parquet config
+            Some(10), // stop after 10 samples
+        );
+        
+        assert_eq!(results_limited.results.samples.len(), 10);
+        assert_eq!(results_limited.results.horns_values.len(), 10);
+        assert_eq!(results_limited.results.id.len(), 10);
+        
+        // Test with limit of 1
+        let results_one = dfs_parallel::<f64, i32>(
+            3.0,  // mean
+            1.0,  // sd
+            80,   // n (increased sample size)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            None, // no parquet config
+            Some(1), // stop after 1 sample
+        );
+        
+        assert_eq!(results_one.results.samples.len(), 1);
+        assert_eq!(results_one.results.horns_values.len(), 1);
+        assert_eq!(results_one.results.id.len(), 1);
     }
 }
