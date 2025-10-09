@@ -789,6 +789,7 @@ where
                     break;
                 }
 
+                let remaining = limit - found.len();
                 let branch_results = dfs_branch(
                     combo,
                     running_sum,
@@ -803,10 +804,10 @@ where
                     n_minus_1,
                     scale_max_plus_1,
                     scale_min,
+                    Some(remaining), // Pass the remaining count for early exit
                 );
 
-                let remaining = limit - found.len();
-                found.extend(branch_results.into_iter().take(remaining));
+                found.extend(branch_results);
             }
             found
         } else {
@@ -824,6 +825,14 @@ where
                         return Vec::new();
                     }
 
+                    // Calculate how many more results we need
+                    let current = found_count.load(Ordering::Relaxed);
+                    let remaining = if current >= limit {
+                        return Vec::new();
+                    } else {
+                        limit - current
+                    };
+
                     let branch_results = dfs_branch(
                         combo.clone(),
                         *running_sum,
@@ -838,19 +847,12 @@ where
                         n_minus_1,
                         scale_max_plus_1,
                         scale_min,
+                        Some(remaining), // Pass remaining count for early exit
                     );
 
-                    // Update counter and potentially truncate results
+                    // Update counter
                     if !branch_results.is_empty() {
-                        let current_count =
-                            found_count.fetch_add(branch_results.len(), Ordering::Relaxed);
-                        if current_count >= limit {
-                            return Vec::new(); // We already have enough
-                        } else if current_count + branch_results.len() > limit {
-                            // Take only what we need to reach the limit
-                            let take_count = limit - current_count;
-                            return branch_results.into_iter().take(take_count).collect();
-                        }
+                        found_count.fetch_add(branch_results.len(), Ordering::Relaxed);
                     }
 
                     branch_results
@@ -875,6 +877,7 @@ where
                     n_minus_1,
                     scale_max_plus_1,
                     scale_min,
+                    None, // No limit for unlimited search
                 )
             })
             .collect()
@@ -1418,6 +1421,7 @@ where
                     break;
                 }
 
+                let remaining = limit - found_count;
                 let branch_results = dfs_branch(
                     combo,
                     running_sum,
@@ -1432,6 +1436,7 @@ where
                     n_minus_1,
                     scale_max_plus_1,
                     scale_min,
+                    Some(remaining), // Pass remaining count for early exit
                 );
 
                 for sample in branch_results.into_iter() {
@@ -1548,6 +1553,17 @@ where
                 );
             }
 
+            // Calculate how many more results we need
+            let remaining = if let Some(limit) = stop_after {
+                let current = counter_for_thread.load(Ordering::Relaxed);
+                if current >= limit {
+                    return; // Already have enough
+                }
+                Some(limit - current)
+            } else {
+                None
+            };
+
             let branch_results = dfs_branch(
                 combo.clone(),
                 *running_sum,
@@ -1562,6 +1578,7 @@ where
                 n_minus_1,
                 scale_max_plus_1,
                 scale_min,
+                remaining, // Pass remaining count for early exit
             );
 
             if !branch_results.is_empty() {
@@ -1723,6 +1740,7 @@ fn dfs_branch<T, U>(
     _n_minus_1: U,
     scale_max_plus_1: U,
     scale_min: U, // Need this to calculate indices
+    stop_after: Option<usize>, // Optional limit for early termination
 ) -> Vec<Vec<U>>
 where
     T: Float + FromPrimitive + Send + Sync,
@@ -1730,6 +1748,9 @@ where
 {
     let mut stack = VecDeque::with_capacity(n * 2);
     let mut results = Vec::new();
+
+    // Use usize::MAX as sentinel when no limit is specified
+    let limit = stop_after.unwrap_or(usize::MAX);
 
     stack.push_back(Combination {
         values: start_combination.clone(),
@@ -1743,6 +1764,10 @@ where
             let current_std = (current.running_m2 / n_minus_1_float).sqrt();
             if current_std >= sd_lower {
                 results.push(current.values);
+                // Early exit if we've reached the limit
+                if results.len() >= limit {
+                    return results;
+                }
             }
             continue;
         }

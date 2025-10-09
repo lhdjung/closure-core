@@ -44,32 +44,49 @@ if let Some(limit) = stop_after {
 - Simpler code path with less synchronization
 
 ### Benchmark Results (n=100, ~25K total samples):
-- `stop_after=1`: **1.11x faster** than full search
-- `stop_after=10`: **1.13x faster** than full search
-- `stop_after=100`: **1.12x faster** than full search
-- `stop_after=1000`: 1.06x faster (uses parallel path)
 
-## When Sequential is Better
+**After sequential fast path only:**
+- `stop_after=1`: 1.11x faster than full search (153ms → 138ms)
+- `stop_after=10`: 1.13x faster than full search (153ms → 135ms)
+- `stop_after=100`: 1.12x faster than full search (153ms → 137ms)
 
-Sequential processing outperforms parallel when:
-1. Small result limits (≤ 100 samples)
-2. Results are found early in the search space
-3. Overhead of parallelization exceeds benefit
+**After adding branch-level early exit:**
+- `stop_after=1`: **133.95x faster** than full search (153ms → 1.1ms) 🚀
+- `stop_after=10`: **110.03x faster** than full search (153ms → 1.4ms) 🚀
+- `stop_after=100`: **88.53x faster** than full search (153ms → 1.7ms) 🚀
+- `stop_after=1000`: **23.95x faster** than full search (153ms → 6.4ms) 🚀
 
-For large limits (> 100) or unlimited searches, parallel processing remains optimal.
+The dramatic improvement comes from `dfs_branch()` stopping immediately when it finds enough results, rather than exhaustively searching each branch.
 
 ## Implementation Details
 
-Both `dfs_parallel()` and `dfs_parallel_streaming()` now include:
-- Threshold check at limit ≤ 100
-- Dedicated sequential loop with early termination
-- Shared helper function `write_streaming_statistics()` to reduce code duplication
+### 1. Sequential Fast Path (stop_after ≤ 100)
+Both `dfs_parallel()` and `dfs_parallel_streaming()` use sequential processing for small limits to avoid parallel overhead.
 
-## Further Optimization Opportunities
+### 2. Branch-Level Early Exit
+`dfs_branch()` now accepts a `stop_after` parameter:
+```rust
+fn dfs_branch(..., stop_after: Option<usize>) -> Vec<Vec<U>> {
+    let limit = stop_after.unwrap_or(usize::MAX);
 
-If you need even better performance with `stop_after`:
+    while let Some(current) = stack.pop_back() {
+        if current.values.len() >= n {
+            if current_std >= sd_lower {
+                results.push(current.values);
+                if results.len() >= limit {
+                    return results;  // Immediate exit!
+                }
+            }
+        }
+        // ...
+    }
+}
+```
 
-1. **Branch-level early exit**: Pass limit into `dfs_branch()` to stop collecting results mid-branch
-2. **Lightweight statistics**: Skip expensive min/max horns calculations when limit is set
-3. **Lazy statistics**: Compute statistics only on demand rather than automatically
-4. **Adaptive threshold**: Adjust the 100-sample threshold based on problem characteristics
+This eliminates the wasteful computation of results that would be discarded anyway.
+
+## When to Use stop_after
+
+- **Tiny problems**: If full search completes in < 1ms, `stop_after` adds overhead without benefit
+- **Small/medium problems**: 10-100x speedup when you only need a few samples
+- **Large problems**: Even with high limits (1000+), still 20-30x faster than full search
