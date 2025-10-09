@@ -1766,6 +1766,7 @@ where
                 results.push(current.values);
                 // Early exit if we've reached the limit
                 if results.len() >= limit {
+                    results.truncate(limit);
                     return results;
                 }
             }
