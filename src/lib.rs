@@ -781,23 +781,18 @@ where
 
     // Process combinations in parallel with optional early termination
     let results: Vec<Vec<U>> = if let Some(limit) = stop_after {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let found_count = Arc::new(AtomicUsize::new(0));
-
-        combinations
-            .par_iter()
-            .flat_map(|(combo, running_sum, running_m2)| {
-                // Check if we've already found enough samples
-                if found_count.load(Ordering::Relaxed) >= limit {
-                    return Vec::new();
+        // Fast path for small limits: use sequential processing to avoid parallel overhead
+        if limit <= 100 {
+            let mut found = Vec::with_capacity(limit);
+            for (combo, running_sum, running_m2) in combinations {
+                if found.len() >= limit {
+                    break;
                 }
 
                 let branch_results = dfs_branch(
-                    combo.clone(),
-                    *running_sum,
-                    *running_m2,
+                    combo,
+                    running_sum,
+                    running_m2,
                     n_usize,
                     target_sum_upper,
                     target_sum_lower,
@@ -810,22 +805,58 @@ where
                     scale_min,
                 );
 
-                // Update counter and potentially truncate results
-                if !branch_results.is_empty() {
-                    let current_count =
-                        found_count.fetch_add(branch_results.len(), Ordering::Relaxed);
-                    if current_count >= limit {
-                        return Vec::new(); // We already have enough
-                    } else if current_count + branch_results.len() > limit {
-                        // Take only what we need to reach the limit
-                        let take_count = limit - current_count;
-                        return branch_results.into_iter().take(take_count).collect();
-                    }
-                }
+                let remaining = limit - found.len();
+                found.extend(branch_results.into_iter().take(remaining));
+            }
+            found
+        } else {
+            // Parallel path for larger limits
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
 
-                branch_results
-            })
-            .collect()
+            let found_count = Arc::new(AtomicUsize::new(0));
+
+            combinations
+                .par_iter()
+                .flat_map(|(combo, running_sum, running_m2)| {
+                    // Check if we've already found enough samples
+                    if found_count.load(Ordering::Relaxed) >= limit {
+                        return Vec::new();
+                    }
+
+                    let branch_results = dfs_branch(
+                        combo.clone(),
+                        *running_sum,
+                        *running_m2,
+                        n_usize,
+                        target_sum_upper,
+                        target_sum_lower,
+                        sd_upper,
+                        sd_lower,
+                        &min_scale_sum_t,
+                        &scale_max_sum_t,
+                        n_minus_1,
+                        scale_max_plus_1,
+                        scale_min,
+                    );
+
+                    // Update counter and potentially truncate results
+                    if !branch_results.is_empty() {
+                        let current_count =
+                            found_count.fetch_add(branch_results.len(), Ordering::Relaxed);
+                        if current_count >= limit {
+                            return Vec::new(); // We already have enough
+                        } else if current_count + branch_results.len() > limit {
+                            // Take only what we need to reach the limit
+                            let take_count = limit - current_count;
+                            return branch_results.into_iter().take(take_count).collect();
+                        }
+                    }
+
+                    branch_results
+                })
+                .collect()
+        }
     } else {
         combinations
             .par_iter()
@@ -971,6 +1002,155 @@ struct StreamingFrequencyState {
     max_freq: HashMap<i32, i64>,
     min_count: usize,
     max_count: usize,
+}
+
+/// Helper function to write statistics files for streaming mode
+fn write_streaming_statistics(
+    base_path: &str,
+    all_horns: &[f64],
+    n_usize: usize,
+    scale_min_i32: i32,
+    scale_max_i32: i32,
+    final_freq_state: Arc<Mutex<StreamingFrequencyState>>,
+) {
+    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
+        create_stats_writers(base_path)
+    {
+        // Calculate final statistics
+        let samples_all = all_horns.len();
+        if samples_all == 0 {
+            return;
+        }
+
+        let values_all = samples_all * n_usize;
+
+        // Calculate horns statistics
+        let horns_mean = all_horns.iter().sum::<f64>() / samples_all as f64;
+        let horns_sd = {
+            let variance = all_horns
+                .iter()
+                .map(|&h| (h - horns_mean).powi(2))
+                .sum::<f64>()
+                / samples_all as f64;
+            variance.sqrt()
+        };
+
+        let mut horns_sorted = all_horns.to_vec();
+        horns_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let horns_min = horns_sorted[0];
+        let horns_max = horns_sorted[samples_all - 1];
+        let horns_median = median(&horns_sorted);
+        let horns_mad = mad(all_horns, horns_median);
+
+        // Write metrics_main
+        let mm_batch = RecordBatch::try_new(
+            mm_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![count_initial_combinations(
+                    scale_min_i32,
+                    scale_max_i32,
+                ) as f64])),
+                Arc::new(Float64Array::from(vec![samples_all as f64])),
+                Arc::new(Float64Array::from(vec![values_all as f64])),
+            ],
+        );
+        if let Ok(batch) = mm_batch {
+            let _ = mm_writer.write(&batch);
+        }
+        let _ = mm_writer.close();
+
+        // Write metrics_horns
+        let mh_batch = RecordBatch::try_new(
+            mh_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![horns_mean])),
+                Arc::new(Float64Array::from(vec![calculate_horns_uniform(
+                    scale_min_i32,
+                    scale_max_i32,
+                )])),
+                Arc::new(Float64Array::from(vec![horns_sd])),
+                Arc::new(Float64Array::from(vec![horns_sd / horns_mean])),
+                Arc::new(Float64Array::from(vec![horns_mad])),
+                Arc::new(Float64Array::from(vec![horns_min])),
+                Arc::new(Float64Array::from(vec![horns_median])),
+                Arc::new(Float64Array::from(vec![horns_max])),
+                Arc::new(Float64Array::from(vec![horns_max - horns_min])),
+            ],
+        );
+        if let Ok(batch) = mh_batch {
+            let _ = mh_writer.write(&batch);
+        }
+        let _ = mh_writer.close();
+
+        // Extract frequency data from final state
+        let state = final_freq_state.lock().unwrap();
+        let total_values = values_all as f64;
+        let n_samples = samples_all as f64;
+
+        // Write frequency table with all three categories
+        // First write "all" frequencies
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = state.all_freq.get(&scale_value).unwrap_or(&0);
+
+            let freq_batch = RecordBatch::try_new(
+                freq_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["all"])),
+                    Arc::new(Int32Array::from(vec![scale_value])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / n_samples])),
+                    Arc::new(Float64Array::from(vec![*count as f64])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / total_values])),
+                ],
+            );
+            if let Ok(batch) = freq_batch {
+                let _ = freq_writer.write(&batch);
+            }
+        }
+
+        // Write "horns_min" frequencies
+        let min_n_samples = state.min_count as f64;
+        let min_total_values = (state.min_count * n_usize) as f64;
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = state.min_freq.get(&scale_value).unwrap_or(&0);
+
+            let freq_batch = RecordBatch::try_new(
+                freq_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["horns_min"])),
+                    Arc::new(Int32Array::from(vec![scale_value])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / min_n_samples])),
+                    Arc::new(Float64Array::from(vec![*count as f64])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / min_total_values])),
+                ],
+            );
+            if let Ok(batch) = freq_batch {
+                let _ = freq_writer.write(&batch);
+            }
+        }
+
+        // Write "horns_max" frequencies
+        let max_n_samples = state.max_count as f64;
+        let max_total_values = (state.max_count * n_usize) as f64;
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = state.max_freq.get(&scale_value).unwrap_or(&0);
+
+            let freq_batch = RecordBatch::try_new(
+                freq_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["horns_max"])),
+                    Arc::new(Int32Array::from(vec![scale_value])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / max_n_samples])),
+                    Arc::new(Float64Array::from(vec![*count as f64])),
+                    Arc::new(Float64Array::from(vec![*count as f64 / max_total_values])),
+                ],
+            );
+            if let Ok(batch) = freq_batch {
+                let _ = freq_writer.write(&batch);
+            }
+        }
+
+        let _ = freq_writer.close();
+    }
 }
 
 /// Generate all valid combinations (streaming mode) with summary statistics
@@ -1226,7 +1406,123 @@ where
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
 
-    // Process combinations in parallel
+    // Fast path for small stop_after limits: use sequential processing
+    if let Some(limit) = stop_after {
+        if limit <= 100 {
+            // Sequential processing for small limits
+            let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+            let mut found_count = 0;
+
+            for (combo, running_sum, running_m2) in combinations {
+                if found_count >= limit {
+                    break;
+                }
+
+                let branch_results = dfs_branch(
+                    combo,
+                    running_sum,
+                    running_m2,
+                    n_usize,
+                    target_sum_upper,
+                    target_sum_lower,
+                    sd_upper,
+                    sd_lower,
+                    &min_scale_sum_t,
+                    &scale_max_sum_t,
+                    n_minus_1,
+                    scale_max_plus_1,
+                    scale_min,
+                );
+
+                for sample in branch_results.into_iter() {
+                    if found_count >= limit {
+                        break;
+                    }
+
+                    let mut freqs = vec![0.0; nrow_frequency];
+                    let mut sample_freq: HashMap<i32, i64> = HashMap::new();
+
+                    for &value in &sample {
+                        let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
+                        freqs[idx] += 1.0;
+                        *sample_freq.entry(U::to_i32(&value).unwrap()).or_insert(0) += 1;
+                    }
+
+                    let horns = calculate_horns(&freqs, scale_min_i32, scale_max_i32);
+
+                    // Update frequency state
+                    {
+                        let mut state = freq_state_for_thread.lock().unwrap();
+
+                        for (&val, &count) in &sample_freq {
+                            *state.all_freq.entry(val).or_insert(0) += count;
+                        }
+
+                        if (horns - state.current_min_horns).abs() < 1e-10 {
+                            for (&val, &count) in &sample_freq {
+                                *state.min_freq.entry(val).or_insert(0) += count;
+                            }
+                            state.min_count += 1;
+                        } else if horns < state.current_min_horns {
+                            state.current_min_horns = horns;
+                            state.min_freq.clear();
+                            for (&val, &count) in &sample_freq {
+                                state.min_freq.insert(val, count);
+                            }
+                            state.min_count = 1;
+                        }
+
+                        if (horns - state.current_max_horns).abs() < 1e-10 {
+                            for (&val, &count) in &sample_freq {
+                                *state.max_freq.entry(val).or_insert(0) += count;
+                            }
+                            state.max_count += 1;
+                        } else if horns > state.current_max_horns {
+                            state.current_max_horns = horns;
+                            state.max_freq.clear();
+                            for (&val, &count) in &sample_freq {
+                                state.max_freq.insert(val, count);
+                            }
+                            state.max_count = 1;
+                        }
+                    }
+
+                    // Send to writer and stats
+                    if tx_results.send(vec![(sample.clone(), horns)]).is_ok() {
+                        let _ = tx_stats.send((vec![horns], HashMap::new()));
+                    }
+
+                    found_count += 1;
+                }
+            }
+
+            // Close channels and wait for completion
+            drop(tx_results);
+            drop(tx_stats);
+
+            let total_written = writer_handle.join().unwrap_or(0);
+            let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
+                (Vec::new(), freq_state)
+            });
+
+            // Write statistics files
+            write_streaming_statistics(
+                &base_path,
+                &all_horns,
+                n_usize,
+                scale_min_i32,
+                scale_max_i32,
+                final_freq_state,
+            );
+
+            return StreamingResult {
+                total_combinations: total_written,
+                file_path: config.file_path,
+            };
+        }
+    }
+
+    // Process combinations in parallel (original path for unlimited or large limits)
     combinations
         .par_iter()
         .for_each(|(combo, running_sum, running_m2)| {
@@ -1394,141 +1690,15 @@ where
         };
     }
 
-    // Now write the statistics files
-    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
-        create_stats_writers(&base_path)
-    {
-        // Calculate final statistics
-        let samples_all = all_horns.len();
-        let values_all = samples_all * n_usize;
-
-        // Calculate horns statistics
-        let horns_mean = all_horns.iter().sum::<f64>() / samples_all as f64;
-        let horns_sd = {
-            let variance = all_horns
-                .iter()
-                .map(|&h| (h - horns_mean).powi(2))
-                .sum::<f64>()
-                / samples_all as f64;
-            variance.sqrt()
-        };
-
-        let mut horns_sorted = all_horns.clone();
-        horns_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let horns_min = horns_sorted[0];
-        let horns_max = horns_sorted[samples_all - 1];
-        let horns_median = median(&horns_sorted);
-        let horns_mad = mad(&all_horns, horns_median);
-
-        // Write metrics_main
-        let mm_batch = RecordBatch::try_new(
-            mm_schema,
-            vec![
-                Arc::new(Float64Array::from(vec![count_initial_combinations(
-                    scale_min_i32,
-                    scale_max_i32,
-                ) as f64])),
-                Arc::new(Float64Array::from(vec![samples_all as f64])),
-                Arc::new(Float64Array::from(vec![values_all as f64])),
-            ],
-        );
-        if let Ok(batch) = mm_batch {
-            let _ = mm_writer.write(&batch);
-        }
-        let _ = mm_writer.close();
-
-        // Write metrics_horns
-        let mh_batch = RecordBatch::try_new(
-            mh_schema,
-            vec![
-                Arc::new(Float64Array::from(vec![horns_mean])),
-                Arc::new(Float64Array::from(vec![calculate_horns_uniform(
-                    scale_min_i32,
-                    scale_max_i32,
-                )])),
-                Arc::new(Float64Array::from(vec![horns_sd])),
-                Arc::new(Float64Array::from(vec![horns_sd / horns_mean])),
-                Arc::new(Float64Array::from(vec![horns_mad])),
-                Arc::new(Float64Array::from(vec![horns_min])),
-                Arc::new(Float64Array::from(vec![horns_median])),
-                Arc::new(Float64Array::from(vec![horns_max])),
-                Arc::new(Float64Array::from(vec![horns_max - horns_min])),
-            ],
-        );
-        if let Ok(batch) = mh_batch {
-            let _ = mh_writer.write(&batch);
-        }
-        let _ = mh_writer.close();
-
-        // Extract frequency data from final state
-        let state = final_freq_state.lock().unwrap();
-        let total_values = values_all as f64;
-        let n_samples = samples_all as f64;
-
-        // Write frequency table with all three categories
-        // First write "all" frequencies
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = state.all_freq.get(&scale_value).unwrap_or(&0);
-
-            let freq_batch = RecordBatch::try_new(
-                freq_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["all"])),
-                    Arc::new(Int32Array::from(vec![scale_value])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / n_samples])),
-                    Arc::new(Float64Array::from(vec![*count as f64])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / total_values])),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
-        }
-
-        // Write "horns_min" frequencies
-        let min_n_samples = state.min_count as f64;
-        let min_total_values = (state.min_count * n_usize) as f64;
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = state.min_freq.get(&scale_value).unwrap_or(&0);
-
-            let freq_batch = RecordBatch::try_new(
-                freq_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["horns_min"])),
-                    Arc::new(Int32Array::from(vec![scale_value])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / min_n_samples])),
-                    Arc::new(Float64Array::from(vec![*count as f64])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / min_total_values])),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
-        }
-
-        // Write "horns_max" frequencies
-        let max_n_samples = state.max_count as f64;
-        let max_total_values = (state.max_count * n_usize) as f64;
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = state.max_freq.get(&scale_value).unwrap_or(&0);
-
-            let freq_batch = RecordBatch::try_new(
-                freq_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["horns_max"])),
-                    Arc::new(Int32Array::from(vec![scale_value])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / max_n_samples])),
-                    Arc::new(Float64Array::from(vec![*count as f64])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / max_total_values])),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
-        }
-
-        let _ = freq_writer.close();
-    }
+    // Write statistics files
+    write_streaming_statistics(
+        &base_path,
+        &all_horns,
+        n_usize,
+        scale_min_i32,
+        scale_max_i32,
+        final_freq_state,
+    );
 
     StreamingResult {
         total_combinations: total_written,
