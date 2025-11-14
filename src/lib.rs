@@ -9,11 +9,13 @@
 //! 
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
+pub mod sprite;
+pub mod sprite_types;
+pub mod grimmer;
 
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use std::collections::VecDeque;
 use rayon::prelude::*;
-use num::{Float, Integer, ToPrimitive, FromPrimitive, NumCast};
 
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
