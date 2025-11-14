@@ -626,7 +626,6 @@ pub mod tests {
     use super::*;
     use rand::rngs::StdRng;
 
-
     #[test]
     fn sprite_test_mean() {
         let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default, false).unwrap();
@@ -640,19 +639,23 @@ pub mod tests {
         let sprite_parameters = set_parameters(2.2, 1.3, 20, 1, 5, None, None, 1, None, RestrictionsOption::Default, false).unwrap();
         let results = find_possible_distributions(&sprite_parameters, 5, false, &mut StdRng::seed_from_u64(1234));
 
-        assert_eq!(rust_round(results[0].sd, 1), 1.3);
+        for result in results {
+            assert_eq!(rust_round(result.sd, 1), 1.3);
+        }
     }
-    // #[test]
-    // fn sprite_test_big() {
-    //         let params = set_parameters(26.281, 14.6339, 1000, 1, 50, Some(3), None, 1, None, RestrictionsOption::Default, true).unwrap();
-    //     // let params = set_parameters(50.5565, 29.1503, 1231, 1, 100, None, None, 1, None, RestrictionsOption::Default, false).unwrap();
-    //
-    //     let mut rng = StdRng::seed_from_u64(42);
-    //
-    //     let result0 = &find_possible_distributions(&params, 1, false, &mut rng)[0];
-    //
-    //     assert_eq!(result0.values, vec![0.0, 0.0, 0.0]);
-    //
-    // }
+    #[test]
+    fn sprite_test_big() {
+        let params = set_parameters(26.281, 14.6339, 1000, 1, 50, Some(3), Some(4), 1, None, RestrictionsOption::Default, true).unwrap();
+        // let params = set_parameters(50.5565, 29.1503, 1231, 1, 100, None, None, 1, None, RestrictionsOption::Default, false).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let results = &find_possible_distributions(&params, 10, false, &mut rng);
+
+        for result in results {
+            assert_eq!(rust_round(result.mean, 3), 26.281);
+            assert_eq!(rust_round(result.sd, 4), 14.6339);
+        }
+    }
 }
 
