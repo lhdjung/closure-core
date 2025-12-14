@@ -17,6 +17,16 @@ use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
+// Trait aliases for shared type constraints between CLOSURE and SPRITE
+
+/// Trait alias for floating-point calculation type
+pub trait FloatType: Float + FromPrimitive + Send + Sync {}
+impl<T: Float + FromPrimitive + Send + Sync> FloatType for T {}
+
+/// Trait alias for value type (integers representing scaled values)
+pub trait ValueType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
+impl<U: Integer + NumCast + ToPrimitive + Copy + Send + Sync> ValueType for U {}
+
 /// Implements range over Rint-friendly generic integer type U
 struct IntegerRange<U>
 where
