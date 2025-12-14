@@ -804,14 +804,25 @@ pub mod tests {
 
     #[test]
     fn sprite_test_big() {
+        // What is the target mean and SD?
+        let test_mean = 26.281;
+        let test_sd = 14.6339;
+
+        // To how many decimal places were they reported?
+        let test_mean_digits = 3;
+        let test_sd_digits = 4;
+
+        // How many distributions should SPRITE generate?
+        let target_runs = 500;
+
         let params = set_parameters(
-            26.281,
-            14.6339,
+            test_mean,
+            test_sd,
             1000,
             1,
             50,
-            Some(3),
-            Some(4),
+            Some(test_mean_digits),
+            Some(test_sd_digits),
             1,
             None,
             RestrictionsOption::Default,
@@ -822,11 +833,15 @@ pub mod tests {
 
         let mut rng = StdRng::seed_from_u64(42);
 
-        let results = &find_possible_distributions(&params, 10, false, &mut rng);
+        let results = &find_possible_distributions(&params, target_runs, false, &mut rng);
+
+        println!("Number of target results: {:?}\n", results.len());
+        println!("First result:\n");
+        println!("{:?}", results[0]);
 
         for result in results {
-            assert_eq!(rust_round(result.mean, 3), 26.281);
-            assert_eq!(rust_round(result.sd, 4), 14.6339);
+            assert_eq!(rust_round(result.mean, test_mean_digits), test_mean);
+            assert_eq!(rust_round(result.sd, test_sd_digits), test_sd);
         }
     }
 }
