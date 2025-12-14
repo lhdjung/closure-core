@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Keys;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct OccurrenceConstraints {
@@ -12,9 +12,13 @@ pub struct OccurrenceConstraints {
 }
 
 impl OccurrenceConstraints {
-    pub fn new(exact: HashMap<i32, usize>, minimum: HashMap<i32, usize>, maximum: Option<HashMap<i32, usize>>) -> Self {
+    pub fn new(
+        exact: HashMap<i32, usize>,
+        minimum: HashMap<i32, usize>,
+        maximum: Option<HashMap<i32, usize>>,
+    ) -> Self {
         Self {
-            exact, 
+            exact,
             minimum,
             maximum,
         }
@@ -95,9 +99,7 @@ impl RestrictionsOption {
     pub fn extract(self) -> RestrictionsMinimum {
         match self {
             RestrictionsOption::Opt(s) => s.unwrap(),
-            _ => panic!()
+            _ => panic!(),
         }
     }
 }
-
-
