@@ -72,6 +72,7 @@ pub struct SpriteParameters {
     pub n_fixed: usize,
 }
 
+#[allow(deprecated)]
 fn abm_internal(
     total: &BigDecimal,
     n_obs: &BigDecimal,
@@ -108,6 +109,7 @@ fn abm_internal(
     v.iter().map(|i| i.to_f64().unwrap()).collect()
 }
 
+#[allow(deprecated)]
 pub fn sd_limits(
     n_obs: u32,
     mean: f64,
@@ -156,6 +158,7 @@ pub fn sd_limits(
     (rust_round(min_sd, sd_prec), rust_round(max_sd, sd_prec))
 }
 
+#[allow(deprecated)]
 #[allow(clippy::too_many_arguments)]
 pub fn set_parameters(
     mean: f64,
@@ -335,6 +338,7 @@ pub enum Outcome {
 
 /// Holds the detailed results of a single distribution search (deprecated)
 #[deprecated(since = "0.2.0", note = "Use sprite_parallel() instead")]
+#[allow(deprecated)]
 #[derive(Debug, Clone)]
 pub struct DistributionResult {
     pub outcome: Outcome,
@@ -976,6 +980,7 @@ where
 /// This function randomly selects elements and nudges them up or down according
 /// to a list of possible values until the rounded mean of the full dataset
 /// matches the target
+#[allow(deprecated)]
 pub fn adjust_mean(
     vec: &mut [f64],
     fixed_vals: &[f64],
@@ -1056,6 +1061,7 @@ pub fn adjust_mean(
 /// while keeping the mean approximately constant
 ///
 /// This is a core part of the SPRITE algorithm's search process
+#[allow(deprecated)]
 pub fn shift_values(vec: &mut [f64], params: &SpriteParameters, rng: &mut impl Rng) -> bool {
     // In-place SD calculation
     let sum_vec: f64 = vec.iter().sum();
@@ -1125,6 +1131,7 @@ pub fn shift_values(vec: &mut [f64], params: &SpriteParameters, rng: &mut impl R
 /// 1. Generating a random set of starting data.
 /// 2. Iteratively adjusting the data to match the target mean.
 /// 3. Iteratively shifting values to match the target standard deviation.
+#[allow(deprecated)]
 pub fn find_possible_distribution(
     params: &SpriteParameters,
     rng: &mut impl Rng,
@@ -1228,6 +1235,7 @@ pub fn find_possible_distribution(
 /// This function repeatedly calls `find_possible_distribution` to gather a set of
 /// unique, successful distributions. It includes logic to stop if the search stalls
 /// or finds too many consecutive duplicates.
+#[allow(deprecated)]
 pub fn find_possible_distributions(
     params: &SpriteParameters,
     n_distributions: usize,
