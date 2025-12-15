@@ -2,9 +2,8 @@ use core::f64;
 use regex::Regex;
 use thiserror::Error;
 
-use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero, Pow};
+use bigdecimal::{BigDecimal, FromPrimitive, Pow, ToPrimitive, Zero};
 use std::str::FromStr;
-
 
 const _EPS: f64 = f64::EPSILON;
 const FUZZ_VALUE: f64 = 1e-12;
@@ -64,14 +63,13 @@ pub fn round_up(number: f64, decimals: i32) -> f64 {
     }
 }
 
-
 pub fn round_trunc(x: f64, digits: i32) -> f64 {
     let p10 = 10.0f64.powi(digits);
 
     //For symmetry between positive and negative numbers, use the absolute value:
     // the rust f64::trunc() function may have different properties than the R trunc() function, check to make sure
 
-    let core = (x.abs() * p10).trunc() / p10; 
+    let core = (x.abs() * p10).trunc() / p10;
     match x < 0.0 {
         true => -core,
         false => core,
@@ -215,7 +213,6 @@ pub fn reround(
     threshold: f64,
     symmetric: bool,
 ) -> Vec<f64> {
-
     x.iter()
         .flat_map(|&x| {
             reconstruct_rounded_numbers_scalar(x, digits, rounding, threshold, symmetric)
@@ -287,7 +284,6 @@ pub fn grim_scalar_rust(
     let rec_x_upper_bd = &rec_sum_ceil / &n_items_bd;
     let rec_x_lower_bd = &rec_sum_floor / &n_items_bd;
 
-
     // Convert back to f64 to interface with the existing `dustify` and `reround` logic
     let rec_x_upper = dustify(rec_x_upper_bd.to_f64().unwrap());
     let rec_x_lower = dustify(rec_x_lower_bd.to_f64().unwrap());
@@ -297,11 +293,11 @@ pub fn grim_scalar_rust(
         .cloned()
         .chain(rec_x_lower.iter().cloned())
         .collect();
-    
+
     let grains_rounded = reround(conc, digits, rounding, threshold, symmetric);
 
     // The final check still uses the original f64 value of the mean, which is correct
-    let x_num: f64 = x.parse().unwrap(); 
+    let x_num: f64 = x.parse().unwrap();
     let bools: Vec<bool> = grains_rounded
         .clone()
         .into_iter()
@@ -329,7 +325,6 @@ pub fn grim_scalar_rust(
         }
     }
 }
-
 
 /// Determines whether a standard deviation is possible from the listed mean and sample size
 ///
@@ -372,8 +367,18 @@ pub fn grimmer_scalar(
     let symmetric: bool = bool_params[2];
 
     // Pass-through to GRIM test, which is assumed to be correct
-    if let Ok(GrimReturn::Bool(false)) = grim_scalar_rust(x, n, bool_params.clone(), items, rounding, threshold, tolerance) {
-        if show_rec { println!("{x} is GRIM inconsistent"); }
+    if let Ok(GrimReturn::Bool(false)) = grim_scalar_rust(
+        x,
+        n,
+        bool_params.clone(),
+        items,
+        rounding,
+        threshold,
+        tolerance,
+    ) {
+        if show_rec {
+            println!("{x} is GRIM inconsistent");
+        }
         return false;
     };
 
@@ -390,7 +395,7 @@ pub fn grimmer_scalar(
     let x_real = &sum_real / &n_items_bd;
 
     let digits_sd = decimal_places_scalar(Some(sd), ".").unwrap();
-    
+
     // [BigDecimal] Calculate sd bounds using decimal math
 
     let p10 = Pow::pow(10u32, digits_sd as u32 + 1);
@@ -403,21 +408,34 @@ pub fn grimmer_scalar(
     let n_minus_1_bd = BigDecimal::from_u32(n - 1).unwrap();
     let items_pow2_bd = items_bd.square();
 
-    let sum_squares_lower = (&n_minus_1_bd * sd_lower.square() + &n_bd * x_real.square()) * &items_pow2_bd;
-    let sum_squares_upper = (&n_minus_1_bd * sd_upper.square() + &n_bd * x_real.square()) * &items_pow2_bd;
+    let sum_squares_lower =
+        (&n_minus_1_bd * sd_lower.square() + &n_bd * x_real.square()) * &items_pow2_bd;
+    let sum_squares_upper =
+        (&n_minus_1_bd * sd_upper.square() + &n_bd * x_real.square()) * &items_pow2_bd;
 
     // [BigDecimal] Use ceil() and floor() on BigDecimal
-    let pass_test1 = sum_squares_lower.with_scale_round(0, bigdecimal::RoundingMode::Ceiling) <= sum_squares_upper.with_scale_round(0, bigdecimal::RoundingMode::Floor);
+    let pass_test1 = sum_squares_lower.with_scale_round(0, bigdecimal::RoundingMode::Ceiling)
+        <= sum_squares_upper.with_scale_round(0, bigdecimal::RoundingMode::Floor);
 
     if !pass_test1 {
-        if show_rec { println!("Failed test 1"); }
+        if show_rec {
+            println!("Failed test 1");
+        }
         return false;
     };
-    
+
     // The rest of the logic involves converting back to f64 for the rerounding part,
     // as that logic is complex and less sensitive to the initial amplification.
     // The critical amplification step has been fixed.
-    let integers_possible: Vec<u32> = (sum_squares_lower.with_scale_round(0, bigdecimal::RoundingMode::Ceiling).to_u32().unwrap()..=sum_squares_upper.with_scale_round(0, bigdecimal::RoundingMode::Floor).to_u32().unwrap()).collect();
+    let integers_possible: Vec<u32> = (sum_squares_lower
+        .with_scale_round(0, bigdecimal::RoundingMode::Ceiling)
+        .to_u32()
+        .unwrap()
+        ..=sum_squares_upper
+            .with_scale_round(0, bigdecimal::RoundingMode::Floor)
+            .to_u32()
+            .unwrap())
+        .collect();
     let x_real_f64 = x_real.to_f64().unwrap();
 
     let sd_predicted: Vec<f64> = integers_possible
@@ -432,7 +450,11 @@ pub fn grimmer_scalar(
     let sd_f64: f64 = sd.parse().unwrap();
     let sd_dusted = dustify(sd_f64);
     let sd_rec_rounded_dusted: Vec<f64> = sd_rec_rounded.into_iter().flat_map(dustify).collect();
-    let matches_sd: Vec<bool> = sd_dusted.iter().zip(sd_rec_rounded_dusted.iter()).map(|(i, sdr)| is_near(*i, *sdr, f64::EPSILON.powf(0.5))).collect();
+    let matches_sd: Vec<bool> = sd_dusted
+        .iter()
+        .zip(sd_rec_rounded_dusted.iter())
+        .map(|(i, sdr)| is_near(*i, *sdr, f64::EPSILON.powf(0.5)))
+        .collect();
     let pass_test2: bool = matches_sd.iter().any(|&b| b);
 
     if !pass_test2 {
@@ -483,7 +505,6 @@ pub fn grimmer_rust(
     threshold: f64,
     tolerance: f64,
 ) -> Vec<bool> {
-
     xs.iter()
         .zip(sds.iter())
         .zip(ns.iter())
@@ -537,7 +558,6 @@ pub fn grimmer(
     symmetric: bool,
     tolerance: f64,
 ) -> Vec<bool> {
-
     let bool_params = vec![percent, show_reason, symmetric];
     let xs: Vec<&str> = xs.iter().map(|s| &**s).collect();
     let sds: Vec<&str> = sds.iter().map(|s| &**s).collect();
@@ -553,8 +573,6 @@ pub fn grimmer(
         tolerance,
     )
 }
-
-
 
 /// Fuzzes the value of a float by 1e-12
 ///
@@ -644,7 +662,10 @@ pub fn sd_binary_0_n(zeros: u32, n: u32) -> Result<f64, SdBinaryError> {
         return Err(SdBinaryError::InsufficientObservationsError);
     }
 
-    Ok(((f64::from(n) / f64::from(n - 1) ) * ((f64::from(zeros) * ones) / (f64::from(n) ).powi(2))).sqrt())
+    Ok(
+        ((f64::from(n) / f64::from(n - 1)) * ((f64::from(zeros) * ones) / (f64::from(n)).powi(2)))
+            .sqrt(),
+    )
 }
 
 /// Returns the standard deviation of binary variables from the count of one values and the total
@@ -673,7 +694,10 @@ pub fn sd_binary_1_n(ones: u32, n: u32) -> Result<f64, SdBinaryError> {
         return Err(SdBinaryError::InsufficientObservationsError);
     }
 
-    Ok(((f64::from(n) / f64::from(n - 1) ) * ((zeros * f64::from(ones) ) / (f64::from(n) ).powi(2))).sqrt())
+    Ok(
+        ((f64::from(n) / f64::from(n - 1)) * ((zeros * f64::from(ones)) / (f64::from(n)).powi(2)))
+            .sqrt(),
+    )
 }
 
 /// Returns the standard deviation of binary variables from the mean and the total
@@ -701,7 +725,7 @@ pub fn sd_binary_mean_n(mean: f64, n: u32) -> Result<f64, SdBinaryError> {
         return Err(SdBinaryError::InvalidBinaryError);
     }
 
-    Ok(((f64::from(n) / f64::from(n - 1) ) * (mean * (1.0 - mean))).sqrt())
+    Ok(((f64::from(n) / f64::from(n - 1)) * (mean * (1.0 - mean))).sqrt())
 }
 
 pub fn reconstruct_sd_scalar(
@@ -763,7 +787,7 @@ pub fn grim_scalar(
     // pass into grim_scalar_rust()
 
     //let round: &str = rounding.as_str();
-                                                                     // turn Vec<String> to Vec<&str>
+    // turn Vec<String> to Vec<&str>
     let val = grim_scalar_rust(
         x.as_str(),
         n,
@@ -783,7 +807,6 @@ pub fn grim_scalar(
     }
 }
 
-
 // vector wrapper for grim_scalar_rust
 pub fn grim_rust(
     xs: Vec<&str>,
@@ -794,7 +817,6 @@ pub fn grim_rust(
     threshold: f64,
     tolerance: f64,
 ) -> Vec<bool> {
-
     let vals: Vec<Result<GrimReturn, GrimScalarError>> = xs
         .iter()
         .zip(ns.iter())
@@ -822,8 +844,6 @@ pub fn grim_rust(
         .collect()
 }
 
-
-
 /// Automatically unpacks and tests the output of grim_scalar_rust and checks whether its main bool
 /// result matches the expected bool
 pub fn grim_tester(grim_result: Result<GrimReturn, GrimScalarError>, expected: bool) {
@@ -838,4 +858,3 @@ pub fn grim_tester(grim_result: Result<GrimReturn, GrimScalarError>, expected: b
         Err(_) => panic!(),
     };
 }
-

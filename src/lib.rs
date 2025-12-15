@@ -10,14 +10,12 @@
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-use arrow::array::{
-    ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray,
-};
+use arrow::array::{ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+pub mod grimmer;
 pub mod sprite;
 pub mod sprite_types;
-pub mod grimmer;
 
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use parquet::arrow::ArrowWriter;
@@ -100,6 +98,29 @@ pub struct ClosureResults<U> {
     pub metrics_horns: MetricsHorns,
     pub frequency: FrequencyTable,
     pub results: ResultsTable<U>,
+}
+
+/// Context for CLOSURE search containing precomputed bounds and lookup tables
+/// for efficient DFS pruning during sample space exploration
+struct ClosureSearchContext<T, U> {
+    /// Upper bound for target sum (mean * n + rounding_error_mean * n)
+    target_sum_upper: T,
+    /// Lower bound for target sum (mean * n - rounding_error_mean * n)
+    target_sum_lower: T,
+    /// Upper bound for standard deviation
+    sd_upper: T,
+    /// Lower bound for standard deviation
+    sd_lower: T,
+    /// Sample size as usize for array indexing
+    n_usize: usize,
+    /// Lookup table: min_scale_sum[value][n_left] = minimum possible sum for n_left remaining positions
+    min_scale_sum: Vec<Vec<T>>,
+    /// Lookup table: scale_max_sum[n_left] = maximum possible sum for n_left remaining positions
+    scale_max_sum: Vec<T>,
+    /// Sample size minus one (n - 1)
+    n_minus_1: U,
+    /// Maximum scale value plus one (scale_max + 1) for range operations
+    scale_max_plus_1: U,
 }
 
 /// Implements range over Rint-friendly generic integer type U
@@ -211,7 +232,7 @@ where
 {
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-    
+
     let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
 
     let mut f_absolute = vec![0.0; nrow_frequency];
@@ -641,24 +662,15 @@ where
 }
 
 /// Internal function to prepare computation parameters
-fn prepare_computation<T, U>(
-/// Generate all valid combinations
-/// 
-/// `dfs_parallel()` computes all valid combinations of integers that
-/// match the given summary statistics.
+/// Initialize the search context for CLOSURE computation
 ///
-/// # Arguments
-/// * `mean` - The mean of the target distribution.
-/// * `sd` - The standard deviation of the target distribution.
-/// * `n` - The number of elements in the target distribution.
-/// * `scale_min` - The minimum value of the scale.
-/// * `scale_max` - The maximum value of the scale.
-/// * `rounding_error_mean` - The rounding error for the mean.
-/// * `rounding_error_sd` - The rounding error for the standard deviation.
-/// # Returns
-/// A vector of vectors, where each inner vector represents a valid combination of integers
-/// that matches the given summary statistics.
-pub fn dfs_parallel<T, U>(
+/// Prepares all necessary bounds, lookup tables, and derived parameters needed
+/// for efficient depth-first search through the sample space. This includes:
+/// - Computing target sum bounds accounting for rounding errors
+/// - Computing SD bounds accounting for rounding errors
+/// - Pre-computing lookup tables for O(1) pruning decisions
+/// - Type conversions and convenience values
+fn initialize_closure_search<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -666,16 +678,14 @@ pub fn dfs_parallel<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
-) -> (T, T, T, T, usize, Vec<Vec<T>>, Vec<T>, U, U)
+) -> ClosureSearchContext<T, U>
 where
     T: Float + FromPrimitive + Send + Sync,
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
 {
     // Convert integer `n` to float to enable multiplication with other floats
-    let n_float = T::from(
-        U::to_i32(&n)
-            .unwrap()).unwrap();
-    
+    let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
+
     // Target sum calculations
     let target_sum = mean * n_float;
     let rounding_error_sum = rounding_error_mean * n_float;
@@ -710,17 +720,17 @@ where
     let n_minus_1 = n - U::one();
     let scale_max_plus_1 = scale_max + U::one();
 
-    (
+    ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
         sd_upper,
         sd_lower,
         n_usize,
-        min_scale_sum_t,
-        scale_max_sum_t,
+        min_scale_sum: min_scale_sum_t,
+        scale_max_sum: scale_max_sum_t,
         n_minus_1,
         scale_max_plus_1,
-    )
+    }
 }
 
 /// Generate initial combinations for parallel processing
@@ -779,17 +789,17 @@ where
     T: Float + FromPrimitive + Send + Sync,
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
 {
-    let (
+    let ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
         sd_upper,
         sd_lower,
         n_usize,
-        min_scale_sum_t,
-        scale_max_sum_t,
+        min_scale_sum,
+        scale_max_sum,
         n_minus_1,
         scale_max_plus_1,
-    ) = prepare_computation(
+    } = initialize_closure_search(
         mean,
         sd,
         n,
@@ -822,8 +832,8 @@ where
                     target_sum_lower,
                     sd_upper,
                     sd_lower,
-                    &min_scale_sum_t,
-                    &scale_max_sum_t,
+                    &min_scale_sum,
+                    &scale_max_sum,
                     n_minus_1,
                     scale_max_plus_1,
                     scale_min,
@@ -865,8 +875,8 @@ where
                         target_sum_lower,
                         sd_upper,
                         sd_lower,
-                        &min_scale_sum_t,
-                        &scale_max_sum_t,
+                        &min_scale_sum,
+                        &scale_max_sum,
                         n_minus_1,
                         scale_max_plus_1,
                         scale_min,
@@ -895,8 +905,8 @@ where
                     target_sum_lower,
                     sd_upper,
                     sd_lower,
-                    &min_scale_sum_t,
-                    &scale_max_sum_t,
+                    &min_scale_sum,
+                    &scale_max_sum,
                     n_minus_1,
                     scale_max_plus_1,
                     scale_min,
@@ -1208,17 +1218,17 @@ where
     T: Float + FromPrimitive + Send + Sync,
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
 {
-    let (
+    let ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
         sd_upper,
         sd_lower,
         n_usize,
-        min_scale_sum_t,
-        scale_max_sum_t,
+        min_scale_sum,
+        scale_max_sum,
         n_minus_1,
         scale_max_plus_1,
-    ) = prepare_computation(
+    } = initialize_closure_search(
         mean,
         sd,
         n,
@@ -1454,8 +1464,8 @@ where
                     target_sum_lower,
                     sd_upper,
                     sd_lower,
-                    &min_scale_sum_t,
-                    &scale_max_sum_t,
+                    &min_scale_sum,
+                    &scale_max_sum,
                     n_minus_1,
                     scale_max_plus_1,
                     scale_min,
@@ -1529,9 +1539,9 @@ where
             drop(tx_stats);
 
             let total_written = writer_handle.join().unwrap_or(0);
-            let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
-                (Vec::new(), freq_state)
-            });
+            let (all_horns, final_freq_state) = stats_handle
+                .join()
+                .unwrap_or_else(|_| (Vec::new(), freq_state));
 
             // Write statistics files
             write_streaming_statistics(
@@ -1596,8 +1606,8 @@ where
                 target_sum_lower,
                 sd_upper,
                 sd_lower,
-                &min_scale_sum_t,
-                &scale_max_sum_t,
+                &min_scale_sum,
+                &scale_max_sum,
                 n_minus_1,
                 scale_max_plus_1,
                 scale_min,
@@ -1762,7 +1772,7 @@ fn dfs_branch<T, U>(
     scale_max_sum_t: &[T],
     _n_minus_1: U,
     scale_max_plus_1: U,
-    scale_min: U, // Need this to calculate indices
+    scale_min: U,              // Need this to calculate indices
     stop_after: Option<usize>, // Optional limit for early termination
 ) -> Vec<Vec<U>>
 where
