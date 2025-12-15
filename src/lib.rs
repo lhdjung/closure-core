@@ -688,8 +688,8 @@ fn initialize_closure_search<T, U>(
     rounding_error_sd: T,
 ) -> ClosureSearchContext<T, U>
 where
-    T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+    T: FloatType,
+    U: IntegerType,
 {
     // Convert integer `n` to float to enable multiplication with other floats
     let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
@@ -744,8 +744,8 @@ where
 /// Generate initial combinations for parallel processing
 fn generate_initial_combinations<T, U>(scale_min: U, scale_max_plus_1: U) -> Vec<(Vec<U>, T, T)>
 where
-    T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+    T: FloatType,
+    U: IntegerType,
 {
     range_u(scale_min, scale_max_plus_1)
         .flat_map(|i| {
@@ -794,8 +794,8 @@ pub fn dfs_parallel<T, U>(
     stop_after: Option<usize>,
 ) -> ClosureResults<U>
 where
-    T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
+    T: FloatType,
+    U: IntegerType + 'static,
 {
     let ClosureSearchContext {
         target_sum_upper,
@@ -1223,8 +1223,8 @@ pub fn dfs_parallel_streaming<T, U>(
     stop_after: Option<usize>,
 ) -> StreamingResult
 where
-    T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync + 'static,
+    T: FloatType,
+    U: IntegerType + 'static,
 {
     let ClosureSearchContext {
         target_sum_upper,
@@ -1784,8 +1784,8 @@ fn dfs_branch<T, U>(
     stop_after: Option<usize>, // Optional limit for early termination
 ) -> Vec<Vec<U>>
 where
-    T: Float + FromPrimitive + Send + Sync,
-    U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
+    T: FloatType,
+    U: IntegerType,
 {
     let mut stack = VecDeque::with_capacity(n * 2);
     let mut results = Vec::new();
