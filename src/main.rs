@@ -1,12 +1,9 @@
-pub mod grimmer;
-pub mod sprite;
-pub mod sprite_types;
-
-use crate::sprite::{find_possible_distributions, set_parameters};
-use crate::sprite_types::RestrictionsOption;
+use closure_core::sprite::{find_possible_distributions, set_parameters};
+use closure_core::sprite_types::RestrictionsOption;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 
+#[allow(deprecated)]
 fn main() {
     let sprite_parameters = set_parameters(
         2.2,

@@ -16,7 +16,7 @@ use crate::grimmer::{
     decimal_places_scalar, grim_scalar_rust, grimmer_scalar, is_near, rust_round, GrimReturn,
 };
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
-use crate::{FloatType, ValueType};
+use crate::{FloatType, IntegerType};
 
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
@@ -38,7 +38,7 @@ pub enum ParameterError {
 struct SpriteParams<T, U>
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     mean: T,
     sd: T,
@@ -368,7 +368,7 @@ fn build_sprite_params<T, U>(
 ) -> Result<SpriteParams<T, U>, ParameterError>
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     if min_val >= max_val {
         return Err(ParameterError::InputValidation(
@@ -626,7 +626,7 @@ pub fn sprite_parallel<T, U>(
 ) -> Result<Vec<Vec<U>>, ParameterError>
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     // Build and validate parameters
     let params = build_sprite_params(
@@ -657,7 +657,7 @@ fn find_distributions_internal<T, U>(
 ) -> Vec<Vec<U>>
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     let mut results: Vec<Vec<U>> = Vec::new();
     let mut unique_distributions = HashSet::<Vec<i64>>::new();
@@ -730,7 +730,7 @@ fn find_distribution_internal<T, U>(
 ) -> Result<Vec<U>, String>
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     let r_n = params.n_obs as usize - params.n_fixed;
     if params.possible_values_scaled.is_empty() && r_n > 0 {
@@ -796,7 +796,7 @@ fn adjust_mean_internal<T, U>(
 ) -> Result<(), String>
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     if params.possible_values_scaled.is_empty() {
         return Err("Cannot adjust mean with no possible values.".to_string());
@@ -878,7 +878,7 @@ fn shift_values_internal<T, U>(
 ) -> bool
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     let current_sd: T = compute_sd_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
     let increase_sd = current_sd < params.sd;
@@ -951,7 +951,7 @@ where
 fn compute_mean_scaled<T, U>(vec: &[U], fixed_vals: &[U], scale_factor: u32) -> T
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     let sum_vec: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
     let sum_fixed: i64 = fixed_vals.iter().map(|v| U::to_i64(v).unwrap()).sum();
@@ -965,7 +965,7 @@ where
 fn compute_sd_scaled<T, U>(vec: &[U], fixed_vals: &[U], scale_factor: u32) -> T
 where
     T: FloatType,
-    U: ValueType,
+    U: IntegerType,
 {
     let scale_f = scale_factor as f64;
     let combined_mean = compute_mean_scaled(vec, fixed_vals, scale_factor);

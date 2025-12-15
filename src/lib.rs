@@ -13,10 +13,6 @@
 use arrow::array::{ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-pub mod grimmer;
-pub mod sprite;
-pub mod sprite_types;
-
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -28,6 +24,18 @@ use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+
+/// Trait alias for floating-point types used in CLOSURE computations
+pub trait FloatType: Float + FromPrimitive + Send + Sync {}
+impl<T> FloatType for T where T: Float + FromPrimitive + Send + Sync {}
+
+/// Trait alias for integer types used in CLOSURE computations
+pub trait IntegerType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
+impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
+
+pub mod grimmer;
+pub mod sprite;
+pub mod sprite_types;
 
 /// Configuration for Parquet output in memory mode
 /// Used with `dfs_parallel()` to optionally save results while returning them
