@@ -22,6 +22,7 @@ fn main() {
         false,
     )
     .unwrap();
+
     let results = find_possible_distributions(
         &sprite_parameters,
         5,

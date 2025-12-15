@@ -1,6 +1,9 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
-use bigdecimal::{BigDecimal, FromPrimitive as BigDecimalFromPrimitive, ToPrimitive as BigDecimalToPrimitive, Zero};
+use bigdecimal::{
+    BigDecimal, FromPrimitive as BigDecimalFromPrimitive, ToPrimitive as BigDecimalToPrimitive,
+    Zero,
+};
 use core::f64;
 use num::NumCast;
 use num_traits::Float;
@@ -9,11 +12,11 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
-use crate::{FloatType, ValueType};
 use crate::grimmer::{
     decimal_places_scalar, grim_scalar_rust, grimmer_scalar, is_near, rust_round, GrimReturn,
 };
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
+use crate::{FloatType, ValueType};
 
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
@@ -429,7 +432,15 @@ where
         }
 
         // Check SD limits
-        let sd_lims = sd_limits(n_obs, mean_f64, sd_f64, min_val, max_val, Some(sd_prec), n_items);
+        let sd_lims = sd_limits(
+            n_obs,
+            mean_f64,
+            sd_f64,
+            min_val,
+            max_val,
+            Some(sd_prec),
+            n_items,
+        );
         if !(sd_f64 >= sd_lims.0 && sd_f64 <= sd_lims.1) {
             return Err(ParameterError::InputValidation(format!(
                 "SD is outside the possible range: [{}, {}]",
@@ -660,7 +671,9 @@ where
 
         // Stop if the search seems to be stalled
         if consecutive_failures >= 10 {
-            eprintln!("Warning: No successful distribution found in the last 10 attempts. Exiting.");
+            eprintln!(
+                "Warning: No successful distribution found in the last 10 attempts. Exiting."
+            );
             break;
         }
 
@@ -683,10 +696,8 @@ where
                 distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
 
                 // Convert to hashable format for uniqueness check
-                let hashable_values: Vec<i64> = distribution
-                    .iter()
-                    .map(|v| U::to_i64(v).unwrap())
-                    .collect();
+                let hashable_values: Vec<i64> =
+                    distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
 
                 if unique_distributions.insert(hashable_values) {
                     results.push(distribution);
@@ -742,7 +753,8 @@ where
 
     for _ in 1..=max_loops_sd {
         // Check for success
-        let current_sd: T = compute_sd_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
+        let current_sd: T =
+            compute_sd_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
 
         if (current_sd - params.sd).abs() <= granule_sd {
             // Success - combine vec with fixed responses
@@ -755,9 +767,12 @@ where
         shift_values_internal(&mut vec, params, rng);
 
         // Check for and correct mean drift
-        let current_mean = compute_mean_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
-        let target_mean_rounded = T::from(rust_round(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
-        let current_mean_rounded = T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+        let current_mean =
+            compute_mean_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
+        let target_mean_rounded =
+            T::from(rust_round(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
+        let current_mean_rounded =
+            T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
 
         if !is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -790,9 +805,12 @@ where
     let target_mean = params.mean;
 
     for _ in 0..max_iter {
-        let current_mean = compute_mean_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
-        let target_mean_rounded = T::from(rust_round(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
-        let current_mean_rounded = T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+        let current_mean =
+            compute_mean_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
+        let target_mean_rounded =
+            T::from(rust_round(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
+        let current_mean_rounded =
+            T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
 
         if is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
