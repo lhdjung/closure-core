@@ -10,7 +10,9 @@ readme = "README.md"
 
 
 [dependencies]
+arrow = "55.1.0"
 num = "0.4.3"
+parquet = "55.1.0"
 bigdecimal = "0.4.8"
 num-traits = "0.2.19"
 rand = "0.9.1"
