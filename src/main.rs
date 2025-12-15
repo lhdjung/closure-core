@@ -1,3 +1,4 @@
+use closure_core::grimmer::rust_round;
 use closure_core::sprite::{find_possible_distributions, set_parameters};
 use closure_core::sprite_types::RestrictionsOption;
 use rand::prelude::*;
@@ -26,5 +27,5 @@ fn main() {
         &mut StdRng::seed_from_u64(1234),
     );
 
-    assert_eq!(results[0].mean, 2.2);
+    assert_eq!(rust_round(results[0].mean, 1), 2.2);
 }
