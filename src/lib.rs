@@ -15,6 +15,10 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+pub mod sprite;
+pub mod sprite_types;
+pub mod grimmer;
+
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -638,6 +642,23 @@ where
 
 /// Internal function to prepare computation parameters
 fn prepare_computation<T, U>(
+/// Generate all valid combinations
+/// 
+/// `dfs_parallel()` computes all valid combinations of integers that
+/// match the given summary statistics.
+///
+/// # Arguments
+/// * `mean` - The mean of the target distribution.
+/// * `sd` - The standard deviation of the target distribution.
+/// * `n` - The number of elements in the target distribution.
+/// * `scale_min` - The minimum value of the scale.
+/// * `scale_max` - The maximum value of the scale.
+/// * `rounding_error_mean` - The rounding error for the mean.
+/// * `rounding_error_sd` - The rounding error for the standard deviation.
+/// # Returns
+/// A vector of vectors, where each inner vector represents a valid combination of integers
+/// that matches the given summary statistics.
+pub fn dfs_parallel<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -651,8 +672,10 @@ where
     U: Integer + NumCast + ToPrimitive + Copy + Send + Sync,
 {
     // Convert integer `n` to float to enable multiplication with other floats
-    let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
-
+    let n_float = T::from(
+        U::to_i32(&n)
+            .unwrap()).unwrap();
+    
     // Target sum calculations
     let target_sum = mean * n_float;
     let rounding_error_sum = rounding_error_mean * n_float;
