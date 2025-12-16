@@ -8,8 +8,11 @@ use core::f64;
 use num::NumCast;
 use num_traits::Float;
 use rand::prelude::*;
+use rayon::prelude::*;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use crate::grimmer::{
@@ -649,78 +652,128 @@ where
     Ok(results)
 }
 
-/// Internal function to find multiple distributions
+/// Internal function to find multiple distributions (parallelized with rayon)
 fn find_distributions_internal<T, U>(
     params: &SpriteParams<T, U>,
     n_distributions: usize,
-    rng: &mut impl Rng,
+    _rng: &mut impl Rng,
 ) -> Vec<Vec<U>>
 where
     T: FloatType,
     U: IntegerType,
 {
-    let mut results: Vec<Vec<U>> = Vec::new();
-    let mut unique_distributions = HashSet::<Vec<i64>>::new();
-    let mut consecutive_failures = 0;
-    let mut consecutive_duplicates = 0;
+    // Shared state protected by mutexes
+    let unique_distributions = Arc::new(Mutex::new(HashSet::<Vec<i64>>::new()));
+    let results = Arc::new(Mutex::new(Vec::<Vec<U>>::new()));
 
-    for _ in 0..(n_distributions * MAX_DUP_LOOPS as usize) {
-        if unique_distributions.len() >= n_distributions {
+    // Atomic counters for tracking failures and duplicates
+    let total_failures = Arc::new(AtomicU32::new(0));
+    let total_duplicates = Arc::new(AtomicU32::new(0));
+    let should_stop = Arc::new(AtomicBool::new(false));
+
+    // Process in batches for better control and early termination
+    let batch_size = 100;
+    let max_iterations = n_distributions * MAX_DUP_LOOPS as usize;
+
+    for batch_start in (0..max_iterations).step_by(batch_size) {
+        if should_stop.load(Ordering::Relaxed) {
             break;
         }
 
-        // Stop if the search seems to be stalled
-        if consecutive_failures >= 10 {
+        // Check if we already have enough distributions
+        {
+            let unique = unique_distributions.lock().unwrap();
+            if unique.len() >= n_distributions {
+                break;
+            }
+        }
+
+        let batch_end = (batch_start + batch_size).min(max_iterations);
+        let batch_range = batch_start..batch_end;
+
+        // Parallel processing of the current batch using rayon
+        batch_range.into_par_iter().for_each(|_| {
+            if should_stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            // Check whether the target number of distributions was reached
+            {
+                let unique = unique_distributions.lock().unwrap();
+                if unique.len() >= n_distributions {
+                    should_stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+
+            // Use thread-local RNG for thread safety
+            let mut thread_rng = rand::rng();
+
+            match find_distribution_internal(params, &mut thread_rng) {
+                Ok(mut distribution) => {
+                    distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
+
+                    // Convert to hashable format for uniqueness check
+                    let hashable_values: Vec<i64> =
+                        distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
+
+                    let mut unique = unique_distributions.lock().unwrap();
+                    if unique.insert(hashable_values) {
+                        results.lock().unwrap().push(distribution);
+                        total_failures.store(0, Ordering::Relaxed);
+                        total_duplicates.store(0, Ordering::Relaxed);
+                    } else {
+                        total_duplicates.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
+                    total_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+
+        // Check early stopping conditions after each batch
+        let failures = total_failures.load(Ordering::Relaxed);
+        let duplicates = total_duplicates.load(Ordering::Relaxed);
+
+        if failures >= 1000 {
             eprintln!(
-                "Warning: No successful distribution found in the last 10 attempts. Exiting."
+                "Warning: Too many failed attempts ({}). Stopping search.",
+                failures
             );
+            should_stop.store(true, Ordering::Relaxed);
             break;
         }
 
-        // Calculate max duplicates allowed before stopping
-        let n_found = unique_distributions.len() as f64;
+        let n_found = unique_distributions.lock().unwrap().len() as f64;
         let max_duplications = if n_found > 0.0 {
             (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32
         } else {
-            100
+            1000
         }
-        .max(100);
+        .max(1000);
 
-        if consecutive_duplicates > max_duplications {
-            eprintln!("Warning: Found too many consecutive duplicate distributions. Exiting.");
+        if duplicates > max_duplications {
+            eprintln!(
+                "Warning: Found too many duplicate distributions ({}). Stopping search.",
+                duplicates
+            );
+            should_stop.store(true, Ordering::Relaxed);
             break;
-        }
-
-        match find_distribution_internal(params, rng) {
-            Ok(mut distribution) => {
-                distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
-
-                // Convert to hashable format for uniqueness check
-                let hashable_values: Vec<i64> =
-                    distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
-
-                if unique_distributions.insert(hashable_values) {
-                    results.push(distribution);
-                    consecutive_failures = 0;
-                    consecutive_duplicates = 0;
-                } else {
-                    consecutive_duplicates += 1;
-                }
-            }
-            Err(_) => {
-                consecutive_failures += 1;
-            }
         }
     }
 
-    if unique_distributions.len() < n_distributions {
+    let final_results = results.lock().unwrap().clone();
+    let unique_count = unique_distributions.lock().unwrap().len();
+
+    if unique_count < n_distributions {
         eprintln!(
             "Only {} matching distributions could be found.",
-            unique_distributions.len()
+            unique_count
         );
     }
 
-    results
+    final_results
 }
 
 /// Internal function to find a single distribution
@@ -1502,15 +1555,18 @@ pub mod tests {
         let test_mean_digits = 3;
         let test_sd_digits = 4;
 
+        // What is the target sample size?
+        let test_n = 2000;
+
         // How many distributions should SPRITE generate?
-        let target_runs = 500;
+        let target_runs = 5000;
 
         let mut rng = StdRng::seed_from_u64(42);
 
         let results: Vec<Vec<i32>> = sprite_parallel(
             test_mean,
             test_sd,
-            1000,
+            test_n,
             1,
             50,
             Some(test_mean_digits),
@@ -1531,12 +1587,17 @@ pub mod tests {
         // Scale factor is 10^max(3,4) = 10000
         let scale_factor = 10_u32.pow(test_sd_digits as u32);
 
+        // Go through the SPRITE results and check if they conform to the
+        // input mean and SD. If any result sample doesn't, throw an error.
         for dist_scaled in &results {
             let dist = unscale_distribution(dist_scaled, scale_factor);
             let computed_mean = mean(&dist);
             let computed_sd = std_dev(&dist).unwrap();
-            assert_eq!(rust_round(computed_mean, test_mean_digits), test_mean);
-            assert_eq!(rust_round(computed_sd, test_sd_digits), test_sd);
+            let rounded_mean = rust_round(computed_mean, test_mean_digits);
+            let rounded_sd = rust_round(computed_sd, test_sd_digits);
+
+            assert_eq!(rounded_mean, test_mean);
+            assert_eq!(rounded_sd, test_sd);
         }
     }
 }
