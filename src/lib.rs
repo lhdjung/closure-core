@@ -269,7 +269,7 @@ where
 /// Calculate median of a sorted vector
 fn median(sorted: &[f64]) -> f64 {
     let len = sorted.len();
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
     } else {
         sorted[len / 2]
@@ -483,7 +483,7 @@ fn create_samples_writer(
     // Create schema where each position in the sample is a column
     // Column names will be pos1, pos2, pos3, etc.
     let fields: Vec<Field> = (1..=sample_size)
-        .map(|i| Field::new(&format!("pos{}", i), DataType::Int32, false))
+        .map(|i| Field::new(format!("pos{}", i), DataType::Int32, false))
         .collect();
 
     let schema = Arc::new(Schema::new(fields));
@@ -536,7 +536,7 @@ where
 
     // Create schema with column names pos1, pos2, pos3, etc.
     let fields: Vec<Field> = (1..=sample_size)
-        .map(|i| Field::new(&format!("pos{}", i), DataType::Int32, false))
+        .map(|i| Field::new(format!("pos{}", i), DataType::Int32, false))
         .collect();
     let schema = Arc::new(Schema::new(fields));
 
@@ -1586,7 +1586,7 @@ where
 
             // Track progress through initial combinations
             let current_initial = initial_combo_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if config.show_progress && current_initial % 10 == 0 {
+            if config.show_progress && current_initial.is_multiple_of(10) {
                 let percentage = (current_initial as f64 / initial_combo_total as f64) * 100.0;
                 eprintln!(
                     "Progress: {:.1}% of initial combinations explored...",
@@ -1715,11 +1715,6 @@ where
                 // Send to writer and stats collector
                 if tx_results.send(final_results).is_err() {
                     // Channel is closed, writer must have failed
-                    return;
-                }
-
-                if tx_stats.send((horns_batch, HashMap::new())).is_err() {
-                    return;
                 }
             }
         });
