@@ -55,9 +55,13 @@ where
 {
     mean: T,
     sd: T,
-    n_obs: u32,
-    m_prec: i32,
-    sd_prec: i32,
+    n: U, // Changed from n_obs: u32 to match CLOSURE
+    #[allow(dead_code)] // Stored for potential future use/debugging
+    rounding_error_mean: T, // New: tolerance for mean
+    #[allow(dead_code)] // Stored for potential future use/debugging
+    rounding_error_sd: T, // New: tolerance for SD
+    m_prec: i32, // Internal: inferred from rounding_error_mean
+    sd_prec: i32, // Internal: inferred from rounding_error_sd
     /// Scale factor used to convert floating-point values to integers
     scale_factor: u32,
     /// Scaled possible values (integers)
@@ -364,16 +368,60 @@ pub struct DistributionResult {
     pub iterations: u32,
 }
 
+/// Infer precision (decimal places) from rounding error
+///
+/// Converts a rounding error value to the equivalent number of decimal places.
+/// This function inverts the relationship: rounding_error = 10^(-precision) / 2
+///
+/// # Examples
+/// ```
+/// // Rounding error 0.05 means values rounded to 1 decimal place (±0.05)
+/// assert_eq!(precision_from_rounding_error(0.05), 1);
+/// // Rounding error 0.005 means values rounded to 2 decimal places (±0.005)
+/// assert_eq!(precision_from_rounding_error(0.005), 2);
+/// ```
+fn precision_from_rounding_error<T: FloatType>(rounding_error: T) -> i32 {
+    let re_f64 = T::to_f64(&rounding_error).unwrap();
+    if re_f64 <= 0.0 {
+        return 0; // Handle edge case of zero or negative rounding error
+    }
+    // precision = -log10(rounding_error * 2)
+    (-((re_f64 * 2.0).log10())).round() as i32
+}
+
+/// Calculate scale factor from mean and SD rounding errors
+///
+/// The scale factor determines the internal integer representation used by SPRITE.
+/// It is computed as 10^max(m_prec, sd_prec), where the precisions are inferred
+/// from the rounding errors.
+///
+/// # Examples
+/// ```
+/// // If mean has rounding error 0.005 (prec 2) and SD has 0.0005 (prec 3),
+/// // max precision is 3, so scale_factor = 10^3 = 1000
+/// let scale = scale_factor_from_rounding_errors(0.005, 0.0005);
+/// assert_eq!(scale, 1000);
+/// ```
+fn scale_factor_from_rounding_errors<T: FloatType>(
+    rounding_error_mean: T,
+    rounding_error_sd: T,
+) -> u32 {
+    let m_prec = precision_from_rounding_error(rounding_error_mean);
+    let sd_prec = precision_from_rounding_error(rounding_error_sd);
+    let precision = max(m_prec, sd_prec);
+    10_u32.pow(precision as u32)
+}
+
 /// Internal function to build and validate SPRITE parameters
 #[allow(clippy::too_many_arguments)]
 fn build_sprite_params<T, U>(
     mean: T,
     sd: T,
-    n_obs: u32,
-    min_val: i32,
-    max_val: i32,
-    m_prec: Option<i32>,
-    sd_prec: Option<i32>,
+    n: U,                   // Changed from n_obs: u32
+    scale_min: U,           // Changed from min_val: i32
+    scale_max: U,           // Changed from max_val: i32
+    rounding_error_mean: T, // Replaces m_prec: Option<i32>
+    rounding_error_sd: T,   // Replaces sd_prec: Option<i32>
     n_items: u32,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
@@ -383,23 +431,28 @@ where
     T: FloatType,
     U: IntegerType,
 {
-    if min_val >= max_val {
+    // Convert scale values to i32 for range checking and compatibility with existing logic
+    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
+    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+
+    if scale_min_i32 >= scale_max_i32 {
         return Err(ParameterError::InputValidation(
-            "max_val must be greater than min_val".to_string(),
+            "scale_max must be greater than scale_min".to_string(),
         ));
     }
 
     let mean_str = T::to_f64(&mean).unwrap().to_string();
     let sd_str = T::to_f64(&sd).unwrap().to_string();
 
-    let m_prec = m_prec.unwrap_or_else(|| decimal_places_scalar(Some(&mean_str), ".").unwrap());
-    let sd_prec = sd_prec.unwrap_or_else(|| decimal_places_scalar(Some(&sd_str), ".").unwrap());
+    // Derive precision and scale factor from rounding errors
+    let m_prec = precision_from_rounding_error(rounding_error_mean);
+    let sd_prec = precision_from_rounding_error(rounding_error_sd);
+    let scale_factor = scale_factor_from_rounding_errors(rounding_error_mean, rounding_error_sd);
 
-    // Determine scale factor
-    let precision = max(m_prec, sd_prec);
-    let scale_factor = 10_u32.pow(precision as u32);
+    // Convert n to u32 for calculations
+    let n_u32 = U::to_u32(&n).unwrap();
 
-    if n_obs * n_items <= 10_u32.pow(m_prec as u32) {
+    if n_u32 * n_items <= 10_u32.pow(m_prec as u32) {
         dont_test = true;
     }
 
@@ -410,7 +463,7 @@ where
 
         let grim_result = grim_scalar_rust(
             &mean_str,
-            n_obs,
+            n_u32, // Changed from n_obs
             vec![false, false, false],
             n_items,
             "up_or_down",
@@ -431,7 +484,7 @@ where
         let grimmer_consistent = grimmer_scalar(
             &mean_str,
             &sd_str,
-            n_obs,
+            n_u32, // Changed from n_obs
             n_items,
             vec![false, false, false],
             "up_or_down",
@@ -446,11 +499,11 @@ where
 
         // Check SD limits
         let sd_lims = sd_limits(
-            n_obs,
+            n_u32, // Changed from n_obs
             mean_f64,
             sd_f64,
-            min_val,
-            max_val,
+            scale_min_i32, // Changed from min_val
+            scale_max_i32, // Changed from max_val
             Some(sd_prec),
             n_items,
         );
@@ -464,18 +517,20 @@ where
 
     // Check mean is in range
     let mean_f64 = T::to_f64(&mean).unwrap();
-    if !(mean_f64 >= min_val as f64 && mean_f64 <= max_val as f64) {
+    let scale_min_f64 = U::to_f64(&scale_min).unwrap();
+    let scale_max_f64 = U::to_f64(&scale_max).unwrap();
+    if !(mean_f64 >= scale_min_f64 && mean_f64 <= scale_max_f64) {
         return Err(ParameterError::InputValidation(
-            "Mean is outside the possible [min_val, max_val] range.".to_string(),
+            "Mean is outside the possible [scale_min, scale_max] range.".to_string(),
         ));
     }
 
     // Handle restrictions
     let restrictions_exact = restrictions_exact.unwrap_or_default();
     let restrictions_minimum = match restrictions_minimum {
-        RestrictionsOption::Default => {
-            Some(RestrictionsMinimum::from_range(min_val * 100, max_val * 100).extract())
-        }
+        RestrictionsOption::Default => Some(
+            RestrictionsMinimum::from_range(scale_min_i32 * 100, scale_max_i32 * 100).extract(),
+        ),
         RestrictionsOption::Opt(opt_map) => opt_map.map(|rm| rm.extract()),
         RestrictionsOption::Null => None,
     };
@@ -499,16 +554,21 @@ where
     // Generate all possible scaled values
     let mut poss_values_scaled: Vec<U> = Vec::new();
     for i in 1..=n_items {
-        for val in min_val..max_val {
-            let float_val = val as f64 + (i - 1) as f64 / n_items as f64;
+        // Iterate over scale range using generic integer arithmetic
+        let mut val = scale_min;
+        while val < scale_max {
+            let val_i32 = U::to_i32(&val).unwrap();
+            let float_val = val_i32 as f64 + (i - 1) as f64 / n_items as f64;
             let scaled_val = (float_val * scale_factor as f64).round() as i64;
             if let Some(u_val) = NumCast::from(scaled_val) {
                 poss_values_scaled.push(u_val);
             }
+            val = val + U::one();
         }
     }
-    // Add max_val
-    let max_scaled = (max_val as f64 * scale_factor as f64).round() as i64;
+    // Add scale_max
+    let max_i32 = U::to_i32(&scale_max).unwrap();
+    let max_scaled = (max_i32 as f64 * scale_factor as f64).round() as i64;
     if let Some(u_val) = NumCast::from(max_scaled) {
         poss_values_scaled.push(u_val);
     }
@@ -572,9 +632,11 @@ where
     Ok(SpriteParams {
         mean,
         sd,
-        n_obs,
-        m_prec,
-        sd_prec,
+        n,                   // Changed from n_obs
+        rounding_error_mean, // New field
+        rounding_error_sd,   // New field
+        m_prec,              // Kept internal
+        sd_prec,             // Kept internal
         scale_factor,
         possible_values_scaled: final_possible_values_scaled,
         fixed_responses_scaled,
@@ -587,20 +649,20 @@ where
 /// This is the SPRITE equivalent of `dfs_parallel()`. It finds multiple possible
 /// distributions of raw data that match the given mean and standard deviation.
 ///
-/// # Arguments
+/// # Arguments (matching CLOSURE parameter order)
 /// * `mean` - The target mean
 /// * `sd` - The target standard deviation
-/// * `n_obs` - The number of observations
-/// * `min_val` - The minimum value on the scale
-/// * `max_val` - The maximum value on the scale
-/// * `m_prec` - Optional precision for the mean (decimal places)
-/// * `sd_prec` - Optional precision for the SD (decimal places)
+/// * `n` - The number of observations (generic integer type)
+/// * `scale_min` - The minimum value on the scale (generic integer type)
+/// * `scale_max` - The maximum value on the scale (generic integer type)
+/// * `rounding_error_mean` - Tolerance for mean (replaces m_prec)
+/// * `rounding_error_sd` - Tolerance for SD (replaces sd_prec)
 /// * `n_items` - Number of items averaged (default 1)
-/// * `n_distributions` - Number of unique distributions to find
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
 /// * `dont_test` - Skip GRIM/GRIMMER validation (default false)
 /// * `parquet_config` - Optional configuration for writing results to Parquet files
+/// * `stop_after` - Optional maximum number of distributions to find
 /// * `rng` - Random number generator
 ///
 /// # Returns
@@ -615,26 +677,26 @@ where
 /// let mut rng = StdRng::seed_from_u64(42);
 /// let results = sprite_parallel(
 ///     2.2_f64, 1.3_f64, 20, 1, 5,
-///     None, None, 1, 5,
+///     0.05, 0.05, 1,
 ///     None, RestrictionsOption::Default,
-///     false, None, &mut rng
+///     false, None, Some(5), &mut rng
 /// ).unwrap();
 /// ```
 #[allow(clippy::too_many_arguments)]
 pub fn sprite_parallel<T, U>(
     mean: T,
     sd: T,
-    n_obs: u32,
-    min_val: i32,
-    max_val: i32,
-    m_prec: Option<i32>,
-    sd_prec: Option<i32>,
+    n: U,
+    scale_min: U,
+    scale_max: U,
+    rounding_error_mean: T,
+    rounding_error_sd: T,
     n_items: u32,
-    n_distributions: usize,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
     dont_test: bool,
     parquet_config: Option<ParquetConfig>,
+    stop_after: Option<usize>,
     rng: &mut impl Rng,
 ) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
@@ -645,11 +707,11 @@ where
     let params = build_sprite_params(
         mean,
         sd,
-        n_obs,
-        min_val,
-        max_val,
-        m_prec,
-        sd_prec,
+        n,
+        scale_min,
+        scale_max,
+        rounding_error_mean,
+        rounding_error_sd,
         n_items,
         restrictions_exact,
         restrictions_minimum,
@@ -657,6 +719,7 @@ where
     )?;
 
     // Find distributions (scaled integer values)
+    let n_distributions = stop_after.unwrap_or(usize::MAX);
     let results_scaled = find_distributions_all_internal(&params, n_distributions, rng);
 
     // Convert scaled values to the 100x scale for compatibility with CLOSURE statistics
@@ -677,12 +740,14 @@ where
         })
         .collect();
 
-    // Use min_val and max_val in 100x scale for statistics
-    let scale_min: U = NumCast::from(min_val * 100).unwrap();
-    let scale_max: U = NumCast::from(max_val * 100).unwrap();
+    // Convert scale_min and scale_max to 100x scale for statistics
+    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
+    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    let scale_min_100x: U = NumCast::from(scale_min_i32 * 100).unwrap();
+    let scale_max_100x: U = NumCast::from(scale_max_i32 * 100).unwrap();
 
     // Calculate all statistics using the shared function from lib.rs
-    let sprite_results = calculate_all_statistics(results_100x, scale_min, scale_max);
+    let sprite_results = calculate_all_statistics(results_100x, scale_min_100x, scale_max_100x);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -797,14 +862,14 @@ where
 /// - You only need file output, not in-memory processing
 /// - Memory efficiency is critical
 ///
-/// # Arguments
+/// # Arguments (matching CLOSURE parameter order)
 /// * `mean` - The target mean
 /// * `sd` - The target standard deviation
-/// * `n_obs` - The number of observations
-/// * `min_val` - The minimum value on the scale
-/// * `max_val` - The maximum value on the scale
-/// * `m_prec` - Optional precision for the mean (decimal places)
-/// * `sd_prec` - Optional precision for the SD (decimal places)
+/// * `n` - The number of observations (generic integer type)
+/// * `scale_min` - The minimum value on the scale (generic integer type)
+/// * `scale_max` - The maximum value on the scale (generic integer type)
+/// * `rounding_error_mean` - Tolerance for mean (replaces m_prec)
+/// * `rounding_error_sd` - Tolerance for SD (replaces sd_prec)
 /// * `n_items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
@@ -818,11 +883,11 @@ where
 pub fn sprite_parallel_streaming<T, U>(
     mean: T,
     sd: T,
-    n_obs: u32,
-    min_val: i32,
-    max_val: i32,
-    m_prec: Option<i32>,
-    sd_prec: Option<i32>,
+    n: U,
+    scale_min: U,
+    scale_max: U,
+    rounding_error_mean: T,
+    rounding_error_sd: T,
     n_items: u32,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
@@ -844,11 +909,11 @@ where
     let params = match build_sprite_params(
         mean,
         sd,
-        n_obs,
-        min_val,
-        max_val,
-        m_prec,
-        sd_prec,
+        n,
+        scale_min,
+        scale_max,
+        rounding_error_mean,
+        rounding_error_sd,
         n_items,
         restrictions_exact,
         restrictions_minimum,
@@ -865,7 +930,7 @@ where
     };
 
     let _scale_factor = params.scale_factor;
-    let n_obs_usize = n_obs as usize;
+    let n_usize = U::to_usize(&params.n).unwrap();
 
     // Setup channels for streaming results
     let (tx_results, rx_results) = channel::<Vec<(Vec<U>, f64)>>();
@@ -914,7 +979,7 @@ where
     let horns_path = format!("{}horns.parquet", base_path);
 
     let writer_handle = thread::spawn(move || {
-        let mut samples_writer = match create_samples_writer(&samples_path, n_obs_usize) {
+        let mut samples_writer = match create_samples_writer(&samples_path, n_usize) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!(
@@ -1056,8 +1121,8 @@ where
         0
     });
 
-    let scale_min_i32 = min_val;
-    let scale_max_i32 = max_val;
+    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
+    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
 
     let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
         eprintln!("ERROR: Statistics thread panicked unexpectedly");
@@ -1076,7 +1141,7 @@ where
     write_streaming_statistics(
         &base_path,
         &all_horns,
-        n_obs_usize,
+        n_usize,
         scale_min_i32,
         scale_max_i32,
         final_freq_state,
@@ -1412,7 +1477,8 @@ where
     T: FloatType,
     U: IntegerType,
 {
-    let r_n = params.n_obs as usize - params.n_fixed;
+    let n_usize = U::to_usize(&params.n).unwrap();
+    let r_n = n_usize - params.n_fixed;
     if params.possible_values_scaled.is_empty() && r_n > 0 {
         return Err("No possible values to sample from for initialization.".to_string());
     }
@@ -1423,10 +1489,11 @@ where
         .collect();
 
     // Initial mean adjustment
-    let max_loops_mean = params.n_obs * params.possible_values_scaled.len() as u32;
+    let n_u32 = U::to_u32(&params.n).unwrap();
+    let max_loops_mean = n_u32 * params.possible_values_scaled.len() as u32;
     adjust_mean_internal(&mut vec, params, max_loops_mean, rng)?;
 
-    let max_loops_sd = (params.n_obs * (params.possible_values_scaled.len().pow(2) as u32))
+    let max_loops_sd = (n_u32 * (params.possible_values_scaled.len().pow(2) as u32))
         .clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
     let granule_sd = T::from(0.1f64).unwrap().powi(params.sd_prec) / T::from(2.0).unwrap()
         + T::from(DUST).unwrap();
@@ -2122,19 +2189,19 @@ pub mod tests {
     fn sprite_test_mean() {
         let mut rng = StdRng::seed_from_u64(1234);
         let results = sprite_parallel(
-            2.2_f64,
-            1.3_f64,
-            20,
-            1,
-            5,
-            None,
-            None,
-            1,
-            5,
-            None,
+            2.2_f64, // mean
+            1.3_f64, // sd
+            20,      // n (generic integer, inferred as i32)
+            1,       // scale_min
+            5,       // scale_max
+            0.05,    // rounding_error_mean (precision 1: 0.1^1/2 = 0.05)
+            0.05,    // rounding_error_sd (precision 1)
+            1,       // n_items
+            None,    // restrictions_exact
             RestrictionsOption::Default,
-            false,
-            None, // no parquet config
+            false,   // dont_test
+            None,    // parquet_config
+            Some(5), // stop_after (was n_distributions)
             &mut rng,
         )
         .unwrap();
@@ -2150,19 +2217,19 @@ pub mod tests {
     fn sprite_test_sd() {
         let mut rng = StdRng::seed_from_u64(1234);
         let results = sprite_parallel(
-            2.2_f64,
-            1.3_f64,
-            20,
-            1,
-            5,
-            None,
-            None,
-            1,
-            5,
-            None,
+            2.2_f64, // mean
+            1.3_f64, // sd
+            20,      // n
+            1,       // scale_min
+            5,       // scale_max
+            0.05,    // rounding_error_mean (precision 1)
+            0.05,    // rounding_error_sd (precision 1)
+            1,       // n_items
+            None,    // restrictions_exact
             RestrictionsOption::Default,
-            false,
-            None, // no parquet config
+            false,   // dont_test
+            None,    // parquet_config
+            Some(5), // stop_after
             &mut rng,
         )
         .unwrap();
@@ -2186,6 +2253,10 @@ pub mod tests {
         let test_mean_digits = 3;
         let test_sd_digits = 4;
 
+        // Convert precision to rounding errors
+        let rounding_error_mean = 0.1_f64.powi(test_mean_digits) / 2.0; // 0.0005
+        let rounding_error_sd = 0.1_f64.powi(test_sd_digits) / 2.0; // 0.00005
+
         // What is the target sample size?
         let test_n = 2000;
 
@@ -2200,14 +2271,14 @@ pub mod tests {
             test_n,
             1,
             50,
-            Some(test_mean_digits),
-            Some(test_sd_digits),
+            rounding_error_mean,
+            rounding_error_sd,
             1,
-            target_runs,
             None,
             RestrictionsOption::Default,
             true,
-            None, // no parquet config
+            None,              // parquet_config
+            Some(target_runs), // stop_after
             &mut rng,
         )
         .unwrap();
@@ -2250,17 +2321,17 @@ pub mod tests {
         let result = sprite_parallel_streaming::<f64, i32>(
             2.2,  // mean
             1.3,  // sd
-            20,   // n_obs
-            1,    // min_val
-            5,    // max_val
-            None, // m_prec
-            None, // sd_prec
+            20,   // n
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean (precision 1)
+            0.05, // rounding_error_sd (precision 1)
             1,    // n_items
             None, // restrictions_exact
             RestrictionsOption::Default,
             false, // dont_test
             config,
-            Some(10), // stop_after - find 10 distributions
+            Some(10), // stop_after
         );
 
         assert!(result.total_combinations > 0);
@@ -2292,19 +2363,19 @@ pub mod tests {
         let mut rng = StdRng::seed_from_u64(42);
 
         let results = sprite_parallel::<f64, i32>(
-            2.2_f64,
-            1.3_f64,
-            20,
-            1,
-            5,
-            None,
-            None,
-            1,
-            5,
-            None,
+            2.2_f64, // mean
+            1.3_f64, // sd
+            20,      // n
+            1,       // scale_min
+            5,       // scale_max
+            0.05,    // rounding_error_mean (precision 1)
+            0.05,    // rounding_error_sd (precision 1)
+            1,       // n_items
+            None,    // restrictions_exact
             RestrictionsOption::Default,
-            false,
-            Some(config),
+            false,        // dont_test
+            Some(config), // parquet_config
+            Some(5),      // stop_after
             &mut rng,
         )
         .unwrap();
