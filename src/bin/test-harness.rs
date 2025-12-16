@@ -61,6 +61,8 @@ fn write_closure_csv(
         scale_max.try_into().unwrap(),
         rounding_error_mean,
         rounding_error_sd,
+        None,
+        None,
     );
 
     // Initialize CSV file
@@ -72,13 +74,13 @@ fn write_closure_csv(
     writer.write_record(&header)?;
 
     // Write combinations with progress updates
-    let chunk_size = if result.len() >= 100 {
-        result.len() / 100 // Update every 1%
+    let chunk_size = if result.results.sample.len() >= 100 {
+        result.results.sample.len() / 100 // Update every 1%
     } else {
         1 // Update for every combination if fewer than 100
     };
 
-    for (i, combination) in result.iter().enumerate() {
+    for (i, combination) in result.results.sample.iter().enumerate() {
         writer.write_record(
             &combination
                 .iter()
@@ -93,7 +95,10 @@ fn write_closure_csv(
 
     bar.finish_with_message("Done!");
 
-    println!("Number of valid combinations: {}", result.len());
+    println!(
+        "Number of valid combinations: {}",
+        result.results.sample.len()
+    );
     println!("Wrote result file: {}", cwd.clone() + "/" + output_file);
 
     Ok(())
