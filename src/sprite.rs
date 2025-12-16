@@ -19,7 +19,17 @@ use crate::grimmer::{
     decimal_places_scalar, grim_scalar_rust, grimmer_scalar, is_near, rust_round, GrimReturn,
 };
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
-use crate::{FloatType, IntegerType};
+use crate::{
+    calculate_all_statistics, create_results_writer, create_stats_writers, results_to_record_batch,
+    FloatType, IntegerType, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
+    StreamingFrequencyState, StreamingResult,
+};
+
+use arrow::array::{Float64Array, Int32Array, StringArray};
+use arrow::record_batch::RecordBatch;
+use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc::channel;
+use std::thread;
 
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
@@ -590,11 +600,12 @@ where
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
 /// * `dont_test` - Skip GRIM/GRIMMER validation (default false)
+/// * `parquet_config` - Optional configuration for writing results to Parquet files
 /// * `rng` - Random number generator
 ///
 /// # Returns
-/// A vector of distributions, where each distribution is a `Vec<U>` of scaled integer values.
-/// To convert back to floats, divide by `10^max(m_prec, sd_prec)`.
+/// A `ResultListFromMeanSdN<U>` containing all distributions and comprehensive statistics
+/// including horns metrics and frequency distributions.
 ///
 /// # Example
 /// ```ignore
@@ -602,14 +613,12 @@ where
 /// use rand::SeedableRng;
 ///
 /// let mut rng = StdRng::seed_from_u64(42);
-/// let results: Vec<Vec<i32>> = sprite_parallel(
+/// let results = sprite_parallel(
 ///     2.2_f64, 1.3_f64, 20, 1, 5,
 ///     None, None, 1, 5,
 ///     None, RestrictionsOption::Default,
-///     false, &mut rng
+///     false, None, &mut rng
 /// ).unwrap();
-///
-/// // Results are scaled integers. For mean precision 1, divide by 10 to get floats
 /// ```
 #[allow(clippy::too_many_arguments)]
 pub fn sprite_parallel<T, U>(
@@ -625,11 +634,12 @@ pub fn sprite_parallel<T, U>(
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
     dont_test: bool,
+    parquet_config: Option<ParquetConfig>,
     rng: &mut impl Rng,
-) -> Result<Vec<Vec<U>>, ParameterError>
+) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
-    T: FloatType,
-    U: IntegerType,
+    T: FloatType + Send + Sync,
+    U: IntegerType + Send + Sync + 'static,
 {
     // Build and validate parameters
     let params = build_sprite_params(
@@ -646,10 +656,627 @@ where
         dont_test,
     )?;
 
-    // Find distributions
-    let results = find_distributions_internal(&params, n_distributions, rng);
+    // Find distributions (scaled integer values)
+    let results_scaled = find_distributions_internal(&params, n_distributions, rng);
 
-    Ok(results)
+    // Convert scaled values to the 100x scale for compatibility with CLOSURE statistics
+    // SPRITE internally uses scale_factor (e.g., 10000 for precision 4), but statistics
+    // expect values in the 100x scale (multiply original values by 100)
+    let scale_factor_f64 = params.scale_factor as f64;
+    let results_100x: Vec<Vec<U>> = results_scaled
+        .iter()
+        .map(|dist| {
+            dist.iter()
+                .map(|&val| {
+                    // Convert to original value, then to 100x scale
+                    let original_f64 = U::to_i64(&val).unwrap() as f64 / scale_factor_f64;
+                    let value_100x = (original_f64 * 100.0).round() as i64;
+                    NumCast::from(value_100x).unwrap()
+                })
+                .collect()
+        })
+        .collect();
+
+    // Use min_val and max_val in 100x scale for statistics
+    let scale_min: U = NumCast::from(min_val * 100).unwrap();
+    let scale_max: U = NumCast::from(max_val * 100).unwrap();
+
+    // Calculate all statistics using the shared function from lib.rs
+    let sprite_results = calculate_all_statistics(results_100x, scale_min, scale_max);
+
+    // Write to Parquet if configured
+    if let Some(config) = parquet_config {
+        write_sprite_parquet(&sprite_results, &config, params.scale_factor)?;
+    }
+
+    Ok(sprite_results)
+}
+
+/// Write SPRITE results to Parquet files
+fn write_sprite_parquet<U>(
+    results: &ResultListFromMeanSdN<U>,
+    config: &ParquetConfig,
+    _scale_factor: u32,
+) -> Result<(), ParameterError>
+where
+    U: IntegerType + Send + Sync,
+{
+    use std::sync::Arc;
+
+    // Ensure base_path ends with / for consistent file naming
+    let base_path = if config.file_path.ends_with('/') {
+        config.file_path.clone()
+    } else {
+        format!("{}/", config.file_path)
+    };
+
+    // Write results table
+    let results_path = format!("{}results.parquet", base_path);
+    if let Ok(mut writer) = create_results_writer(&results_path) {
+        let batch_size = config.batch_size;
+        let total_samples = results.results.sample.len();
+
+        for start in (0..total_samples).step_by(batch_size) {
+            let end = (start + batch_size).min(total_samples);
+
+            if let Ok(record_batch) = results_to_record_batch(&results.results, start, end) {
+                let _ = writer.write(&record_batch);
+            }
+        }
+        let _ = writer.close();
+    }
+
+    // Write statistics tables
+    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
+        create_stats_writers(&base_path)
+    {
+        // Write metrics_main
+        let mm_batch = RecordBatch::try_new(
+            mm_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    results.metrics_main.samples_initial,
+                ])),
+                Arc::new(Float64Array::from(vec![results.metrics_main.samples_all])),
+                Arc::new(Float64Array::from(vec![results.metrics_main.values_all])),
+            ],
+        );
+        if let Ok(batch) = mm_batch {
+            let _ = mm_writer.write(&batch);
+        }
+        let _ = mm_writer.close();
+
+        // Write metrics_horns
+        let mh_batch = RecordBatch::try_new(
+            mh_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![results.metrics_horns.mean])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.uniform])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.sd])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.cv])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.mad])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.min])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.median])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.max])),
+                Arc::new(Float64Array::from(vec![results.metrics_horns.range])),
+            ],
+        );
+        if let Ok(batch) = mh_batch {
+            let _ = mh_writer.write(&batch);
+        }
+        let _ = mh_writer.close();
+
+        // Write frequency table
+        let freq_batch = RecordBatch::try_new(
+            freq_schema,
+            vec![
+                Arc::new(StringArray::from(results.frequency.samples.clone())),
+                Arc::new(Int32Array::from(results.frequency.value.clone())),
+                Arc::new(Float64Array::from(results.frequency.f_average.clone())),
+                Arc::new(Float64Array::from(results.frequency.f_absolute.clone())),
+                Arc::new(Float64Array::from(results.frequency.f_relative.clone())),
+            ],
+        );
+        if let Ok(batch) = freq_batch {
+            let _ = freq_writer.write(&batch);
+        }
+        let _ = freq_writer.close();
+    }
+
+    Ok(())
+}
+
+/// SPRITE streaming API: Generate distributions and stream to Parquet files
+///
+/// This is the SPRITE equivalent of `dfs_parallel_streaming()`. It finds distributions
+/// matching the given mean and SD and streams them directly to Parquet files without
+/// keeping all results in memory.
+///
+/// Use this when:
+/// - Result sets are very large (> 1GB in memory)
+/// - You only need file output, not in-memory processing
+/// - Memory efficiency is critical
+///
+/// # Arguments
+/// * `mean` - The target mean
+/// * `sd` - The target standard deviation
+/// * `n_obs` - The number of observations
+/// * `min_val` - The minimum value on the scale
+/// * `max_val` - The maximum value on the scale
+/// * `m_prec` - Optional precision for the mean (decimal places)
+/// * `sd_prec` - Optional precision for the SD (decimal places)
+/// * `n_items` - Number of items averaged (default 1)
+/// * `restrictions_exact` - Optional exact count requirements for specific values
+/// * `restrictions_minimum` - Optional minimum count requirements for specific values
+/// * `dont_test` - Skip GRIM/GRIMMER validation (default false)
+/// * `config` - Streaming configuration (file path, batch size, progress reporting)
+/// * `stop_after` - Optional limit on number of distributions to find
+///
+/// # Returns
+/// A `StreamingResult` with the total count and file path.
+#[allow(clippy::too_many_arguments)]
+pub fn sprite_parallel_streaming<T, U>(
+    mean: T,
+    sd: T,
+    n_obs: u32,
+    min_val: i32,
+    max_val: i32,
+    m_prec: Option<i32>,
+    sd_prec: Option<i32>,
+    n_items: u32,
+    restrictions_exact: Option<HashMap<i32, usize>>,
+    restrictions_minimum: RestrictionsOption,
+    dont_test: bool,
+    config: StreamingConfig,
+    stop_after: Option<usize>,
+) -> StreamingResult
+where
+    T: FloatType + Send + Sync,
+    U: IntegerType + Send + Sync + 'static,
+{
+    use crate::{
+        create_horns_writer, create_samples_writer, horns_to_record_batch, samples_to_record_batch,
+        write_streaming_statistics,
+    };
+    use std::collections::HashMap;
+
+    // Build and validate parameters
+    let params = match build_sprite_params(
+        mean,
+        sd,
+        n_obs,
+        min_val,
+        max_val,
+        m_prec,
+        sd_prec,
+        n_items,
+        restrictions_exact,
+        restrictions_minimum,
+        dont_test,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: Parameter validation failed: {}", e);
+            return StreamingResult {
+                total_combinations: 0,
+                file_path: config.file_path,
+            };
+        }
+    };
+
+    let _scale_factor = params.scale_factor;
+    let n_obs_usize = n_obs as usize;
+
+    // Setup channels for streaming results
+    let (tx_results, rx_results) = channel::<Vec<(Vec<U>, f64)>>();
+    let (tx_stats, rx_stats) = channel::<(Vec<f64>, HashMap<i32, i64>)>();
+
+    // Add a flag to track writer thread status
+    let writer_failed = Arc::new(AtomicUsize::new(0)); // 0 = ok, 1 = failed
+    let writer_failed_for_compute = writer_failed.clone();
+    let writer_failed_for_thread = writer_failed.clone();
+
+    // Counter for total distributions found
+    let total_counter = Arc::new(AtomicUsize::new(0));
+
+    // Shared state for tracking min/max horns frequencies
+    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
+        current_min_horns: f64::INFINITY,
+        current_max_horns: f64::NEG_INFINITY,
+        all_freq: HashMap::new(),
+        min_freq: HashMap::new(),
+        max_freq: HashMap::new(),
+        min_count: 0,
+        max_count: 0,
+    }));
+    let freq_state_for_thread = freq_state.clone();
+
+    // Handle file paths
+    let base_path = if config.file_path.ends_with('/') {
+        config.file_path.clone()
+    } else if std::path::Path::new(&config.file_path).is_dir() {
+        format!("{}/", config.file_path)
+    } else {
+        format!("{}_", config.file_path)
+    };
+
+    // Create parent directory if needed
+    if let Some(parent) = std::path::Path::new(&base_path).parent() {
+        if !parent.to_str().unwrap_or("").is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("Warning: Could not create directory {:?}: {}", parent, e);
+            }
+        }
+    }
+
+    // Spawn dedicated writer thread
+    let samples_path = format!("{}samples.parquet", base_path);
+    let horns_path = format!("{}horns.parquet", base_path);
+
+    let writer_handle = thread::spawn(move || {
+        let mut samples_writer = match create_samples_writer(&samples_path, n_obs_usize) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!(
+                    "ERROR: Failed to create samples writer for file '{}': {}",
+                    samples_path, e
+                );
+                writer_failed_for_thread.store(1, Ordering::Relaxed);
+                return 0;
+            }
+        };
+
+        let mut horns_writer = match create_horns_writer(&horns_path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!(
+                    "ERROR: Failed to create horns writer for file '{}': {}",
+                    horns_path, e
+                );
+                writer_failed_for_thread.store(1, Ordering::Relaxed);
+                return 0;
+            }
+        };
+
+        let mut samples_buffer: Vec<Vec<U>> = Vec::with_capacity(config.batch_size * 2);
+        let mut horns_buffer: Vec<f64> = Vec::with_capacity(config.batch_size * 2);
+
+        let mut total_written = 0;
+        let mut last_progress_report = 0;
+
+        loop {
+            match rx_results.recv() {
+                Ok(batch) => {
+                    for (sample, horns) in batch {
+                        samples_buffer.push(sample);
+                        horns_buffer.push(horns);
+                    }
+
+                    if samples_buffer.len() >= config.batch_size {
+                        match samples_to_record_batch(&samples_buffer) {
+                            Ok(record_batch) => {
+                                if let Err(e) = samples_writer.write(&record_batch) {
+                                    eprintln!("ERROR: Failed to write samples batch: {}", e);
+                                    return total_written;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("ERROR: Failed to create samples batch: {}", e);
+                                return total_written;
+                            }
+                        }
+
+                        match horns_to_record_batch(&horns_buffer) {
+                            Ok(record_batch) => {
+                                if let Err(e) = horns_writer.write(&record_batch) {
+                                    eprintln!("ERROR: Failed to write horns batch: {}", e);
+                                    return total_written;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("ERROR: Failed to create horns batch: {}", e);
+                                return total_written;
+                            }
+                        }
+
+                        total_written += samples_buffer.len();
+
+                        if config.show_progress && total_written - last_progress_report >= 1000 {
+                            eprintln!("Progress: {} distributions written...", total_written);
+                            last_progress_report = total_written;
+                        }
+
+                        samples_buffer.clear();
+                        horns_buffer.clear();
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Write remaining results
+        if !samples_buffer.is_empty() {
+            if let Ok(record_batch) = samples_to_record_batch(&samples_buffer) {
+                if let Err(e) = samples_writer.write(&record_batch) {
+                    eprintln!("ERROR: Failed to write final samples batch: {}", e);
+                } else if let Ok(record_batch) = horns_to_record_batch(&horns_buffer) {
+                    if let Err(e) = horns_writer.write(&record_batch) {
+                        eprintln!("ERROR: Failed to write final horns batch: {}", e);
+                    } else {
+                        total_written += samples_buffer.len();
+                    }
+                }
+            }
+        }
+
+        if let Err(e) = samples_writer.close() {
+            eprintln!("ERROR: Failed to close samples file: {}", e);
+        }
+        if let Err(e) = horns_writer.close() {
+            eprintln!("ERROR: Failed to close horns file: {}", e);
+        }
+
+        if config.show_progress {
+            eprintln!(
+                "Streaming complete: {} total distributions written",
+                total_written
+            );
+        }
+
+        total_written
+    });
+
+    // Spawn statistics collector thread
+    let freq_state_for_stats = freq_state.clone();
+    let stats_handle = thread::spawn(move || {
+        let mut all_horns = Vec::new();
+
+        while let Ok((horns_batch, _)) = rx_stats.recv() {
+            all_horns.extend(horns_batch);
+        }
+
+        (all_horns, freq_state_for_stats)
+    });
+
+    // Find distributions using streaming approach
+    find_distributions_streaming(
+        &params,
+        stop_after,
+        tx_results,
+        tx_stats,
+        &total_counter,
+        &freq_state_for_thread,
+        &writer_failed_for_compute,
+        &config,
+    );
+
+    // Wait for threads to complete
+    let total_written = writer_handle.join().unwrap_or_else(|_| {
+        eprintln!("ERROR: Writer thread panicked unexpectedly");
+        0
+    });
+
+    let scale_min_i32 = min_val;
+    let scale_max_i32 = max_val;
+
+    let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
+        eprintln!("ERROR: Statistics thread panicked unexpectedly");
+        (Vec::new(), freq_state)
+    });
+
+    if total_written == 0 {
+        eprintln!("\nERROR: No results were written to disk.");
+        return StreamingResult {
+            total_combinations: 0,
+            file_path: config.file_path,
+        };
+    }
+
+    // Write statistics files
+    write_streaming_statistics(
+        &base_path,
+        &all_horns,
+        n_obs_usize,
+        scale_min_i32,
+        scale_max_i32,
+        final_freq_state,
+    );
+
+    StreamingResult {
+        total_combinations: total_written,
+        file_path: config.file_path,
+    }
+}
+
+/// Find distributions using streaming approach (parallelized with rayon)
+fn find_distributions_streaming<T, U>(
+    params: &SpriteParams<T, U>,
+    stop_after: Option<usize>,
+    tx_results: std::sync::mpsc::Sender<Vec<(Vec<U>, f64)>>,
+    tx_stats: std::sync::mpsc::Sender<(Vec<f64>, HashMap<i32, i64>)>,
+    total_counter: &Arc<AtomicUsize>,
+    freq_state: &Arc<Mutex<StreamingFrequencyState>>,
+    writer_failed: &Arc<AtomicUsize>,
+    config: &StreamingConfig,
+) where
+    T: FloatType + Send + Sync,
+    U: IntegerType + Send + Sync + 'static,
+{
+    use crate::calculate_horns;
+
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let unique_distributions = Arc::new(Mutex::new(HashSet::<Vec<i64>>::new()));
+    let total_failures = Arc::new(AtomicU32::new(0));
+    let total_duplicates = Arc::new(AtomicU32::new(0));
+
+    let batch_size = 100;
+    let max_iterations = stop_after.unwrap_or(usize::MAX).min(100_000_000);
+
+    let scale_min_i32 = params
+        .possible_values_scaled
+        .first()
+        .map(|v| {
+            (U::to_i64(v).unwrap() as f64 / (params.scale_factor as f64 / 100.0)).round() as i32
+        })
+        .unwrap_or(0);
+    let scale_max_i32 = params
+        .possible_values_scaled
+        .last()
+        .map(|v| {
+            (U::to_i64(v).unwrap() as f64 / (params.scale_factor as f64 / 100.0)).round() as i32
+        })
+        .unwrap_or(100);
+    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+
+    for batch_start in (0..max_iterations).step_by(batch_size) {
+        if should_stop.load(Ordering::Relaxed) || writer_failed.load(Ordering::Relaxed) == 1 {
+            break;
+        }
+
+        {
+            let unique = unique_distributions.lock().unwrap();
+            if let Some(limit) = stop_after {
+                if unique.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        let batch_end = (batch_start + batch_size).min(max_iterations);
+        let batch_range = batch_start..batch_end;
+
+        batch_range.into_par_iter().for_each(|_| {
+            if should_stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            if let Some(limit) = stop_after {
+                if total_counter.load(Ordering::Relaxed) >= limit {
+                    should_stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+
+            let mut thread_rng = rand::rng();
+
+            match find_distribution_internal(params, &mut thread_rng) {
+                Ok(mut distribution) => {
+                    distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
+
+                    let hashable_values: Vec<i64> =
+                        distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
+
+                    let mut unique = unique_distributions.lock().unwrap();
+                    if unique.insert(hashable_values) {
+                        drop(unique);
+
+                        // Calculate horns for this distribution
+                        let scale_f = params.scale_factor as f64;
+                        let mut freqs = vec![0.0; nrow_frequency];
+                        let mut sample_freq: HashMap<i32, i64> = HashMap::new();
+
+                        for &value in &distribution {
+                            let val_f64 = U::to_i64(&value).unwrap() as f64 / scale_f;
+                            let idx = ((val_f64 * 100.0).round() as i32 - scale_min_i32) as usize;
+                            if idx < freqs.len() {
+                                freqs[idx] += 1.0;
+                            }
+                            *sample_freq
+                                .entry((val_f64 * 100.0).round() as i32)
+                                .or_insert(0) += 1;
+                        }
+
+                        let horns = calculate_horns(&freqs, scale_min_i32, scale_max_i32);
+
+                        // Update frequency state
+                        {
+                            let mut state = freq_state.lock().unwrap();
+
+                            for (&val, &count) in &sample_freq {
+                                *state.all_freq.entry(val).or_insert(0) += count;
+                            }
+
+                            if (horns - state.current_min_horns).abs() < 1e-10 {
+                                for (&val, &count) in &sample_freq {
+                                    *state.min_freq.entry(val).or_insert(0) += count;
+                                }
+                                state.min_count += 1;
+                            } else if horns < state.current_min_horns {
+                                state.current_min_horns = horns;
+                                state.min_freq.clear();
+                                for (&val, &count) in &sample_freq {
+                                    state.min_freq.insert(val, count);
+                                }
+                                state.min_count = 1;
+                            }
+
+                            if (horns - state.current_max_horns).abs() < 1e-10 {
+                                for (&val, &count) in &sample_freq {
+                                    *state.max_freq.entry(val).or_insert(0) += count;
+                                }
+                                state.max_count += 1;
+                            } else if horns > state.current_max_horns {
+                                state.current_max_horns = horns;
+                                state.max_freq.clear();
+                                for (&val, &count) in &sample_freq {
+                                    state.max_freq.insert(val, count);
+                                }
+                                state.max_count = 1;
+                            }
+                        }
+
+                        // Send to writer
+                        if tx_results.send(vec![(distribution, horns)]).is_ok() {
+                            let _ = tx_stats.send((vec![horns], HashMap::new()));
+                            total_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        total_failures.store(0, Ordering::Relaxed);
+                        total_duplicates.store(0, Ordering::Relaxed);
+                    } else {
+                        total_duplicates.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
+                    total_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+
+        // Check early stopping conditions
+        let failures = total_failures.load(Ordering::Relaxed);
+        let duplicates = total_duplicates.load(Ordering::Relaxed);
+
+        if failures >= 1000 {
+            if config.show_progress {
+                eprintln!(
+                    "Warning: Too many failed attempts ({}). Stopping search.",
+                    failures
+                );
+            }
+            should_stop.store(true, Ordering::Relaxed);
+            break;
+        }
+
+        let n_found = unique_distributions.lock().unwrap().len() as f64;
+        let max_duplications = if n_found > 0.0 {
+            (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32
+        } else {
+            1000
+        }
+        .max(1000);
+
+        if duplicates > max_duplications {
+            if config.show_progress {
+                eprintln!(
+                    "Warning: Found too many duplicate distributions ({}). Stopping search.",
+                    duplicates
+                );
+            }
+            should_stop.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
 }
 
 /// Internal function to find multiple distributions (parallelized with rayon)
@@ -1494,7 +2121,7 @@ pub mod tests {
     #[test]
     fn sprite_test_mean() {
         let mut rng = StdRng::seed_from_u64(1234);
-        let results: Vec<Vec<i32>> = sprite_parallel(
+        let results = sprite_parallel(
             2.2_f64,
             1.3_f64,
             20,
@@ -1507,12 +2134,14 @@ pub mod tests {
             None,
             RestrictionsOption::Default,
             false,
+            None, // no parquet config
             &mut rng,
         )
         .unwrap();
 
         // Convert first result to floats and check mean
-        let first_dist = unscale_distribution(&results[0], 10); // precision 1 -> scale factor 10
+        // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
+        let first_dist = unscale_distribution(&results.results.sample[0], 100);
         let computed_mean = mean(&first_dist);
         assert_eq!(rust_round(computed_mean, 1), 2.2);
     }
@@ -1520,7 +2149,7 @@ pub mod tests {
     #[test]
     fn sprite_test_sd() {
         let mut rng = StdRng::seed_from_u64(1234);
-        let results: Vec<Vec<i32>> = sprite_parallel(
+        let results = sprite_parallel(
             2.2_f64,
             1.3_f64,
             20,
@@ -1533,13 +2162,15 @@ pub mod tests {
             None,
             RestrictionsOption::Default,
             false,
+            None, // no parquet config
             &mut rng,
         )
         .unwrap();
 
         // Check all distributions
-        for dist_scaled in &results {
-            let dist = unscale_distribution(dist_scaled, 10); // precision 1 -> scale factor 10
+        // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
+        for dist_scaled in &results.results.sample {
+            let dist = unscale_distribution(dist_scaled, 100);
             let computed_sd = std_dev(&dist).unwrap();
             assert_eq!(rust_round(computed_sd, 1), 1.3);
         }
@@ -1563,7 +2194,7 @@ pub mod tests {
 
         let mut rng = StdRng::seed_from_u64(42);
 
-        let results: Vec<Vec<i32>> = sprite_parallel(
+        let results = sprite_parallel(
             test_mean,
             test_sd,
             test_n,
@@ -1576,20 +2207,24 @@ pub mod tests {
             None,
             RestrictionsOption::Default,
             true,
+            None, // no parquet config
             &mut rng,
         )
         .unwrap();
 
-        println!("Number of target results: {:?}\n", results.len());
+        println!(
+            "Number of target results: {:?}\n",
+            results.results.sample.len()
+        );
         println!("First result (scaled):\n");
-        println!("{:?}", &results[0][..10]); // Print first 10 values
+        println!("{:?}", &results.results.sample[0][..10]); // Print first 10 values
 
-        // Scale factor is 10^max(3,4) = 10000
-        let scale_factor = 10_u32.pow(test_sd_digits as u32);
+        // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
+        let scale_factor = 100;
 
         // Go through the SPRITE results and check if they conform to the
         // input mean and SD. If any result sample doesn't, throw an error.
-        for dist_scaled in &results {
+        for dist_scaled in &results.results.sample {
             let dist = unscale_distribution(dist_scaled, scale_factor);
             let computed_mean = mean(&dist);
             let computed_sd = std_dev(&dist).unwrap();
@@ -1599,5 +2234,95 @@ pub mod tests {
             assert_eq!(rounded_mean, test_mean);
             assert_eq!(rounded_sd, test_sd);
         }
+    }
+
+    #[test]
+    fn test_sprite_parallel_streaming() {
+        // Test streaming mode with separate files
+        let config = StreamingConfig {
+            file_path: "test_sprite_streaming/".to_string(),
+            batch_size: 100,
+            show_progress: false,
+        };
+
+        let _ = std::fs::create_dir("test_sprite_streaming");
+
+        let result = sprite_parallel_streaming::<f64, i32>(
+            2.2,  // mean
+            1.3,  // sd
+            20,   // n_obs
+            1,    // min_val
+            5,    // max_val
+            None, // m_prec
+            None, // sd_prec
+            1,    // n_items
+            None, // restrictions_exact
+            RestrictionsOption::Default,
+            false, // dont_test
+            config,
+            Some(10), // stop_after - find 10 distributions
+        );
+
+        assert!(result.total_combinations > 0);
+        assert_eq!(result.file_path, "test_sprite_streaming/");
+
+        // Check that files were created
+        assert!(std::path::Path::new("test_sprite_streaming/samples.parquet").exists());
+        assert!(std::path::Path::new("test_sprite_streaming/horns.parquet").exists());
+
+        // Clean up test files
+        let _ = std::fs::remove_file("test_sprite_streaming/samples.parquet");
+        let _ = std::fs::remove_file("test_sprite_streaming/horns.parquet");
+        let _ = std::fs::remove_file("test_sprite_streaming/metrics_main.parquet");
+        let _ = std::fs::remove_file("test_sprite_streaming/metrics_horns.parquet");
+        let _ = std::fs::remove_file("test_sprite_streaming/frequency.parquet");
+        let _ = std::fs::remove_dir("test_sprite_streaming");
+    }
+
+    #[test]
+    fn test_sprite_parallel_with_parquet() {
+        // Test in-memory mode with optional Parquet output
+        let config = ParquetConfig {
+            file_path: "test_sprite_parquet/".to_string(),
+            batch_size: 100,
+        };
+
+        let _ = std::fs::create_dir("test_sprite_parquet");
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let results = sprite_parallel::<f64, i32>(
+            2.2_f64,
+            1.3_f64,
+            20,
+            1,
+            5,
+            None,
+            None,
+            1,
+            5,
+            None,
+            RestrictionsOption::Default,
+            false,
+            Some(config),
+            &mut rng,
+        )
+        .unwrap();
+
+        // Check that results were returned
+        assert!(!results.results.sample.is_empty());
+
+        // Check that files were created
+        assert!(std::path::Path::new("test_sprite_parquet/results.parquet").exists());
+        assert!(std::path::Path::new("test_sprite_parquet/metrics_main.parquet").exists());
+        assert!(std::path::Path::new("test_sprite_parquet/metrics_horns.parquet").exists());
+        assert!(std::path::Path::new("test_sprite_parquet/frequency.parquet").exists());
+
+        // Clean up test files
+        let _ = std::fs::remove_file("test_sprite_parquet/results.parquet");
+        let _ = std::fs::remove_file("test_sprite_parquet/metrics_main.parquet");
+        let _ = std::fs::remove_file("test_sprite_parquet/metrics_horns.parquet");
+        let _ = std::fs::remove_file("test_sprite_parquet/frequency.parquet");
+        let _ = std::fs::remove_dir("test_sprite_parquet");
     }
 }

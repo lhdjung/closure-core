@@ -101,7 +101,7 @@ pub struct ResultsTable<U> {
 
 /// Complete CLOSURE results with all statistics
 #[derive(Clone, Debug)]
-pub struct ClosureResults<U> {
+pub struct ResultListFromMeanSdN<U> {
     pub metrics_main: MetricsMain,
     pub metrics_horns: MetricsHorns,
     pub frequency: FrequencyTable,
@@ -288,7 +288,7 @@ fn calculate_all_statistics<U>(
     samples: Vec<Vec<U>>,
     scale_min: U,
     scale_max: U,
-) -> ClosureResults<U>
+) -> ResultListFromMeanSdN<U>
 where
     U: Integer + ToPrimitive + Copy,
 {
@@ -299,7 +299,7 @@ where
 
     // Handle empty samples case
     if samples.is_empty() {
-        return ClosureResults {
+        return ResultListFromMeanSdN {
             metrics_main: MetricsMain {
                 samples_initial: 0.0,
                 samples_all: 0.0,
@@ -417,7 +417,7 @@ where
     // Create ID column for results table
     let id: Vec<usize> = (1..=samples_all).collect();
 
-    ClosureResults {
+    ResultListFromMeanSdN {
         metrics_main: MetricsMain {
             samples_initial: count_initial_combinations(scale_min_i32, scale_max_i32) as f64,
             samples_all: samples_all as f64,
@@ -792,7 +792,7 @@ pub fn dfs_parallel<T, U>(
     rounding_error_sd: T,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
-) -> ClosureResults<U>
+) -> ResultListFromMeanSdN<U>
 where
     T: FloatType,
     U: IntegerType + 'static,
@@ -1038,7 +1038,7 @@ where
 }
 
 /// Structure to hold streaming frequency state
-struct StreamingFrequencyState {
+pub struct StreamingFrequencyState {
     current_min_horns: f64,
     current_max_horns: f64,
     all_freq: HashMap<i32, i64>,
@@ -1049,7 +1049,7 @@ struct StreamingFrequencyState {
 }
 
 /// Helper function to write statistics files for streaming mode
-fn write_streaming_statistics(
+pub fn write_streaming_statistics(
     base_path: &str,
     all_horns: &[f64],
     n_usize: usize,
