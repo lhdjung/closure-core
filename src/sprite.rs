@@ -638,8 +638,8 @@ pub fn sprite_parallel<T, U>(
     rng: &mut impl Rng,
 ) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
-    T: FloatType + Send + Sync,
-    U: IntegerType + Send + Sync + 'static,
+    T: FloatType,
+    U: IntegerType + 'static,
 {
     // Build and validate parameters
     let params = build_sprite_params(
@@ -657,7 +657,7 @@ where
     )?;
 
     // Find distributions (scaled integer values)
-    let results_scaled = find_distributions_internal(&params, n_distributions, rng);
+    let results_scaled = find_distributions_all_internal(&params, n_distributions, rng);
 
     // Convert scaled values to the 100x scale for compatibility with CLOSURE statistics
     // SPRITE internally uses scale_factor (e.g., 10000 for precision 4), but statistics
@@ -699,7 +699,7 @@ fn write_sprite_parquet<U>(
     _scale_factor: u32,
 ) -> Result<(), ParameterError>
 where
-    U: IntegerType + Send + Sync,
+    U: IntegerType,
 {
     use std::sync::Arc;
 
@@ -831,8 +831,8 @@ pub fn sprite_parallel_streaming<T, U>(
     stop_after: Option<usize>,
 ) -> StreamingResult
 where
-    T: FloatType + Send + Sync,
-    U: IntegerType + Send + Sync + 'static,
+    T: FloatType,
+    U: IntegerType + 'static,
 {
     use crate::{
         create_horns_writer, create_samples_writer, horns_to_record_batch, samples_to_record_batch,
@@ -1039,7 +1039,7 @@ where
     });
 
     // Find distributions using streaming approach
-    find_distributions_streaming(
+    find_distributions_all_streaming(
         &params,
         stop_after,
         tx_results,
@@ -1089,7 +1089,7 @@ where
 }
 
 /// Find distributions using streaming approach (parallelized with rayon)
-fn find_distributions_streaming<T, U>(
+fn find_distributions_all_streaming<T, U>(
     params: &SpriteParams<T, U>,
     stop_after: Option<usize>,
     tx_results: std::sync::mpsc::Sender<Vec<(Vec<U>, f64)>>,
@@ -1099,8 +1099,8 @@ fn find_distributions_streaming<T, U>(
     writer_failed: &Arc<AtomicUsize>,
     config: &StreamingConfig,
 ) where
-    T: FloatType + Send + Sync,
-    U: IntegerType + Send + Sync + 'static,
+    T: FloatType,
+    U: IntegerType + 'static,
 {
     use crate::calculate_horns;
 
@@ -1280,7 +1280,7 @@ fn find_distributions_streaming<T, U>(
 }
 
 /// Internal function to find multiple distributions (parallelized with rayon)
-fn find_distributions_internal<T, U>(
+fn find_distributions_all_internal<T, U>(
     params: &SpriteParams<T, U>,
     n_distributions: usize,
     _rng: &mut impl Rng,
