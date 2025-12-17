@@ -33,6 +33,7 @@ impl<T> FloatType for T where T: Float + FromPrimitive + Send + Sync {}
 pub trait IntegerType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 
+pub mod distribution_finder;
 pub mod grimmer;
 pub mod sprite;
 pub mod sprite_types;
@@ -283,6 +284,58 @@ fn mad(values: &[f64], median_val: f64) -> f64 {
     median(&deviations)
 }
 
+/// Create an empty result list for cases with no valid distributions
+///
+/// Returns a ResultListFromMeanSdN with all metrics set to NaN or zero
+/// (depending on the metric), and with empty result vectors. Used when no
+/// distributions are found or when an algorithm returns early with no results.
+///
+/// # Parameters
+/// - `scale_min`: Minimum value in the scale range
+/// - `scale_max`: Maximum value in the scale range
+///
+/// # Returns
+/// An empty ResultListFromMeanSdN<U> with appropriate structure
+pub fn empty_result_list<U>(scale_min: U, scale_max: U) -> ResultListFromMeanSdN<U>
+where
+    U: Integer + ToPrimitive + Copy,
+{
+    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
+    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+
+    ResultListFromMeanSdN {
+        metrics_main: MetricsMain {
+            samples_initial: 0.0,
+            samples_all: 0.0,
+            values_all: 0.0,
+        },
+        metrics_horns: MetricsHorns {
+            mean: f64::NAN,
+            uniform: f64::NAN,
+            sd: f64::NAN,
+            cv: f64::NAN,
+            mad: f64::NAN,
+            min: f64::NAN,
+            median: f64::NAN,
+            max: f64::NAN,
+            range: f64::NAN,
+        },
+        frequency: FrequencyTable {
+            samples: vec!["all".to_string()],
+            value: (scale_min_i32..=scale_max_i32).collect(),
+            f_average: vec![f64::NAN; nrow_frequency],
+            f_absolute: vec![0.0; nrow_frequency],
+            f_relative: vec![f64::NAN; nrow_frequency],
+        },
+        results: ResultsTable {
+            id: Vec::new(),
+            sample: Vec::new(),
+            horns_values: Vec::new(),
+        },
+    }
+}
+
 /// Calculate all statistics for the samples
 fn calculate_all_statistics<U>(
     samples: Vec<Vec<U>>,
@@ -299,36 +352,7 @@ where
 
     // Handle empty samples case
     if samples.is_empty() {
-        return ResultListFromMeanSdN {
-            metrics_main: MetricsMain {
-                samples_initial: 0.0,
-                samples_all: 0.0,
-                values_all: 0.0,
-            },
-            metrics_horns: MetricsHorns {
-                mean: f64::NAN,
-                uniform: f64::NAN,
-                sd: f64::NAN,
-                cv: f64::NAN,
-                mad: f64::NAN,
-                min: f64::NAN,
-                median: f64::NAN,
-                max: f64::NAN,
-                range: f64::NAN,
-            },
-            frequency: FrequencyTable {
-                samples: vec!["all".to_string()],
-                value: (scale_min_i32..=scale_max_i32).collect(),
-                f_average: vec![f64::NAN; nrow_frequency],
-                f_absolute: vec![0.0; nrow_frequency],
-                f_relative: vec![f64::NAN; nrow_frequency],
-            },
-            results: ResultsTable {
-                id: Vec::new(),
-                sample: Vec::new(),
-                horns_values: Vec::new(),
-            },
-        };
+        return empty_result_list(scale_min, scale_max);
     }
 
     let n = samples[0].len();
@@ -380,7 +404,6 @@ where
         .collect();
 
     let min_samples: Vec<Vec<U>> = min_indices.iter().map(|&i| samples[i].clone()).collect();
-
     let max_samples: Vec<Vec<U>> = max_indices.iter().map(|&i| samples[i].clone()).collect();
 
     // Calculate frequency data for all three groups
