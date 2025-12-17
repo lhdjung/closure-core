@@ -835,7 +835,7 @@ where
         let freq_batch = RecordBatch::try_new(
             freq_schema,
             vec![
-                Arc::new(StringArray::from(results.frequency.samples.clone())),
+                Arc::new(StringArray::from(results.frequency.samples_subset.to_vec())),
                 Arc::new(Int32Array::from(results.frequency.value.clone())),
                 Arc::new(Float64Array::from(results.frequency.f_average.clone())),
                 Arc::new(Float64Array::from(results.frequency.f_absolute.clone())),
