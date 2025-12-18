@@ -115,15 +115,12 @@ impl FrequencySamplesColumn {
     /// then "horns_max" repeated x times.
     pub fn to_vec(&self) -> Vec<String> {
         let mut result = Vec::with_capacity(self.repetitions * 3);
+        let group_names = ["all".to_string(), "horns_min".to_string(), "horns_max".to_string()];
 
-        for _ in 0..self.repetitions {
-            result.push("all".to_string());
-        }
-        for _ in 0..self.repetitions {
-            result.push("horns_min".to_string());
-        }
-        for _ in 0..self.repetitions {
-            result.push("horns_max".to_string());
+        for name in group_names {
+            for _ in 0..self.repetitions {
+                result.push(name.clone());
+            }
         }
 
         result
@@ -168,14 +165,92 @@ impl FrequencySamplesColumn {
 
 /// Combined frequency data for a set of samples
 /// Each row represents frequency data for a specific value in a specific sample group
+///
+/// Invariant: All fields must have the same length to ensure valid data frame structure
 #[derive(Clone, Debug)]
 pub struct FrequencyTable {
     /// Sample categories: "all", "horns_min", "horns_max" each repeated for all scale values
-    pub samples_subset: FrequencySamplesColumn,
-    pub value: Vec<i32>,
-    pub f_average: Vec<f64>,
-    pub f_absolute: Vec<f64>,
-    pub f_relative: Vec<f64>,
+    samples_group: FrequencySamplesColumn,
+    value: Vec<i32>,
+    f_average: Vec<f64>,
+    f_absolute: Vec<f64>,
+    f_relative: Vec<f64>,
+}
+
+impl FrequencyTable {
+    /// Create a new FrequencyTable, validating that all fields have the same length
+    ///
+    /// # Panics
+    /// Panics if the lengths of value, f_average, f_absolute, or f_relative don't match
+    /// the length of samples_group
+    pub fn new(
+        samples_group: FrequencySamplesColumn,
+        value: Vec<i32>,
+        f_average: Vec<f64>,
+        f_absolute: Vec<f64>,
+        f_relative: Vec<f64>,
+    ) -> Self {
+        let expected_len = samples_group.len();
+
+        let name_len_tuples = [
+            ("value", value.len()),
+            ("f_average", f_average.len()),
+            ("f_absolute", f_absolute.len()),
+            ("f_relative", f_relative.len()),
+        ];
+
+        // Validate all field lengths match
+        for (name, len) in name_len_tuples {
+            assert_eq!(
+                len, expected_len,
+                "FrequencyTable: {} length ({}) doesn't match samples_group length ({})",
+                name, len, expected_len
+            );
+        }
+
+        Self {
+            samples_group,
+            value,
+            f_average,
+            f_absolute,
+            f_relative,
+        }
+    }
+
+    /// Get the number of rows in this frequency table
+    pub fn len(&self) -> usize {
+        self.samples_group.len()
+    }
+
+    /// Check if the frequency table is empty
+    pub fn is_empty(&self) -> bool {
+        self.samples_group.is_empty()
+    }
+
+    /// Get a reference to the samples_group column
+    pub fn samples_group(&self) -> &FrequencySamplesColumn {
+        &self.samples_group
+    }
+
+    /// Get a reference to the value column
+    pub fn value(&self) -> &[i32] {
+        &self.value
+    }
+
+    /// Get a reference to the f_average column
+    pub fn f_average(&self) -> &[f64] {
+        &self.f_average
+    }
+
+    /// Get a reference to the f_absolute column
+    pub fn f_absolute(&self) -> &[f64] {
+        &self.f_absolute
+    }
+
+    /// Get a reference to the f_relative column
+    pub fn f_relative(&self) -> &[f64] {
+        &self.f_relative
+    }
 }
 
 /// Main metrics about the CLOSURE results
@@ -410,6 +485,13 @@ where
     let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
     let nrow_frequency = group_size * 3;
 
+    // Build value vector repeated 3 times (for all, horns_min, horns_max)
+    let base_values: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
+    let mut value = Vec::with_capacity(nrow_frequency);
+    for _ in 0..3 {
+        value.extend_from_slice(&base_values);
+    }
+
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
             samples_initial: 0.0,
@@ -427,13 +509,13 @@ where
             max: f64::NAN,
             range: f64::NAN,
         },
-        frequency: FrequencyTable {
-            samples_subset: FrequencySamplesColumn::new(group_size),
-            value: (scale_min_i32..=scale_max_i32).collect(),
-            f_average: vec![f64::NAN; nrow_frequency],
-            f_absolute: vec![0.0; nrow_frequency],
-            f_relative: vec![f64::NAN; nrow_frequency],
-        },
+        frequency: FrequencyTable::new(
+            FrequencySamplesColumn::new(group_size),
+            value,
+            vec![f64::NAN; nrow_frequency],
+            vec![0.0; nrow_frequency],
+            vec![f64::NAN; nrow_frequency],
+        ),
         results: ResultsTable {
             id: Vec::new(),
             sample: Vec::new(),
@@ -571,13 +653,13 @@ where
             max: horns_max,
             range: horns_max - horns_min,
         },
-        frequency: FrequencyTable {
-            samples_subset: FrequencySamplesColumn::new(group_size),
-            value: combined_value,
-            f_average: combined_f_average,
-            f_absolute: combined_f_absolute,
-            f_relative: combined_f_relative,
-        },
+        frequency: FrequencyTable::new(
+            FrequencySamplesColumn::new(group_size),
+            combined_value,
+            combined_f_average,
+            combined_f_absolute,
+            combined_f_relative,
+        ),
         results: ResultsTable {
             id,
             sample: samples,
@@ -1155,16 +1237,16 @@ where
             let freq_batch = RecordBatch::try_new(
                 freq_schema,
                 vec![
-                    Arc::new(StringArray::from(closure_results.frequency.samples_subset.to_vec())),
-                    Arc::new(Int32Array::from(closure_results.frequency.value.clone())),
+                    Arc::new(StringArray::from(closure_results.frequency.samples_group().to_vec())),
+                    Arc::new(Int32Array::from(closure_results.frequency.value().to_vec())),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_average.clone(),
+                        closure_results.frequency.f_average().to_vec(),
                     )),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_absolute.clone(),
+                        closure_results.frequency.f_absolute().to_vec(),
                     )),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_relative.clone(),
+                        closure_results.frequency.f_relative().to_vec(),
                     )),
                 ],
             );
@@ -1340,23 +1422,23 @@ pub fn write_streaming_statistics(
         combined_f_relative.extend(max_f_relative);
 
         // Create proper FrequencyTable with type-safe samples column
-        let frequency_table = FrequencyTable {
-            samples_subset: FrequencySamplesColumn::new(nrow_frequency),
-            value: combined_value,
-            f_average: combined_f_average,
-            f_absolute: combined_f_absolute,
-            f_relative: combined_f_relative,
-        };
+        let frequency_table = FrequencyTable::new(
+            FrequencySamplesColumn::new(nrow_frequency),
+            combined_value,
+            combined_f_average,
+            combined_f_absolute,
+            combined_f_relative,
+        );
 
         // Write frequency table as a single batch
         let freq_batch = RecordBatch::try_new(
             freq_schema,
             vec![
-                Arc::new(StringArray::from(frequency_table.samples_subset.to_vec())),
-                Arc::new(Int32Array::from(frequency_table.value)),
-                Arc::new(Float64Array::from(frequency_table.f_average)),
-                Arc::new(Float64Array::from(frequency_table.f_absolute)),
-                Arc::new(Float64Array::from(frequency_table.f_relative)),
+                Arc::new(StringArray::from(frequency_table.samples_group().to_vec())),
+                Arc::new(Int32Array::from(frequency_table.value().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_average().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_absolute().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_relative().to_vec())),
             ],
         );
         if let Ok(batch) = freq_batch {
@@ -2149,14 +2231,15 @@ mod tests {
         // Check combined frequency table
         let n_values = 5; // scale_max - scale_min + 1
         let expected_rows = n_values * 3; // all, horns_min, horns_max
-        assert_eq!(results.frequency.samples_subset.len(), expected_rows);
-        assert_eq!(results.frequency.value.len(), expected_rows);
-        assert_eq!(results.frequency.f_average.len(), expected_rows);
-        assert_eq!(results.frequency.f_absolute.len(), expected_rows);
-        assert_eq!(results.frequency.f_relative.len(), expected_rows);
+        assert_eq!(results.frequency.len(), expected_rows);
+        assert_eq!(results.frequency.samples_group().len(), expected_rows);
+        assert_eq!(results.frequency.value().len(), expected_rows);
+        assert_eq!(results.frequency.f_average().len(), expected_rows);
+        assert_eq!(results.frequency.f_absolute().len(), expected_rows);
+        assert_eq!(results.frequency.f_relative().len(), expected_rows);
 
         // Check that samples column has correct values
-        let samples_vec = results.frequency.samples_subset.to_vec();
+        let samples_vec = results.frequency.samples_group().to_vec();
         let all_count = samples_vec.iter().filter(|&s| s == "all").count();
         let min_count = samples_vec.iter().filter(|&s| s == "horns_min").count();
         let max_count = samples_vec.iter().filter(|&s| s == "horns_max").count();
