@@ -20,7 +20,7 @@ use crate::grimmer::{
 };
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
-    calculate_all_statistics, create_results_writer, create_stats_writers, results_to_record_batch,
+    samples_to_result_list, create_results_writer, create_stats_writers, results_to_record_batch,
     FloatType, IntegerType, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
     StreamingFrequencyState, StreamingResult,
 };
@@ -747,7 +747,11 @@ where
     let scale_max_100x: U = NumCast::from(scale_max_i32 * 100).unwrap();
 
     // Calculate all statistics using the shared function from lib.rs
-    let sprite_results = calculate_all_statistics(results_100x, scale_min_100x, scale_max_100x);
+    let sprite_results = samples_to_result_list(
+        results_100x,
+        scale_min_100x,
+        scale_max_100x
+    );
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {

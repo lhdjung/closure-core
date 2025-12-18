@@ -406,7 +406,9 @@ where
 {
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    
+    let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let nrow_frequency = group_size * 3;
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
@@ -426,7 +428,7 @@ where
             range: f64::NAN,
         },
         frequency: FrequencyTable {
-            samples_subset: FrequencySamplesColumn::new(nrow_frequency),
+            samples_subset: FrequencySamplesColumn::new(group_size),
             value: (scale_min_i32..=scale_max_i32).collect(),
             f_average: vec![f64::NAN; nrow_frequency],
             f_absolute: vec![0.0; nrow_frequency],
@@ -441,7 +443,7 @@ where
 }
 
 /// Calculate all statistics for the samples
-fn calculate_all_statistics<U>(
+fn samples_to_result_list<U>(
     samples: Vec<Vec<U>>,
     scale_min: U,
     scale_max: U,
@@ -452,7 +454,7 @@ where
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
 
-    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
 
     // Handle empty samples case
     if samples.is_empty() {
@@ -466,7 +468,7 @@ where
     // Calculate horns for each sample
     let mut horns_values = Vec::with_capacity(samples_all);
     for sample in &samples {
-        let mut freqs = vec![0.0; nrow_frequency];
+        let mut freqs = vec![0.0; group_size];
         for &value in sample {
             let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
             freqs[idx] += 1.0;
@@ -511,14 +513,26 @@ where
     let max_samples: Vec<Vec<U>> = max_indices.iter().map(|&i| samples[i].clone()).collect();
 
     // Calculate frequency data for all three groups
-    let (all_value, all_f_average, all_f_absolute, all_f_relative) =
-        calculate_frequency_rows(&samples, scale_min, scale_max);
+    let (
+        all_value,
+        all_f_average,
+        all_f_absolute,
+        all_f_relative,
+    ) = calculate_frequency_rows(&samples, scale_min, scale_max);
 
-    let (min_value, min_f_average, min_f_absolute, min_f_relative) =
-        calculate_frequency_rows(&min_samples, scale_min, scale_max);
+    let (
+        min_value,
+        min_f_average,
+        min_f_absolute,
+        min_f_relative,
+    ) = calculate_frequency_rows(&min_samples, scale_min, scale_max);
 
-    let (max_value, max_f_average, max_f_absolute, max_f_relative) =
-        calculate_frequency_rows(&max_samples, scale_min, scale_max);
+    let (
+        max_value,
+        max_f_average,
+        max_f_absolute,
+        max_f_relative,
+    ) = calculate_frequency_rows(&max_samples, scale_min, scale_max);
 
     // Combine all frequency data into a single table
     let mut combined_value = all_value;
@@ -558,7 +572,7 @@ where
             range: horns_max - horns_min,
         },
         frequency: FrequencyTable {
-            samples_subset: FrequencySamplesColumn::new(nrow_frequency),
+            samples_subset: FrequencySamplesColumn::new(group_size),
             value: combined_value,
             f_average: combined_f_average,
             f_absolute: combined_f_absolute,
@@ -1048,7 +1062,11 @@ where
     };
 
     // Calculate all statistics
-    let closure_results = calculate_all_statistics(results, scale_min, scale_max);
+    let closure_results = samples_to_result_list(
+        results,
+        scale_min,
+        scale_max
+    );
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
