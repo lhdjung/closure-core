@@ -24,6 +24,8 @@ use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use strum::{EnumCount, IntoEnumIterator};
+use strum_macros::{EnumCount as EnumCountMacro, EnumIter, IntoStaticStr};
 
 /// Trait alias for floating-point types used in CLOSURE computations
 pub trait FloatType: Float + FromPrimitive + Send + Sync {}
@@ -64,7 +66,11 @@ pub struct SamplesSubset {
 }
 
 /// Sample category for frequency tables
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Automatically provides iteration, count, and snake_case string conversion via strum.
+/// To add a new variant, simply add it to the enum - no manual maintenance needed!
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCountMacro, EnumIter, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum SampleCategory {
     All,
     HornsMin,
@@ -72,12 +78,19 @@ pub enum SampleCategory {
 }
 
 impl SampleCategory {
+    /// Convert to snake_case string representation
     pub fn as_str(&self) -> &'static str {
-        match self {
-            SampleCategory::All => "all",
-            SampleCategory::HornsMin => "horns_min",
-            SampleCategory::HornsMax => "horns_max",
-        }
+        self.into()
+    }
+
+    /// Returns an iterator over all sample category variants in declaration order
+    pub fn all() -> impl Iterator<Item = Self> + Clone {
+        Self::iter()
+    }
+
+    /// Returns an iterator over all sample category names in snake_case
+    pub fn all_names() -> impl Iterator<Item = &'static str> + Clone {
+        Self::iter().map(|variant| variant.as_str())
     }
 }
 
@@ -111,24 +124,23 @@ impl FrequencySamplesColumn {
 
     /// Convert to a Vec<String> for compatibility with existing code
     ///
-    /// Returns a vector with "all" repeated x times, then "horns_min" repeated x times,
-    /// then "horns_max" repeated x times.
+    /// Returns a vector with category names repeated x times each, in declaration order.
     pub fn to_vec(&self) -> Vec<String> {
-        let mut result = Vec::with_capacity(self.repetitions * 3);
-        let group_names = ["all".to_string(), "horns_min".to_string(), "horns_max".to_string()];
+        let mut result = Vec::with_capacity(self.repetitions * SampleCategory::COUNT);
 
-        for name in group_names {
+        for name in SampleCategory::all_names() {
             for _ in 0..self.repetitions {
-                result.push(name.clone());
+                result.push(name.to_string());
             }
         }
 
         result
     }
 
+
     /// Get the total length of the samples column
     pub fn len(&self) -> usize {
-        self.repetitions * 3
+        self.repetitions * SampleCategory::COUNT
     }
 
     /// Check if the column is empty (repetitions == 0)
@@ -2183,6 +2195,28 @@ mod tests {
         let extreme_freqs = vec![1.0, 0.0, 0.0, 0.0, 1.0];
         let horns_extreme = calculate_horns(&extreme_freqs, 1, 5);
         assert!((horns_extreme - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sample_category_strum_integration() {
+        // Test that strum correctly generates snake_case names
+        assert_eq!(SampleCategory::All.as_str(), "all");
+        assert_eq!(SampleCategory::HornsMin.as_str(), "horns_min");
+        assert_eq!(SampleCategory::HornsMax.as_str(), "horns_max");
+
+        // Test that all() returns all variants in order
+        let all_variants: Vec<_> = SampleCategory::all().collect();
+        assert_eq!(all_variants.len(), 3);
+        assert_eq!(all_variants[0], SampleCategory::All);
+        assert_eq!(all_variants[1], SampleCategory::HornsMin);
+        assert_eq!(all_variants[2], SampleCategory::HornsMax);
+
+        // Test that all_names() returns correct snake_case strings
+        let all_names: Vec<_> = SampleCategory::all_names().collect();
+        assert_eq!(all_names, vec!["all", "horns_min", "horns_max"]);
+
+        // Test that COUNT matches the actual number of variants
+        assert_eq!(SampleCategory::COUNT, SampleCategory::iter().count());
     }
 
     #[test]
