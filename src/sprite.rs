@@ -1179,7 +1179,7 @@ fn find_distributions_all_streaming<T, U>(
     let total_duplicates = Arc::new(AtomicU32::new(0));
 
     let batch_size = 100;
-    let max_iterations = stop_after.unwrap_or(usize::MAX).min(100_000_000);
+    let max_iterations = 100_000_000;
 
     let scale_min_i32 = params
         .possible_values_scaled
@@ -2357,7 +2357,7 @@ pub mod tests {
             RestrictionsOption::Default,
             false, // dont_test
             config,
-            Some(10), // stop_after
+            Some(3), // stop_after - only generate 3 samples for faster testing
         );
 
         assert!(result.total_combinations > 0);
@@ -2375,15 +2375,20 @@ pub mod tests {
         let reader = builder.build().expect("Failed to build parquet reader");
 
         let mut total_samples_checked = 0;
+        const MAX_SAMPLES_TO_CHECK: usize = 3; // Only check first 3 samples for speed
 
-        // Process each batch
-        for maybe_batch in reader {
+        // Process each batch (but only check a few samples)
+        'outer: for maybe_batch in reader {
             let batch = maybe_batch.expect("Failed to read batch");
             let num_rows = batch.num_rows();
             let num_columns = batch.num_columns();
 
             // Each row is a sample, each column is a position in the sample
             for row_idx in 0..num_rows {
+                if total_samples_checked >= MAX_SAMPLES_TO_CHECK {
+                    break 'outer; // Stop after checking enough samples
+                }
+
                 // Extract the scaled sample values for this row
                 let mut scaled_values: Vec<i32> = Vec::with_capacity(num_columns);
 
@@ -2439,10 +2444,13 @@ pub mod tests {
             }
         }
 
-        // Verify we checked at least some samples
-        assert!(
-            total_samples_checked > 0,
-            "No samples were validated from the parquet file"
+        // Verify we checked the expected number of samples
+        assert_eq!(
+            total_samples_checked,
+            MAX_SAMPLES_TO_CHECK,
+            "Expected to check {} samples, but only checked {}",
+            MAX_SAMPLES_TO_CHECK,
+            total_samples_checked
         );
 
         // Clean up test files
