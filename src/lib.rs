@@ -505,13 +505,14 @@ where
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
     
     let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
-    let nrow_frequency = group_size * 3;
+    let nrow_frequency = group_size * SampleCategory::COUNT;
 
-    // Build value vector repeated 3 times (for all, horns_min, horns_max)
-    let base_values: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
+    // Build a vector of scale values repeated as many times as there are categories of samples.
+    // Currently, this means 3 times (for "all", "horns_min", and "horns_max").
+    let scale_values: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
     let mut value = Vec::with_capacity(nrow_frequency);
-    for _ in 0..3 {
-        value.extend_from_slice(&base_values);
+    for _ in 0..SampleCategory::COUNT {
+        value.extend_from_slice(&scale_values);
     }
 
     ResultListFromMeanSdN {
@@ -2150,15 +2151,17 @@ mod tests {
 
     #[test]
     fn test_frequency_samples_column() {
+        let repetitions = 5;
+        
         // Test with 5 repetitions (like scale 1..=5)
-        let samples = FrequencySamplesColumn::new(5);
+        let samples = FrequencySamplesColumn::new(repetitions);
 
-        // Check length
-        assert_eq!(samples.len(), 15); // 5 * 3
+        // Check length -- currently, it should be 5 * 3 == 15
+        assert_eq!(samples.len(), repetitions * SampleCategory::COUNT);
         assert!(!samples.is_empty());
 
         // Check repetitions
-        assert_eq!(samples.repetitions(), 5);
+        assert_eq!(samples.repetitions(), repetitions);
 
         // Check structure via to_vec()
         let vec = samples.to_vec();
@@ -2274,7 +2277,7 @@ mod tests {
 
         // Check combined frequency table
         let n_values = 5; // scale_max - scale_min + 1
-        let expected_rows = n_values * 3; // all, horns_min, horns_max
+        let expected_rows = n_values * SampleCategory::COUNT; // all, horns_min, horns_max
         assert_eq!(results.frequency.len(), expected_rows);
         assert_eq!(results.frequency.samples_group().len(), expected_rows);
         assert_eq!(results.frequency.value().len(), expected_rows);
