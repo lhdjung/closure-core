@@ -35,10 +35,13 @@ impl<T> FloatType for T where T: Float + FromPrimitive + Send + Sync {}
 pub trait IntegerType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 
-pub mod distribution_finder;
-pub mod grimmer;
-pub mod sprite;
-pub mod sprite_types;
+mod grimmer;
+mod sprite;
+mod sprite_types;
+
+// Re-export sprite types needed for the public API
+pub use sprite::{sprite_parallel, sprite_parallel_streaming, ParameterError};
+pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
 
 /// Configuration for Parquet output in memory mode
 /// Used with `dfs_parallel()` to optionally save results while returning them
@@ -59,10 +62,6 @@ pub struct StreamingConfig {
 pub struct StreamingResult {
     pub total_combinations: usize,
     pub file_path: String,
-}
-
-pub struct SamplesSubset {
-    pub subset: Vec<String>,
 }
 
 /// Sample category for frequency tables
@@ -497,7 +496,7 @@ fn mad(values: &[f64], median_val: f64) -> f64 {
 ///
 /// # Returns
 /// An empty ResultListFromMeanSdN<U> with appropriate structure
-pub fn empty_result_list<U>(scale_min: U, scale_max: U) -> ResultListFromMeanSdN<U>
+pub(crate) fn empty_result_list<U>(scale_min: U, scale_max: U) -> ResultListFromMeanSdN<U>
 where
     U: Integer + ToPrimitive + Copy,
 {
@@ -1284,7 +1283,7 @@ where
 }
 
 /// Structure to hold streaming frequency state
-pub struct StreamingFrequencyState {
+pub(crate) struct StreamingFrequencyState {
     current_min_horns: f64,
     current_max_horns: f64,
     all_freq: HashMap<i32, i64>,
@@ -1295,7 +1294,7 @@ pub struct StreamingFrequencyState {
 }
 
 /// Helper function to write statistics files for streaming mode
-pub fn write_streaming_statistics(
+pub(crate) fn write_streaming_statistics(
     base_path: &str,
     all_horns: &[f64],
     n_usize: usize,

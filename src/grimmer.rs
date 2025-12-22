@@ -15,7 +15,7 @@ const FUZZ_VALUE: f64 = 1e-12;
 /// no decimal, or if the string cannot be converted to a numeric type
 ///
 /// Note that this function will only record the number of values after the first decimal point
-pub fn decimal_places_scalar(x: Option<&str>, sep: &str) -> Option<i32> {
+pub(crate) fn decimal_places_scalar(x: Option<&str>, sep: &str) -> Option<i32> {
     let s = x?;
 
     let pattern = format!("{sep}(\\d+)");
@@ -36,14 +36,14 @@ pub fn rust_round(x: f64, y: i32) -> f64 {
     (x * 10.0f64.powi(y)).round() / 10.0f64.powi(y)
 }
 
-pub fn check_threshold_specified(threshold: f64) {
+pub(crate) fn check_threshold_specified(threshold: f64) {
     if threshold == 5.0 {
         panic!("Threshold must be set to some number other than its default, 5.0");
     }
 }
 
 /// round down function
-pub fn round_down(number: f64, decimals: i32) -> f64 {
+pub(crate) fn round_down(number: f64, decimals: i32) -> f64 {
     let to_round =
         (number * 10.0f64.powi(decimals + 1)) - (number * 10f64.powi(decimals)).floor() * 10.0;
 
@@ -53,7 +53,7 @@ pub fn round_down(number: f64, decimals: i32) -> f64 {
     }
 }
 
-pub fn round_up(number: f64, decimals: i32) -> f64 {
+pub(crate) fn round_up(number: f64, decimals: i32) -> f64 {
     let to_round =
         (number * 10.0f64.powi(decimals + 1)) - (number * 10f64.powi(decimals)).floor() * 10.0;
 
@@ -63,7 +63,7 @@ pub fn round_up(number: f64, decimals: i32) -> f64 {
     }
 }
 
-pub fn round_trunc(x: f64, digits: i32) -> f64 {
+pub(crate) fn round_trunc(x: f64, digits: i32) -> f64 {
     let p10 = 10.0f64.powi(digits);
 
     //For symmetry between positive and negative numbers, use the absolute value:
@@ -80,7 +80,7 @@ pub fn round_trunc(x: f64, digits: i32) -> f64 {
     //absolute value; otherwise it simply returns `core` itself:
 }
 
-pub fn anti_trunc(x: f64) -> f64 {
+pub(crate) fn anti_trunc(x: f64) -> f64 {
     let core = x.abs().trunc() + 1.0;
 
     match x < 0.0 {
@@ -89,23 +89,17 @@ pub fn anti_trunc(x: f64) -> f64 {
     }
 }
 
-/// a function to return any function to its decimal portion, used in unit tests in the original R
-/// library
-pub fn trunc_reverse(x: f64) -> f64 {
-    x - x.trunc()
-}
-
-pub fn round_anti_trunc(x: f64, digits: i32) -> f64 {
+pub(crate) fn round_anti_trunc(x: f64, digits: i32) -> f64 {
     let p10 = 10.0f64.powi(digits);
     anti_trunc(x * p10) / p10
 }
 
-pub fn round_ceiling(x: f64, digits: i32) -> f64 {
+pub(crate) fn round_ceiling(x: f64, digits: i32) -> f64 {
     let p10 = 10.0f64.powi(digits);
     (x * p10).ceil() / p10
 }
 
-pub fn round_floor(x: f64, digits: i32) -> f64 {
+pub(crate) fn round_floor(x: f64, digits: i32) -> f64 {
     let p10 = 10.0f64.powi(digits);
     (x * p10).floor() / p10
 }
@@ -113,7 +107,7 @@ pub fn round_floor(x: f64, digits: i32) -> f64 {
 // we can pass multiple arguments to rounding, and that x can also be a vector????
 // But the example values for the above function look exclusively scalars
 
-pub fn round_up_from(x: Vec<f64>, digits: i32, threshold: f64, symmetric: bool) -> Vec<f64> {
+pub(crate) fn round_up_from(x: Vec<f64>, digits: i32, threshold: f64, symmetric: bool) -> Vec<f64> {
     let p10 = 10.0f64.powi(digits);
     let threshold = threshold - f64::MIN_POSITIVE.powf(0.5);
 
@@ -122,7 +116,7 @@ pub fn round_up_from(x: Vec<f64>, digits: i32, threshold: f64, symmetric: bool) 
         .collect()
 }
 
-pub fn round_up_from_scalar(x: f64, p10: f64, threshold: f64, symmetric: bool) -> f64 {
+pub(crate) fn round_up_from_scalar(x: f64, p10: f64, threshold: f64, symmetric: bool) -> f64 {
     if symmetric {
         match x < 0.0 {
             true => -(x.abs() * p10 + (1.0 - (threshold / 10.0))).floor() / p10, // - (floor(abs(x) * p10 + (1 - (threshold / 10))) / p10)
@@ -133,7 +127,7 @@ pub fn round_up_from_scalar(x: f64, p10: f64, threshold: f64, symmetric: bool) -
     }
 }
 
-pub fn round_down_from(x: Vec<f64>, digits: i32, threshold: f64, symmetric: bool) -> Vec<f64> {
+pub(crate) fn round_down_from(x: Vec<f64>, digits: i32, threshold: f64, symmetric: bool) -> Vec<f64> {
     let p10 = 10.0f64.powi(digits);
     let threshold = threshold - f64::EPSILON.powf(0.5);
 
@@ -145,7 +139,7 @@ pub fn round_down_from(x: Vec<f64>, digits: i32, threshold: f64, symmetric: bool
         .collect()
 }
 
-pub fn round_down_from_scalar(x: f64, p10: f64, threshold: f64, symmetric: bool) -> f64 {
+pub(crate) fn round_down_from_scalar(x: f64, p10: f64, threshold: f64, symmetric: bool) -> f64 {
     if symmetric {
         match x < 0.0 {
             true => -(x.abs() * p10 - (1.0 - (threshold / 10.0))).ceil() / p10,
@@ -165,7 +159,7 @@ pub fn round_down_from_scalar(x: f64, p10: f64, threshold: f64, symmetric: bool)
 /// rounding functions also need to be updated to do that
 /// but both this and the vectorized version return doubles, and the same number of them, just in a
 /// different format
-pub fn reconstruct_rounded_numbers_scalar(
+pub(crate) fn reconstruct_rounded_numbers_scalar(
     x: f64,
     digits: i32,
     rounding: &str,
@@ -206,7 +200,7 @@ pub fn reconstruct_rounded_numbers_scalar(
     }
 }
 
-pub fn reround(
+pub(crate) fn reround(
     x: Vec<f64>,
     digits: i32,
     rounding: &str,
@@ -220,6 +214,7 @@ pub fn reround(
         .collect()
 }
 
+#[allow(dead_code)]
 pub enum GrimReturn {
     Bool(bool),
     List(bool, f64, Vec<f64>, Vec<f64>, f64, f64),
@@ -495,34 +490,6 @@ pub fn grimmer_scalar(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn grimmer_rust(
-    xs: Vec<&str>,
-    sds: Vec<&str>,
-    ns: Vec<u32>,
-    items: Vec<u32>,
-    bool_params: Vec<bool>,
-    rounding: &str,
-    threshold: f64,
-    tolerance: f64,
-) -> Vec<bool> {
-    xs.iter()
-        .zip(sds.iter())
-        .zip(ns.iter())
-        .zip(items.iter())
-        .map(|(((x, sd), n), item)| {
-            grimmer_scalar(
-                x,
-                sd,
-                *n,
-                *item,
-                bool_params.clone(),
-                rounding,
-                threshold,
-                tolerance,
-            )
-        })
-        .collect()
-}
 
 #[allow(clippy::too_many_arguments)]
 /// Determines the possibility of standard deviations from given means and sample sizes using the A-GRIMMER algorithm.
@@ -546,33 +513,6 @@ pub fn grimmer_rust(
 ///
 /// # Panics
 /// The function will panic if the lengths of `xs`, `sds`, and `ns` do not match.
-pub fn grimmer(
-    xs: Vec<String>,
-    sds: Vec<String>,
-    ns: Vec<u32>,
-    rounding: String,
-    items: Vec<u32>,
-    percent: bool,
-    show_reason: bool,
-    threshold: f64,
-    symmetric: bool,
-    tolerance: f64,
-) -> Vec<bool> {
-    let bool_params = vec![percent, show_reason, symmetric];
-    let xs: Vec<&str> = xs.iter().map(|s| &**s).collect();
-    let sds: Vec<&str> = sds.iter().map(|s| &**s).collect();
-
-    grimmer_rust(
-        xs,
-        sds,
-        ns,
-        items,
-        bool_params,
-        rounding.as_str(),
-        threshold,
-        tolerance,
-    )
-}
 
 /// Fuzzes the value of a float by 1e-12
 ///
@@ -584,277 +524,6 @@ pub fn grimmer(
 ///
 /// Raises:
 ///     ValueError: If x is not a floating-point number
-pub fn dustify(x: f64) -> Vec<f64> {
+pub(crate) fn dustify(x: f64) -> Vec<f64> {
     vec![x - FUZZ_VALUE, x + FUZZ_VALUE]
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum SdBinaryError {
-    #[error("There cannot be more observations {0} in one condition than in the whole system {1}")]
-    ObservationCountError(u32, u32),
-    #[error("There must be at least two observations")]
-    InsufficientObservationsError,
-    #[error("The mean of binary observations cannot be less than 0.0")]
-    NegativeBinaryMeanError,
-    #[error("The mean of binary observations cannot be greater than 1.0")]
-    InvalidBinaryError,
-}
-
-#[derive(Debug, Error)]
-pub enum ReconstructSdError {
-    #[error("{0} is not a number")]
-    NotANumber(String),
-    #[error("{0} is not a formula")]
-    NotAFormula(String),
-    #[error("Inputs to reconstruct_sd_scalar failed. The reconstruction formula {0} was called but resulted in a {1}")]
-    SdBinaryError(String, SdBinaryError),
-    // complete this so that the error propagates from the function below
-}
-
-/// Returns the standard deviation of binary value counts
-///
-/// Parameters:
-///     zeros: count of observations in the 0-binary condition
-///     ones: count of observations in the 1-binary condition
-///
-/// Returns:
-///     the floating-point standard deviation of the binary groups
-///
-/// Raises:
-///     ValueError is zeros or ones are not usigned integers
-///
-/// Panics:
-///     If the total number of observations is not greater than one
-pub fn sd_binary_groups(zeros: u32, ones: u32) -> Result<f64, SdBinaryError> {
-    // though we take in the counts as unsigned integers, we transform them into
-    // floating point values in order to perform the
-    let n: f64 = f64::from(zeros) + f64::from(ones);
-
-    if n < 2.0 {
-        return Err(SdBinaryError::InsufficientObservationsError);
-    }
-    Ok((n / (n - 1.0) * (f64::from(zeros * ones) / n.powi(2))).sqrt())
-}
-
-/// Returns the standard deviation of binary variables from the count of zero values and the total
-///
-/// Parameters:
-///     zeros: count of observations in the 0-binary condition
-///     n: count of total observations
-///
-/// Returns:
-///     the floating-point standard deviation of the binary groups
-///
-/// Raises:
-///     ValueError: if zeros or n are not unsigned integers
-///
-/// Panics:
-///     If there are more observations in the zero condition than in the total
-///     If the total number of observations is not greater than one
-pub fn sd_binary_0_n(zeros: u32, n: u32) -> Result<f64, SdBinaryError> {
-    let ones: f64 = f64::from(n) - f64::from(zeros);
-
-    if n < zeros {
-        return Err(SdBinaryError::ObservationCountError(zeros, n));
-    }
-
-    if n < 2 {
-        return Err(SdBinaryError::InsufficientObservationsError);
-    }
-
-    Ok(
-        ((f64::from(n) / f64::from(n - 1)) * ((f64::from(zeros) * ones) / (f64::from(n)).powi(2)))
-            .sqrt(),
-    )
-}
-
-/// Returns the standard deviation of binary variables from the count of one values and the total
-///
-/// Parameters:
-///     ones: count of observations in the 1-binary condition
-///     n: count of total observations
-///
-/// Returns:
-///     the floating-point standard deviation of the binary groups
-///
-/// Raises:
-///     ValueError: if ones or n are not unsigned integers
-///
-/// Panics:
-///     If there are more observations in the one condition than in the total
-///     If the total number of observations is not greater than one
-pub fn sd_binary_1_n(ones: u32, n: u32) -> Result<f64, SdBinaryError> {
-    let zeros: f64 = f64::from(n) - f64::from(ones);
-
-    if n < ones {
-        return Err(SdBinaryError::ObservationCountError(ones, n));
-    }
-
-    if n < 2 {
-        return Err(SdBinaryError::InsufficientObservationsError);
-    }
-
-    Ok(
-        ((f64::from(n) / f64::from(n - 1)) * ((zeros * f64::from(ones)) / (f64::from(n)).powi(2)))
-            .sqrt(),
-    )
-}
-
-/// Returns the standard deviation of binary variables from the mean and the total
-///
-/// Parameters:
-///     mean: mean of the binary observations, namely the proportion of values in the 1-binary
-///     condition
-///     n: count of total observations
-///
-/// Returns:
-///     the floating-point standard deviation of the binary system
-///
-/// Raises:
-///     ValueError: if mean is not a floating-point number
-///     ValueError: if n is not an unsigned integer
-///
-/// Panics:
-///     if the mean is greater than one or less than zero
-pub fn sd_binary_mean_n(mean: f64, n: u32) -> Result<f64, SdBinaryError> {
-    if mean < 0.0 {
-        return Err(SdBinaryError::NegativeBinaryMeanError);
-    }
-
-    if mean > 1.0 {
-        return Err(SdBinaryError::InvalidBinaryError);
-    }
-
-    Ok(((f64::from(n) / f64::from(n - 1)) * (mean * (1.0 - mean))).sqrt())
-}
-
-pub fn reconstruct_sd_scalar(
-    formula: &str,
-    x: &str,
-    n: u32,
-    zeros: u32,
-    ones: u32,
-) -> Result<f64, ReconstructSdError> {
-    let x_num: f64 = match x.parse() {
-        Ok(num) => num,
-        Err(string) => return Err(ReconstructSdError::NotANumber(string.to_string())),
-    };
-
-    let sd_rec: Result<f64, SdBinaryError> = match formula {
-        "mean_n" => sd_binary_mean_n(x_num, n),
-        "mean" => sd_binary_mean_n(x_num, n), // convenient aliases
-        "0_n" => sd_binary_0_n(zeros, n),
-        "0" => sd_binary_0_n(zeros, n), // convenient aliases
-        "1_n" => sd_binary_1_n(ones, n),
-        "1" => sd_binary_1_n(ones, n), // convenient aliases
-        "groups" => sd_binary_groups(zeros, ones),
-        "group" => sd_binary_groups(zeros, ones), // convenient aliases
-        _ => return Err(ReconstructSdError::NotAFormula(formula.to_string())),
-    };
-
-    match sd_rec {
-        Ok(num) => Ok(num),
-        Err(e) => Err(ReconstructSdError::SdBinaryError(formula.to_string(), e)),
-    }
-}
-
-pub enum GRIMInput {
-    Str(String),
-    Num(f64), // this captures input integer and coerces it into a string if possible, in order to
-              // deal with user error on the Python interface
-}
-/// reproducing scrutiny's grim_scalar() function, albeit with slightly different order of
-/// arguments, because unlike R, Python requires that all the positional parameters be provided up
-/// front before optional arguments with defaults
-#[allow(clippy::too_many_arguments)]
-pub fn grim_scalar(
-    x: GRIMInput,
-    n: u32,
-    rounding: String,
-    items: u32,
-    percent: bool,
-    show_rec: bool,
-    threshold: f64,
-    symmetric: bool,
-    tolerance: f64,
-) -> bool {
-    let x: String = match x {
-        GRIMInput::Str(s) => s,
-        GRIMInput::Num(n) => format!("{n}"),
-    };
-    // accounting for the possibility that we might receive either a String or numeric type,
-    // turning the numeric possibility into a String, which we later turn into a &str to
-    // pass into grim_scalar_rust()
-
-    //let round: &str = rounding.as_str();
-    // turn Vec<String> to Vec<&str>
-    let val = grim_scalar_rust(
-        x.as_str(),
-        n,
-        vec![percent, show_rec, symmetric],
-        items,
-        rounding.as_str(),
-        threshold,
-        tolerance,
-    );
-
-    match val {
-        Ok(r) => match r {
-            GrimReturn::Bool(b) => b,
-            GrimReturn::List(a, _, _, _, _, _) => a,
-        },
-        Err(_) => panic!(),
-    }
-}
-
-// vector wrapper for grim_scalar_rust
-pub fn grim_rust(
-    xs: Vec<&str>,
-    ns: Vec<u32>,
-    bool_params: Vec<bool>,
-    items: Vec<u32>,
-    rounding: &str,
-    threshold: f64,
-    tolerance: f64,
-) -> Vec<bool> {
-    let vals: Vec<Result<GrimReturn, GrimScalarError>> = xs
-        .iter()
-        .zip(ns.iter())
-        .zip(items.iter())
-        .map(|((x, num), item)| {
-            grim_scalar_rust(
-                x,
-                *num,
-                bool_params.clone(),
-                *item,
-                rounding,
-                threshold,
-                tolerance,
-            )
-        })
-        .collect();
-    vals.iter()
-        .map(|grim_result| match grim_result {
-            Ok(grim_return) => match grim_return {
-                GrimReturn::Bool(b) => *b,
-                GrimReturn::List(a, _, _, _, _, _) => *a,
-            },
-            Err(_) => panic!(),
-        })
-        .collect()
-}
-
-/// Automatically unpacks and tests the output of grim_scalar_rust and checks whether its main bool
-/// result matches the expected bool
-pub fn grim_tester(grim_result: Result<GrimReturn, GrimScalarError>, expected: bool) {
-    match grim_result {
-        Ok(grim_return) => match grim_return {
-            GrimReturn::Bool(b) => match expected {
-                true => assert!(b),
-                false => assert!(!b),
-            },
-            GrimReturn::List(a, _, _, _, _, _) => assert!(!a),
-        },
-        Err(_) => panic!(),
-    };
 }

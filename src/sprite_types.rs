@@ -2,26 +2,16 @@ use std::collections::hash_map::Keys;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
-pub struct OccurrenceConstraints {
+pub(crate) struct OccurrenceConstraints {
     /// Must have exactly this many of each value
     pub exact: HashMap<i32, usize>,
     /// Must have at least this many of each value
     pub minimum: HashMap<i32, usize>,
-    /// Must have at most this many of each value (optional)
-    pub maximum: Option<HashMap<i32, usize>>,
 }
 
 impl OccurrenceConstraints {
-    pub fn new(
-        exact: HashMap<i32, usize>,
-        minimum: HashMap<i32, usize>,
-        maximum: Option<HashMap<i32, usize>>,
-    ) -> Self {
-        Self {
-            exact,
-            minimum,
-            maximum,
-        }
+    pub fn new(exact: HashMap<i32, usize>, minimum: HashMap<i32, usize>) -> Self {
+        Self { exact, minimum }
     }
 
     pub fn check_conflicts(&self) -> bool {
