@@ -2313,6 +2313,9 @@ pub mod tests {
 
     #[test]
     fn test_sprite_parallel_streaming() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use std::fs::File;
+
         // Test streaming mode with separate files
         let config = StreamingConfig {
             file_path: "test_sprite_streaming/".to_string(),
@@ -2322,14 +2325,33 @@ pub mod tests {
 
         let _ = std::fs::create_dir("test_sprite_streaming");
 
+        let expected_mean = 2.2;
+        let expected_sd = 1.3;
+        let expected_n = 20;
+        let rounding_error_mean = 0.05;
+        let rounding_error_sd = 0.05;
+
+        // Calculate scale_factor based on rounding errors (same as internal implementation)
+        fn precision_from_rounding_error(rounding_error: f64) -> i32 {
+            if rounding_error <= 0.0 {
+                return 0;
+            }
+            // precision = -log10(rounding_error * 2)
+            (-((rounding_error * 2.0).log10())).round() as i32
+        }
+        let m_prec = precision_from_rounding_error(rounding_error_mean);
+        let sd_prec = precision_from_rounding_error(rounding_error_sd);
+        let precision = std::cmp::max(m_prec, sd_prec);
+        let scale_factor = 10_u32.pow(precision as u32);
+
         let result = sprite_parallel_streaming::<f64, i32>(
-            2.2,  // mean
-            1.3,  // sd
-            20,   // n
+            expected_mean,
+            expected_sd,
+            expected_n,
             1,    // scale_min
             5,    // scale_max
-            0.05, // rounding_error_mean (precision 1)
-            0.05, // rounding_error_sd (precision 1)
+            rounding_error_mean,
+            rounding_error_sd,
             1,    // n_items
             None, // restrictions_exact
             RestrictionsOption::Default,
@@ -2344,6 +2366,84 @@ pub mod tests {
         // Check that files were created
         assert!(std::path::Path::new("test_sprite_streaming/samples.parquet").exists());
         assert!(std::path::Path::new("test_sprite_streaming/horns.parquet").exists());
+
+        // Read and validate the samples from the parquet file
+        let file = File::open("test_sprite_streaming/samples.parquet")
+            .expect("Failed to open samples.parquet");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("Failed to create parquet reader builder");
+        let reader = builder.build().expect("Failed to build parquet reader");
+
+        let mut total_samples_checked = 0;
+
+        // Process each batch
+        for maybe_batch in reader {
+            let batch = maybe_batch.expect("Failed to read batch");
+            let num_rows = batch.num_rows();
+            let num_columns = batch.num_columns();
+
+            // Each row is a sample, each column is a position in the sample
+            for row_idx in 0..num_rows {
+                // Extract the scaled sample values for this row
+                let mut scaled_values: Vec<i32> = Vec::with_capacity(num_columns);
+
+                for col_idx in 0..num_columns {
+                    let column = batch.column(col_idx);
+                    let int_array = column
+                        .as_any()
+                        .downcast_ref::<arrow::array::Int32Array>()
+                        .expect("Column is not Int32Array");
+                    scaled_values.push(int_array.value(row_idx));
+                }
+
+                // Verify sample size
+                assert_eq!(
+                    scaled_values.len(),
+                    expected_n as usize,
+                    "Sample size mismatch: expected {}, got {}",
+                    expected_n,
+                    scaled_values.len()
+                );
+
+                // Unscale the values before computing statistics
+                let sample_values: Vec<f64> = scaled_values
+                    .iter()
+                    .map(|&v| v as f64 / scale_factor as f64)
+                    .collect();
+
+                // Calculate mean and SD for this sample
+                let computed_mean = mean(&sample_values);
+                let computed_sd = std_dev(&sample_values).unwrap();
+
+                // Check that mean is within tolerance
+                let mean_diff = (computed_mean - expected_mean).abs();
+                assert!(
+                    mean_diff <= rounding_error_mean,
+                    "Mean mismatch: expected {}, got {} (diff: {})",
+                    expected_mean,
+                    computed_mean,
+                    mean_diff
+                );
+
+                // Check that SD is within tolerance
+                let sd_diff = (computed_sd - expected_sd).abs();
+                assert!(
+                    sd_diff <= rounding_error_sd,
+                    "SD mismatch: expected {}, got {} (diff: {})",
+                    expected_sd,
+                    computed_sd,
+                    sd_diff
+                );
+
+                total_samples_checked += 1;
+            }
+        }
+
+        // Verify we checked at least some samples
+        assert!(
+            total_samples_checked > 0,
+            "No samples were validated from the parquet file"
+        );
 
         // Clean up test files
         let _ = std::fs::remove_file("test_sprite_streaming/samples.parquet");
