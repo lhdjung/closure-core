@@ -5,8 +5,8 @@
 //! about the Rust feature called closure.
 //!
 //! The crate is mostly meant to serve as a backend for the R package [unsum](https://lhdjung.github.io/unsum/).
-//! The main APIs users need are `dfs_parallel()` for in-memory results and
-//! `dfs_parallel_streaming()` for memory-efficient file output.
+//! The main APIs users need are `closure_parallel()` for in-memory results and
+//! `closure_parallel_streaming()` for memory-efficient file output.
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
@@ -44,14 +44,14 @@ pub use sprite::{sprite_parallel, sprite_parallel_streaming, ParameterError};
 pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
 
 /// Configuration for Parquet output in memory mode
-/// Used with `dfs_parallel()` to optionally save results while returning them
+/// Used with `closure_parallel()` to optionally save results while returning them
 pub struct ParquetConfig {
     pub file_path: String,
     pub batch_size: usize,
 }
 
 /// Configuration for streaming mode
-/// Used with `dfs_parallel_streaming()` for memory-efficient processing
+/// Used with `closure_parallel_streaming()` for memory-efficient processing
 pub struct StreamingConfig {
     pub file_path: String,
     pub batch_size: usize,
@@ -1019,11 +1019,11 @@ where
 /// - You need to process results in memory after generation
 /// - You want both file output and in-memory access
 ///
-/// For large result sets, use `dfs_parallel_streaming()` instead.
+/// For large result sets, use `closure_parallel_streaming()` instead.
 ///
 /// # Parameters
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
-pub fn dfs_parallel<T, U>(
+pub fn closure_parallel<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -1072,7 +1072,7 @@ where
                 }
 
                 let remaining = limit - found.len();
-                let branch_results = dfs_branch(
+                let branch_results = closure_branch(
                     combo,
                     running_sum,
                     running_m2,
@@ -1115,7 +1115,7 @@ where
                         limit - current
                     };
 
-                    let branch_results = dfs_branch(
+                    let branch_results = closure_branch(
                         combo.clone(),
                         *running_sum,
                         *running_m2,
@@ -1145,7 +1145,7 @@ where
         combinations
             .par_iter()
             .flat_map(|(combo, running_sum, running_m2)| {
-                dfs_branch(
+                closure_branch(
                     combo.clone(),
                     *running_sum,
                     *running_m2,
@@ -1484,7 +1484,7 @@ pub(crate) fn write_streaming_statistics(
 ///
 /// # Parameters
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
-pub fn dfs_parallel_streaming<T, U>(
+pub fn closure_parallel_streaming<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -1736,7 +1736,7 @@ where
                 }
 
                 let remaining = limit - found_count;
-                let branch_results = dfs_branch(
+                let branch_results = closure_branch(
                     combo,
                     running_sum,
                     running_m2,
@@ -1878,7 +1878,7 @@ where
                 None
             };
 
-            let branch_results = dfs_branch(
+            let branch_results = closure_branch(
                 combo.clone(),
                 *running_sum,
                 *running_m2,
@@ -2035,7 +2035,7 @@ where
 // Collect all valid combinations from a starting point
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn dfs_branch<T, U>(
+fn closure_branch<T, U>(
     start_combination: Vec<U>,
     running_sum_init: T,
     running_m2_init: T,
@@ -2232,9 +2232,9 @@ mod tests {
     }
 
     #[test]
-    fn test_dfs_parallel_with_new_api() {
+    fn test_closure_parallel_with_new_api() {
         // Test that the function returns valid statistics with new structure
-        let results = dfs_parallel::<f64, i32>(
+        let results = closure_parallel::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             5,    // n
@@ -2295,7 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dfs_parallel_with_file() {
+    fn test_closure_parallel_with_file() {
         // Test with Parquet output
         let config = ParquetConfig {
             file_path: "test_output/".to_string(),
@@ -2304,7 +2304,7 @@ mod tests {
 
         let _ = std::fs::create_dir("test_output");
 
-        let results = dfs_parallel::<f64, i32>(
+        let results = closure_parallel::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             5,    // n
@@ -2327,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dfs_parallel_streaming_separate_files() {
+    fn test_closure_parallel_streaming_separate_files() {
         // Test streaming mode with separate files
         let config = StreamingConfig {
             file_path: "test_streaming/".to_string(),
@@ -2337,7 +2337,7 @@ mod tests {
 
         let _ = std::fs::create_dir("test_streaming");
 
-        let result = dfs_parallel_streaming::<f64, i32>(
+        let result = closure_parallel_streaming::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             5,    // n
@@ -2367,7 +2367,7 @@ mod tests {
     #[test]
     fn test_stop_after_parameter() {
         // Test that stop_after limits the number of results
-        let results_unlimited = dfs_parallel::<f64, i32>(
+        let results_unlimited = closure_parallel::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             80,   // n (increased sample size)
@@ -2383,7 +2383,7 @@ mod tests {
         assert!(total_samples > 10); // Should have many samples
 
         // Test with limit of 10
-        let results_limited = dfs_parallel::<f64, i32>(
+        let results_limited = closure_parallel::<f64, i32>(
             3.0,      // mean
             1.0,      // sd
             80,       // n (increased sample size)
@@ -2400,7 +2400,7 @@ mod tests {
         assert_eq!(results_limited.results.id.len(), 10);
 
         // Test with limit of 1
-        let results_one = dfs_parallel::<f64, i32>(
+        let results_one = closure_parallel::<f64, i32>(
             3.0,     // mean
             1.0,     // sd
             80,      // n (increased sample size)

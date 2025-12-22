@@ -4,13 +4,13 @@ Implements the novel CLOSURE technique for efficiently reconstructing all possib
 
 The crate is mostly meant to serve as a backend for the R package [unsum](https://lhdjung.github.io/unsum/).
 
-You will likely only need `dfs_parallel()`.
+You will likely only need `closure_parallel()`.
 
 Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
 ## Example
 
-Enter summary data reported in a paper and call `dfs_parallel()`.
+Enter summary data reported in a paper and call `closure_parallel()`.
 
 ```
 let mean = 5.0;
@@ -21,7 +21,7 @@ let scale_max = 7;
 let rounding_error_mean = 0.005;
 let rounding_error_sd = 0.005;
 
-dfs_parallel(
+closure_parallel(
     mean,
     sd,
     n,

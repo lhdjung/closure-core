@@ -343,7 +343,7 @@ where
 
 /// Main SPRITE API: Generate all valid distributions matching summary statistics
 ///
-/// This is the SPRITE equivalent of `dfs_parallel()`. It finds multiple possible
+/// This is the SPRITE equivalent of `closure_parallel()`. It finds multiple possible
 /// distributions of raw data that match the given mean and standard deviation.
 ///
 /// # Arguments (matching CLOSURE parameter order)
@@ -554,7 +554,7 @@ where
 
 /// SPRITE streaming API: Generate distributions and stream to Parquet files
 ///
-/// This is the SPRITE equivalent of `dfs_parallel_streaming()`. It finds distributions
+/// This is the SPRITE equivalent of `closure_parallel_streaming()`. It finds distributions
 /// matching the given mean and SD and streams them directly to Parquet files without
 /// keeping all results in memory.
 ///
