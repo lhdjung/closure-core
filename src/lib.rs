@@ -68,7 +68,16 @@ pub struct SamplesSubset {
 /// Sample category for frequency tables
 ///
 /// Automatically provides iteration, count, and snake_case string conversion via strum.
-/// To add a new variant, simply add it to the enum - no manual maintenance needed!
+///
+/// **Important**: While strum makes iteration robust, these three variants have specific
+/// semantic meaning in the CLOSURE algorithm:
+/// - `All`: Frequencies across all samples
+/// - `HornsMin`: Frequencies for samples with minimum horns index
+/// - `HornsMax`: Frequencies for samples with maximum horns index
+///
+/// Adding new variants requires corresponding changes to the frequency calculation logic
+/// in `samples_to_result_list()` and `write_streaming_statistics()` to define what
+/// samples belong to the new category and how to calculate their frequencies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCountMacro, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SampleCategory {
@@ -160,13 +169,14 @@ impl FrequencySamplesColumn {
     pub fn get(&self, index: usize) -> SampleCategory {
         assert!(index < self.len(), "Index out of bounds");
 
-        if index < self.repetitions {
-            SampleCategory::All
-        } else if index < self.repetitions * 2 {
-            SampleCategory::HornsMin
-        } else {
-            SampleCategory::HornsMax
-        }
+        // Calculate which category this index belongs to
+        let category_index = index / self.repetitions;
+
+        // Use strum's iterator to get the variant at this position
+        // This automatically adapts to any changes in SampleCategory
+        SampleCategory::iter()
+            .nth(category_index)
+            .expect("category_index should always be valid based on len() check")
     }
 
     /// Get the category at a given index as a string
@@ -215,7 +225,7 @@ impl FrequencyTable {
         for (name, len) in name_len_tuples {
             assert_eq!(
                 len, expected_len,
-                "FrequencyTable: {} length ({}) doesn't match samples_group length ({})",
+                "can't create a FrequencyTable: `{}` length ({}) doesn't match `samples_group` length ({})",
                 name, len, expected_len
             );
         }
