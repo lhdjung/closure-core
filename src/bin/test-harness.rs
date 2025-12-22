@@ -9,7 +9,7 @@ use std::io::Result;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use closure_core::{count_initial_combinations, dfs_parallel};
+use closure_core::{count_initial_combinations, closure_parallel};
 
 fn main() -> std::io::Result<()> {
     println!("Running test harness...");
@@ -53,7 +53,7 @@ fn write_closure_csv(
     );
 
     // Compute results (only this part is timed)
-    let result = dfs_parallel(
+    let result = closure_parallel(
         mean,
         sd,
         n,

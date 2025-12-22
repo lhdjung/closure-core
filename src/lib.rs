@@ -5,8 +5,8 @@
 //! about the Rust feature called closure.
 //!
 //! The crate is mostly meant to serve as a backend for the R package [unsum](https://lhdjung.github.io/unsum/).
-//! The main APIs users need are `dfs_parallel()` for in-memory results and
-//! `dfs_parallel_streaming()` for memory-efficient file output.
+//! The main APIs users need are `closure_parallel()` for in-memory results and
+//! `closure_parallel_streaming()` for memory-efficient file output.
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
@@ -24,6 +24,8 @@ use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use strum::{EnumCount, IntoEnumIterator};
+use strum_macros::{EnumCount as EnumCountMacro, EnumIter, IntoStaticStr};
 
 /// Trait alias for floating-point types used in CLOSURE computations
 pub trait FloatType: Float + FromPrimitive + Send + Sync {}
@@ -33,19 +35,23 @@ impl<T> FloatType for T where T: Float + FromPrimitive + Send + Sync {}
 pub trait IntegerType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 
-pub mod grimmer;
-pub mod sprite;
-pub mod sprite_types;
+mod grimmer;
+mod sprite;
+mod sprite_types;
+
+// Re-export sprite types needed for the public API
+pub use sprite::{sprite_parallel, sprite_parallel_streaming, ParameterError};
+pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
 
 /// Configuration for Parquet output in memory mode
-/// Used with `dfs_parallel()` to optionally save results while returning them
+/// Used with `closure_parallel()` to optionally save results while returning them
 pub struct ParquetConfig {
     pub file_path: String,
     pub batch_size: usize,
 }
 
 /// Configuration for streaming mode
-/// Used with `dfs_parallel_streaming()` for memory-efficient processing
+/// Used with `closure_parallel_streaming()` for memory-efficient processing
 pub struct StreamingConfig {
     pub file_path: String,
     pub batch_size: usize,
@@ -58,15 +64,214 @@ pub struct StreamingResult {
     pub file_path: String,
 }
 
+/// Sample category for frequency tables
+///
+/// Automatically provides iteration, count, and snake_case string conversion via strum.
+///
+/// **Important**: While strum makes iteration robust, these three variants have specific
+/// semantic meaning in the CLOSURE algorithm:
+/// - `All`: Frequencies across all samples
+/// - `HornsMin`: Frequencies for samples with minimum horns index
+/// - `HornsMax`: Frequencies for samples with maximum horns index
+///
+/// Adding new variants requires corresponding changes to the frequency calculation logic
+/// in `samples_to_result_list()` and `write_streaming_statistics()` to define what
+/// samples belong to the new category and how to calculate their frequencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCountMacro, EnumIter, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum SampleCategory {
+    All,
+    HornsMin,
+    HornsMax,
+}
+
+impl SampleCategory {
+    /// Convert to snake_case string representation
+    pub fn as_str(&self) -> &'static str {
+        self.into()
+    }
+
+    /// Returns an iterator over all sample category variants in declaration order
+    pub fn all() -> impl Iterator<Item = Self> + Clone {
+        Self::iter()
+    }
+
+    /// Returns an iterator over all sample category names in snake_case
+    pub fn all_names() -> impl Iterator<Item = &'static str> + Clone {
+        Self::iter().map(|variant| variant.as_str())
+    }
+}
+
+/// Type-safe samples column for frequency tables
+///
+/// Enforces the structure: "all" repeated x times, then "horns_min" repeated x times,
+/// then "horns_max" repeated x times, where x is the number of scale values.
+///
+/// # Example
+/// ```ignore
+/// // For scale 1..=5 (5 values), creates:
+/// // ["all", "all", "all", "all", "all",
+/// //  "horns_min", "horns_min", "horns_min", "horns_min", "horns_min",
+/// //  "horns_max", "horns_max", "horns_max", "horns_max", "horns_max"]
+/// let samples = FrequencySamplesColumn::new(5);
+/// ```
+#[derive(Clone, Debug)]
+pub struct FrequencySamplesColumn {
+    /// Number of times each category is repeated (number of scale values)
+    repetitions: usize,
+}
+
+impl FrequencySamplesColumn {
+    /// Create a new samples column with the given number of repetitions per category
+    ///
+    /// # Parameters
+    /// - `repetitions`: Number of scale values (determines how many times each category appears)
+    pub fn new(repetitions: usize) -> Self {
+        Self { repetitions }
+    }
+
+    /// Convert to a Vec<String> for compatibility with existing code
+    ///
+    /// Returns a vector with category names repeated x times each, in declaration order.
+    pub fn to_vec(&self) -> Vec<String> {
+        let mut result = Vec::with_capacity(self.repetitions * SampleCategory::COUNT);
+
+        for name in SampleCategory::all_names() {
+            for _ in 0..self.repetitions {
+                result.push(name.to_string());
+            }
+        }
+
+        result
+    }
+
+
+    /// Get the total length of the samples column
+    pub fn len(&self) -> usize {
+        self.repetitions * SampleCategory::COUNT
+    }
+
+    /// Check if the column is empty (repetitions == 0)
+    pub fn is_empty(&self) -> bool {
+        self.repetitions == 0
+    }
+
+    /// Get the number of repetitions per category
+    pub fn repetitions(&self) -> usize {
+        self.repetitions
+    }
+
+    /// Get the category at a given index
+    ///
+    /// # Panics
+    /// Panics if index >= self.len()
+    pub fn get(&self, index: usize) -> SampleCategory {
+        assert!(index < self.len(), "Index out of bounds");
+
+        // Calculate which category this index belongs to
+        let category_index = index / self.repetitions;
+
+        // Use strum's iterator to get the variant at this position
+        // This automatically adapts to any changes in SampleCategory
+        SampleCategory::iter()
+            .nth(category_index)
+            .expect("category_index should always be valid based on len() check")
+    }
+
+    /// Get the category at a given index as a string
+    pub fn get_str(&self, index: usize) -> &'static str {
+        self.get(index).as_str()
+    }
+}
+
 /// Combined frequency data for a set of samples
 /// Each row represents frequency data for a specific value in a specific sample group
+///
+/// Invariant: All fields must have the same length to ensure valid data frame structure
 #[derive(Clone, Debug)]
 pub struct FrequencyTable {
-    pub samples: Vec<String>, // "all", "horns_min", or "horns_max"
-    pub value: Vec<i32>,
-    pub f_average: Vec<f64>,
-    pub f_absolute: Vec<f64>,
-    pub f_relative: Vec<f64>,
+    /// Sample categories: "all", "horns_min", "horns_max" each repeated for all scale values
+    samples_group: FrequencySamplesColumn,
+    value: Vec<i32>,
+    f_average: Vec<f64>,
+    f_absolute: Vec<f64>,
+    f_relative: Vec<f64>,
+}
+
+impl FrequencyTable {
+    /// Create a new FrequencyTable, validating that all fields have the same length
+    ///
+    /// # Panics
+    /// Panics if the lengths of value, f_average, f_absolute, or f_relative don't match
+    /// the length of samples_group
+    pub fn new(
+        samples_group: FrequencySamplesColumn,
+        value: Vec<i32>,
+        f_average: Vec<f64>,
+        f_absolute: Vec<f64>,
+        f_relative: Vec<f64>,
+    ) -> Self {
+        let expected_len = samples_group.len();
+
+        let name_len_tuples = [
+            ("value", value.len()),
+            ("f_average", f_average.len()),
+            ("f_absolute", f_absolute.len()),
+            ("f_relative", f_relative.len()),
+        ];
+
+        // Validate all field lengths match
+        for (name, len) in name_len_tuples {
+            assert_eq!(
+                len, expected_len,
+                "can't create a FrequencyTable: `{}` length ({}) doesn't match `samples_group` length ({})",
+                name, len, expected_len
+            );
+        }
+
+        Self {
+            samples_group,
+            value,
+            f_average,
+            f_absolute,
+            f_relative,
+        }
+    }
+
+    /// Get the number of rows in this frequency table
+    pub fn len(&self) -> usize {
+        self.samples_group.len()
+    }
+
+    /// Check if the frequency table is empty
+    pub fn is_empty(&self) -> bool {
+        self.samples_group.is_empty()
+    }
+
+    /// Get a reference to the samples_group column
+    pub fn samples_group(&self) -> &FrequencySamplesColumn {
+        &self.samples_group
+    }
+
+    /// Get a reference to the value column
+    pub fn value(&self) -> &[i32] {
+        &self.value
+    }
+
+    /// Get a reference to the f_average column
+    pub fn f_average(&self) -> &[f64] {
+        &self.f_average
+    }
+
+    /// Get a reference to the f_absolute column
+    pub fn f_absolute(&self) -> &[f64] {
+        &self.f_absolute
+    }
+
+    /// Get a reference to the f_relative column
+    pub fn f_relative(&self) -> &[f64] {
+        &self.f_relative
+    }
 }
 
 /// Main metrics about the CLOSURE results
@@ -101,7 +306,7 @@ pub struct ResultsTable<U> {
 
 /// Complete CLOSURE results with all statistics
 #[derive(Clone, Debug)]
-pub struct ClosureResults<U> {
+pub struct ResultListFromMeanSdN<U> {
     pub metrics_main: MetricsMain,
     pub metrics_horns: MetricsHorns,
     pub frequency: FrequencyTable,
@@ -233,8 +438,7 @@ fn calculate_frequency_rows<U>(
     samples: &[Vec<U>],
     scale_min: U,
     scale_max: U,
-    label: &str,
-) -> (Vec<String>, Vec<i32>, Vec<f64>, Vec<f64>, Vec<f64>)
+) -> (Vec<i32>, Vec<f64>, Vec<f64>, Vec<f64>)
 where
     U: Integer + ToPrimitive + Copy,
 {
@@ -260,16 +464,13 @@ where
     let f_average: Vec<f64> = f_absolute.iter().map(|&f| f / n_samples).collect();
     let f_relative: Vec<f64> = f_absolute.iter().map(|&f| f / total_values).collect();
 
-    // Create label column
-    let samples_col = vec![label.to_string(); nrow_frequency];
-
-    (samples_col, value, f_average, f_absolute, f_relative)
+    (value, f_average, f_absolute, f_relative)
 }
 
 /// Calculate median of a sorted vector
 fn median(sorted: &[f64]) -> f64 {
     let len = sorted.len();
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
     } else {
         sorted[len / 2]
@@ -283,52 +484,85 @@ fn mad(values: &[f64], median_val: f64) -> f64 {
     median(&deviations)
 }
 
+/// Create an empty result list for cases with no valid distributions
+///
+/// Returns a ResultListFromMeanSdN with all metrics set to NaN or zero
+/// (depending on the metric), and with empty result vectors. Used when no
+/// distributions are found or when an algorithm returns early with no results.
+///
+/// # Parameters
+/// - `scale_min`: Minimum value in the scale range
+/// - `scale_max`: Maximum value in the scale range
+///
+/// # Returns
+/// An empty ResultListFromMeanSdN<U> with appropriate structure
+pub(crate) fn empty_result_list<U>(scale_min: U, scale_max: U) -> ResultListFromMeanSdN<U>
+where
+    U: Integer + ToPrimitive + Copy,
+{
+    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
+    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    
+    let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let nrow_frequency = group_size * SampleCategory::COUNT;
+
+    // Build a vector of scale values repeated as many times as there are categories of samples.
+    // Currently, this means 3 times (for "all", "horns_min", and "horns_max").
+    let scale_values: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
+    let mut value = Vec::with_capacity(nrow_frequency);
+    for _ in 0..SampleCategory::COUNT {
+        value.extend_from_slice(&scale_values);
+    }
+
+    ResultListFromMeanSdN {
+        metrics_main: MetricsMain {
+            samples_initial: 0.0,
+            samples_all: 0.0,
+            values_all: 0.0,
+        },
+        metrics_horns: MetricsHorns {
+            mean: f64::NAN,
+            uniform: f64::NAN,
+            sd: f64::NAN,
+            cv: f64::NAN,
+            mad: f64::NAN,
+            min: f64::NAN,
+            median: f64::NAN,
+            max: f64::NAN,
+            range: f64::NAN,
+        },
+        frequency: FrequencyTable::new(
+            FrequencySamplesColumn::new(group_size),
+            value,
+            vec![f64::NAN; nrow_frequency],
+            vec![0.0; nrow_frequency],
+            vec![f64::NAN; nrow_frequency],
+        ),
+        results: ResultsTable {
+            id: Vec::new(),
+            sample: Vec::new(),
+            horns_values: Vec::new(),
+        },
+    }
+}
+
 /// Calculate all statistics for the samples
-fn calculate_all_statistics<U>(
+fn samples_to_result_list<U>(
     samples: Vec<Vec<U>>,
     scale_min: U,
     scale_max: U,
-) -> ClosureResults<U>
+) -> ResultListFromMeanSdN<U>
 where
     U: Integer + ToPrimitive + Copy,
 {
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
 
-    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
 
     // Handle empty samples case
     if samples.is_empty() {
-        return ClosureResults {
-            metrics_main: MetricsMain {
-                samples_initial: 0.0,
-                samples_all: 0.0,
-                values_all: 0.0,
-            },
-            metrics_horns: MetricsHorns {
-                mean: f64::NAN,
-                uniform: f64::NAN,
-                sd: f64::NAN,
-                cv: f64::NAN,
-                mad: f64::NAN,
-                min: f64::NAN,
-                median: f64::NAN,
-                max: f64::NAN,
-                range: f64::NAN,
-            },
-            frequency: FrequencyTable {
-                samples: vec!["all".to_string()],
-                value: (scale_min_i32..=scale_max_i32).collect(),
-                f_average: vec![f64::NAN; nrow_frequency],
-                f_absolute: vec![0.0; nrow_frequency],
-                f_relative: vec![f64::NAN; nrow_frequency],
-            },
-            results: ResultsTable {
-                id: Vec::new(),
-                sample: Vec::new(),
-                horns_values: Vec::new(),
-            },
-        };
+        return empty_result_list(scale_min, scale_max);
     }
 
     let n = samples[0].len();
@@ -338,7 +572,7 @@ where
     // Calculate horns for each sample
     let mut horns_values = Vec::with_capacity(samples_all);
     for sample in &samples {
-        let mut freqs = vec![0.0; nrow_frequency];
+        let mut freqs = vec![0.0; group_size];
         for &value in sample {
             let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
             freqs[idx] += 1.0;
@@ -380,24 +614,31 @@ where
         .collect();
 
     let min_samples: Vec<Vec<U>> = min_indices.iter().map(|&i| samples[i].clone()).collect();
-
     let max_samples: Vec<Vec<U>> = max_indices.iter().map(|&i| samples[i].clone()).collect();
 
     // Calculate frequency data for all three groups
-    let (all_samples_col, all_value, all_f_average, all_f_absolute, all_f_relative) =
-        calculate_frequency_rows(&samples, scale_min, scale_max, "all");
+    let (
+        all_value,
+        all_f_average,
+        all_f_absolute,
+        all_f_relative,
+    ) = calculate_frequency_rows(&samples, scale_min, scale_max);
 
-    let (min_samples_col, min_value, min_f_average, min_f_absolute, min_f_relative) =
-        calculate_frequency_rows(&min_samples, scale_min, scale_max, "horns_min");
+    let (
+        min_value,
+        min_f_average,
+        min_f_absolute,
+        min_f_relative,
+    ) = calculate_frequency_rows(&min_samples, scale_min, scale_max);
 
-    let (max_samples_col, max_value, max_f_average, max_f_absolute, max_f_relative) =
-        calculate_frequency_rows(&max_samples, scale_min, scale_max, "horns_max");
+    let (
+        max_value,
+        max_f_average,
+        max_f_absolute,
+        max_f_relative,
+    ) = calculate_frequency_rows(&max_samples, scale_min, scale_max);
 
     // Combine all frequency data into a single table
-    let mut combined_samples = all_samples_col;
-    combined_samples.extend(min_samples_col);
-    combined_samples.extend(max_samples_col);
-
     let mut combined_value = all_value;
     combined_value.extend(min_value);
     combined_value.extend(max_value);
@@ -417,7 +658,7 @@ where
     // Create ID column for results table
     let id: Vec<usize> = (1..=samples_all).collect();
 
-    ClosureResults {
+    ResultListFromMeanSdN {
         metrics_main: MetricsMain {
             samples_initial: count_initial_combinations(scale_min_i32, scale_max_i32) as f64,
             samples_all: samples_all as f64,
@@ -434,13 +675,13 @@ where
             max: horns_max,
             range: horns_max - horns_min,
         },
-        frequency: FrequencyTable {
-            samples: combined_samples,
-            value: combined_value,
-            f_average: combined_f_average,
-            f_absolute: combined_f_absolute,
-            f_relative: combined_f_relative,
-        },
+        frequency: FrequencyTable::new(
+            FrequencySamplesColumn::new(group_size),
+            combined_value,
+            combined_f_average,
+            combined_f_absolute,
+            combined_f_relative,
+        ),
         results: ResultsTable {
             id,
             sample: samples,
@@ -483,7 +724,7 @@ fn create_samples_writer(
     // Create schema where each position in the sample is a column
     // Column names will be pos1, pos2, pos3, etc.
     let fields: Vec<Field> = (1..=sample_size)
-        .map(|i| Field::new(&format!("pos{}", i), DataType::Int32, false))
+        .map(|i| Field::new(format!("pos{}", i), DataType::Int32, false))
         .collect();
 
     let schema = Arc::new(Schema::new(fields));
@@ -536,7 +777,7 @@ where
 
     // Create schema with column names pos1, pos2, pos3, etc.
     let fields: Vec<Field> = (1..=sample_size)
-        .map(|i| Field::new(&format!("pos{}", i), DataType::Int32, false))
+        .map(|i| Field::new(format!("pos{}", i), DataType::Int32, false))
         .collect();
     let schema = Arc::new(Schema::new(fields));
 
@@ -778,11 +1019,11 @@ where
 /// - You need to process results in memory after generation
 /// - You want both file output and in-memory access
 ///
-/// For large result sets, use `dfs_parallel_streaming()` instead.
+/// For large result sets, use `closure_parallel_streaming()` instead.
 ///
 /// # Parameters
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
-pub fn dfs_parallel<T, U>(
+pub fn closure_parallel<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -792,7 +1033,7 @@ pub fn dfs_parallel<T, U>(
     rounding_error_sd: T,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
-) -> ClosureResults<U>
+) -> ResultListFromMeanSdN<U>
 where
     T: FloatType,
     U: IntegerType + 'static,
@@ -831,7 +1072,7 @@ where
                 }
 
                 let remaining = limit - found.len();
-                let branch_results = dfs_branch(
+                let branch_results = closure_branch(
                     combo,
                     running_sum,
                     running_m2,
@@ -874,7 +1115,7 @@ where
                         limit - current
                     };
 
-                    let branch_results = dfs_branch(
+                    let branch_results = closure_branch(
                         combo.clone(),
                         *running_sum,
                         *running_m2,
@@ -904,7 +1145,7 @@ where
         combinations
             .par_iter()
             .flat_map(|(combo, running_sum, running_m2)| {
-                dfs_branch(
+                closure_branch(
                     combo.clone(),
                     *running_sum,
                     *running_m2,
@@ -925,7 +1166,11 @@ where
     };
 
     // Calculate all statistics
-    let closure_results = calculate_all_statistics(results, scale_min, scale_max);
+    let closure_results = samples_to_result_list(
+        results,
+        scale_min,
+        scale_max
+    );
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -1014,16 +1259,16 @@ where
             let freq_batch = RecordBatch::try_new(
                 freq_schema,
                 vec![
-                    Arc::new(StringArray::from(closure_results.frequency.samples.clone())),
-                    Arc::new(Int32Array::from(closure_results.frequency.value.clone())),
+                    Arc::new(StringArray::from(closure_results.frequency.samples_group().to_vec())),
+                    Arc::new(Int32Array::from(closure_results.frequency.value().to_vec())),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_average.clone(),
+                        closure_results.frequency.f_average().to_vec(),
                     )),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_absolute.clone(),
+                        closure_results.frequency.f_absolute().to_vec(),
                     )),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_relative.clone(),
+                        closure_results.frequency.f_relative().to_vec(),
                     )),
                 ],
             );
@@ -1038,7 +1283,7 @@ where
 }
 
 /// Structure to hold streaming frequency state
-struct StreamingFrequencyState {
+pub(crate) struct StreamingFrequencyState {
     current_min_horns: f64,
     current_max_horns: f64,
     all_freq: HashMap<i32, i64>,
@@ -1049,7 +1294,7 @@ struct StreamingFrequencyState {
 }
 
 /// Helper function to write statistics files for streaming mode
-fn write_streaming_statistics(
+pub(crate) fn write_streaming_statistics(
     base_path: &str,
     all_horns: &[f64],
     n_usize: usize,
@@ -1126,73 +1371,101 @@ fn write_streaming_statistics(
         }
         let _ = mh_writer.close();
 
-        // Extract frequency data from final state
+        // Extract frequency data from final state and construct FrequencyTable
         let state = final_freq_state.lock().unwrap();
+        let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+
+        // Build frequency vectors for "all" category
+        let mut all_value = Vec::with_capacity(nrow_frequency);
+        let mut all_f_absolute = Vec::with_capacity(nrow_frequency);
+        let mut all_f_average = Vec::with_capacity(nrow_frequency);
+        let mut all_f_relative = Vec::with_capacity(nrow_frequency);
+
         let total_values = values_all as f64;
         let n_samples = samples_all as f64;
 
-        // Write frequency table with all three categories
-        // First write "all" frequencies
         for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = state.all_freq.get(&scale_value).unwrap_or(&0);
-
-            let freq_batch = RecordBatch::try_new(
-                freq_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["all"])),
-                    Arc::new(Int32Array::from(vec![scale_value])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / n_samples])),
-                    Arc::new(Float64Array::from(vec![*count as f64])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / total_values])),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
+            let count = *state.all_freq.get(&scale_value).unwrap_or(&0) as f64;
+            all_value.push(scale_value);
+            all_f_absolute.push(count);
+            all_f_average.push(count / n_samples);
+            all_f_relative.push(count / total_values);
         }
 
-        // Write "horns_min" frequencies
+        // Build frequency vectors for "horns_min" category
+        let mut min_value = Vec::with_capacity(nrow_frequency);
+        let mut min_f_absolute = Vec::with_capacity(nrow_frequency);
+        let mut min_f_average = Vec::with_capacity(nrow_frequency);
+        let mut min_f_relative = Vec::with_capacity(nrow_frequency);
+
         let min_n_samples = state.min_count as f64;
         let min_total_values = (state.min_count * n_usize) as f64;
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = state.min_freq.get(&scale_value).unwrap_or(&0);
 
-            let freq_batch = RecordBatch::try_new(
-                freq_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["horns_min"])),
-                    Arc::new(Int32Array::from(vec![scale_value])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / min_n_samples])),
-                    Arc::new(Float64Array::from(vec![*count as f64])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / min_total_values])),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = *state.min_freq.get(&scale_value).unwrap_or(&0) as f64;
+            min_value.push(scale_value);
+            min_f_absolute.push(count);
+            min_f_average.push(count / min_n_samples);
+            min_f_relative.push(count / min_total_values);
         }
 
-        // Write "horns_max" frequencies
+        // Build frequency vectors for "horns_max" category
+        let mut max_value = Vec::with_capacity(nrow_frequency);
+        let mut max_f_absolute = Vec::with_capacity(nrow_frequency);
+        let mut max_f_average = Vec::with_capacity(nrow_frequency);
+        let mut max_f_relative = Vec::with_capacity(nrow_frequency);
+
         let max_n_samples = state.max_count as f64;
         let max_total_values = (state.max_count * n_usize) as f64;
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = state.max_freq.get(&scale_value).unwrap_or(&0);
 
-            let freq_batch = RecordBatch::try_new(
-                freq_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["horns_max"])),
-                    Arc::new(Int32Array::from(vec![scale_value])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / max_n_samples])),
-                    Arc::new(Float64Array::from(vec![*count as f64])),
-                    Arc::new(Float64Array::from(vec![*count as f64 / max_total_values])),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
+        for scale_value in scale_min_i32..=scale_max_i32 {
+            let count = *state.max_freq.get(&scale_value).unwrap_or(&0) as f64;
+            max_value.push(scale_value);
+            max_f_absolute.push(count);
+            max_f_average.push(count / max_n_samples);
+            max_f_relative.push(count / max_total_values);
         }
 
+        // Combine all frequency data into proper FrequencyTable structure
+        let mut combined_value = all_value;
+        combined_value.extend(min_value);
+        combined_value.extend(max_value);
+
+        let mut combined_f_average = all_f_average;
+        combined_f_average.extend(min_f_average);
+        combined_f_average.extend(max_f_average);
+
+        let mut combined_f_absolute = all_f_absolute;
+        combined_f_absolute.extend(min_f_absolute);
+        combined_f_absolute.extend(max_f_absolute);
+
+        let mut combined_f_relative = all_f_relative;
+        combined_f_relative.extend(min_f_relative);
+        combined_f_relative.extend(max_f_relative);
+
+        // Create proper FrequencyTable with type-safe samples column
+        let frequency_table = FrequencyTable::new(
+            FrequencySamplesColumn::new(nrow_frequency),
+            combined_value,
+            combined_f_average,
+            combined_f_absolute,
+            combined_f_relative,
+        );
+
+        // Write frequency table as a single batch
+        let freq_batch = RecordBatch::try_new(
+            freq_schema,
+            vec![
+                Arc::new(StringArray::from(frequency_table.samples_group().to_vec())),
+                Arc::new(Int32Array::from(frequency_table.value().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_average().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_absolute().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_relative().to_vec())),
+            ],
+        );
+        if let Ok(batch) = freq_batch {
+            let _ = freq_writer.write(&batch);
+        }
         let _ = freq_writer.close();
     }
 }
@@ -1211,7 +1484,7 @@ fn write_streaming_statistics(
 ///
 /// # Parameters
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
-pub fn dfs_parallel_streaming<T, U>(
+pub fn closure_parallel_streaming<T, U>(
     mean: T,
     sd: T,
     n: U,
@@ -1463,7 +1736,7 @@ where
                 }
 
                 let remaining = limit - found_count;
-                let branch_results = dfs_branch(
+                let branch_results = closure_branch(
                     combo,
                     running_sum,
                     running_m2,
@@ -1586,7 +1859,7 @@ where
 
             // Track progress through initial combinations
             let current_initial = initial_combo_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if config.show_progress && current_initial % 10 == 0 {
+            if config.show_progress && current_initial.is_multiple_of(10) {
                 let percentage = (current_initial as f64 / initial_combo_total as f64) * 100.0;
                 eprintln!(
                     "Progress: {:.1}% of initial combinations explored...",
@@ -1605,7 +1878,7 @@ where
                 None
             };
 
-            let branch_results = dfs_branch(
+            let branch_results = closure_branch(
                 combo.clone(),
                 *running_sum,
                 *running_m2,
@@ -1715,11 +1988,6 @@ where
                 // Send to writer and stats collector
                 if tx_results.send(final_results).is_err() {
                     // Channel is closed, writer must have failed
-                    return;
-                }
-
-                if tx_stats.send((horns_batch, HashMap::new())).is_err() {
-                    return;
                 }
             }
         });
@@ -1767,7 +2035,7 @@ where
 // Collect all valid combinations from a starting point
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn dfs_branch<T, U>(
+fn closure_branch<T, U>(
     start_combination: Vec<U>,
     running_sum_init: T,
     running_m2_init: T,
@@ -1881,6 +2149,54 @@ mod tests {
     }
 
     #[test]
+    fn test_frequency_samples_column() {
+        let repetitions = 5;
+        
+        // Test with 5 repetitions (like scale 1..=5)
+        let samples = FrequencySamplesColumn::new(repetitions);
+
+        // Check length -- currently, it should be 5 * 3 == 15
+        assert_eq!(samples.len(), repetitions * SampleCategory::COUNT);
+        assert!(!samples.is_empty());
+
+        // Check repetitions
+        assert_eq!(samples.repetitions(), repetitions);
+
+        // Check structure via to_vec()
+        let vec = samples.to_vec();
+        assert_eq!(vec.len(), 15);
+
+        // First 5 should be "all"
+        for i in 0..5 {
+            assert_eq!(vec[i], "all");
+            assert_eq!(samples.get(i), SampleCategory::All);
+            assert_eq!(samples.get_str(i), "all");
+        }
+
+        // Next 5 should be "horns_min"
+        for i in 5..10 {
+            assert_eq!(vec[i], "horns_min");
+            assert_eq!(samples.get(i), SampleCategory::HornsMin);
+            assert_eq!(samples.get_str(i), "horns_min");
+        }
+
+        // Last 5 should be "horns_max"
+        for i in 10..15 {
+            assert_eq!(vec[i], "horns_max");
+            assert_eq!(samples.get(i), SampleCategory::HornsMax);
+            assert_eq!(samples.get_str(i), "horns_max");
+        }
+    }
+
+    #[test]
+    fn test_frequency_samples_column_empty() {
+        let samples = FrequencySamplesColumn::new(0);
+        assert_eq!(samples.len(), 0);
+        assert!(samples.is_empty());
+        assert_eq!(samples.to_vec().len(), 0);
+    }
+
+    #[test]
     fn test_horns_calculation() {
         // Test uniform distribution
         let uniform_freqs = vec![1.0, 1.0, 1.0, 1.0, 1.0];
@@ -1894,9 +2210,31 @@ mod tests {
     }
 
     #[test]
-    fn test_dfs_parallel_with_new_api() {
+    fn test_sample_category_strum_integration() {
+        // Test that strum correctly generates snake_case names
+        assert_eq!(SampleCategory::All.as_str(), "all");
+        assert_eq!(SampleCategory::HornsMin.as_str(), "horns_min");
+        assert_eq!(SampleCategory::HornsMax.as_str(), "horns_max");
+
+        // Test that all() returns all variants in order
+        let all_variants: Vec<_> = SampleCategory::all().collect();
+        assert_eq!(all_variants.len(), 3);
+        assert_eq!(all_variants[0], SampleCategory::All);
+        assert_eq!(all_variants[1], SampleCategory::HornsMin);
+        assert_eq!(all_variants[2], SampleCategory::HornsMax);
+
+        // Test that all_names() returns correct snake_case strings
+        let all_names: Vec<_> = SampleCategory::all_names().collect();
+        assert_eq!(all_names, vec!["all", "horns_min", "horns_max"]);
+
+        // Test that COUNT matches the actual number of variants
+        assert_eq!(SampleCategory::COUNT, SampleCategory::iter().count());
+    }
+
+    #[test]
+    fn test_closure_parallel_with_new_api() {
         // Test that the function returns valid statistics with new structure
-        let results = dfs_parallel::<f64, i32>(
+        let results = closure_parallel::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             5,    // n
@@ -1938,39 +2276,26 @@ mod tests {
 
         // Check combined frequency table
         let n_values = 5; // scale_max - scale_min + 1
-        let expected_rows = n_values * 3; // all, horns_min, horns_max
-        assert_eq!(results.frequency.samples.len(), expected_rows);
-        assert_eq!(results.frequency.value.len(), expected_rows);
-        assert_eq!(results.frequency.f_average.len(), expected_rows);
-        assert_eq!(results.frequency.f_absolute.len(), expected_rows);
-        assert_eq!(results.frequency.f_relative.len(), expected_rows);
+        let expected_rows = n_values * SampleCategory::COUNT; // all, horns_min, horns_max
+        assert_eq!(results.frequency.len(), expected_rows);
+        assert_eq!(results.frequency.samples_group().len(), expected_rows);
+        assert_eq!(results.frequency.value().len(), expected_rows);
+        assert_eq!(results.frequency.f_average().len(), expected_rows);
+        assert_eq!(results.frequency.f_absolute().len(), expected_rows);
+        assert_eq!(results.frequency.f_relative().len(), expected_rows);
 
         // Check that samples column has correct values
-        let all_count = results
-            .frequency
-            .samples
-            .iter()
-            .filter(|&s| s == "all")
-            .count();
-        let min_count = results
-            .frequency
-            .samples
-            .iter()
-            .filter(|&s| s == "horns_min")
-            .count();
-        let max_count = results
-            .frequency
-            .samples
-            .iter()
-            .filter(|&s| s == "horns_max")
-            .count();
+        let samples_vec = results.frequency.samples_group().to_vec();
+        let all_count = samples_vec.iter().filter(|&s| s == "all").count();
+        let min_count = samples_vec.iter().filter(|&s| s == "horns_min").count();
+        let max_count = samples_vec.iter().filter(|&s| s == "horns_max").count();
         assert_eq!(all_count, n_values);
         assert_eq!(min_count, n_values);
         assert_eq!(max_count, n_values);
     }
 
     #[test]
-    fn test_dfs_parallel_with_file() {
+    fn test_closure_parallel_with_file() {
         // Test with Parquet output
         let config = ParquetConfig {
             file_path: "test_output/".to_string(),
@@ -1979,7 +2304,7 @@ mod tests {
 
         let _ = std::fs::create_dir("test_output");
 
-        let results = dfs_parallel::<f64, i32>(
+        let results = closure_parallel::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             5,    // n
@@ -2002,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dfs_parallel_streaming_separate_files() {
+    fn test_closure_parallel_streaming_separate_files() {
         // Test streaming mode with separate files
         let config = StreamingConfig {
             file_path: "test_streaming/".to_string(),
@@ -2012,7 +2337,7 @@ mod tests {
 
         let _ = std::fs::create_dir("test_streaming");
 
-        let result = dfs_parallel_streaming::<f64, i32>(
+        let result = closure_parallel_streaming::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             5,    // n
@@ -2042,7 +2367,7 @@ mod tests {
     #[test]
     fn test_stop_after_parameter() {
         // Test that stop_after limits the number of results
-        let results_unlimited = dfs_parallel::<f64, i32>(
+        let results_unlimited = closure_parallel::<f64, i32>(
             3.0,  // mean
             1.0,  // sd
             80,   // n (increased sample size)
@@ -2058,7 +2383,7 @@ mod tests {
         assert!(total_samples > 10); // Should have many samples
 
         // Test with limit of 10
-        let results_limited = dfs_parallel::<f64, i32>(
+        let results_limited = closure_parallel::<f64, i32>(
             3.0,      // mean
             1.0,      // sd
             80,       // n (increased sample size)
@@ -2075,7 +2400,7 @@ mod tests {
         assert_eq!(results_limited.results.id.len(), 10);
 
         // Test with limit of 1
-        let results_one = dfs_parallel::<f64, i32>(
+        let results_one = closure_parallel::<f64, i32>(
             3.0,     // mean
             1.0,     // sd
             80,      // n (increased sample size)
