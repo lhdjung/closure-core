@@ -437,18 +437,35 @@ where
         })
         .collect();
 
-    // Convert scale_min and scale_max to 100x scale for statistics
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-    let scale_min_100x: U = NumCast::from(scale_min_i32 * 100).unwrap();
-    let scale_max_100x: U = NumCast::from(scale_max_i32 * 100).unwrap();
+    // Convert 100x results back to original scale for frequency table calculation
+    // The 100x scale is used for statistics calculations, but the frequency table
+    // should be based on the original scale values
+    let results_original_scale: Vec<Vec<U>> = results_100x
+        .iter()
+        .map(|dist| {
+            dist.iter()
+                .map(|&val| {
+                    // Convert from 100x scale back to original scale, rounding to nearest integer
+                    let value_100x = U::to_i64(&val).unwrap() as f64;
+                    let original_rounded = (value_100x / 100.0).round() as i64;
+                    NumCast::from(original_rounded).unwrap()
+                })
+                .collect()
+        })
+        .collect();
 
     // Calculate all statistics using the shared function from lib.rs
-    let sprite_results = samples_to_result_list(
-        results_100x,
-        scale_min_100x,
-        scale_max_100x
+    // Use original scale values for the frequency table and horns calculations
+    let mut sprite_results = samples_to_result_list(
+        results_original_scale,
+        scale_min,
+        scale_max
     );
+
+    // Replace the sample data in the results table with the 100x version
+    // This ensures that output data is in the 100x scale (standard for SPRITE/CLOSURE)
+    // while the frequency table and horns are calculated from the binned original scale
+    sprite_results.results.sample = results_100x;
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -1650,13 +1667,15 @@ pub mod tests {
         let rounding_error_sd = 0.05;
 
         // Calculate scale_factor based on rounding errors (same as internal implementation)
-        fn precision_from_rounding_error(rounding_error: f64) -> i32 {
-            if rounding_error <= 0.0 {
-                return 0;
+        fn precision_from_rounding_error(error: f64) -> i32 {
+            if error > 0.0 {
+                let log_error = (error * 2.0).log10();
+                -log_error.round() as i32
+            } else {
+                0
             }
-            // precision = -log10(rounding_error * 2)
-            (-((rounding_error * 2.0).log10())).round() as i32
         }
+
         let m_prec = precision_from_rounding_error(rounding_error_mean);
         let sd_prec = precision_from_rounding_error(rounding_error_sd);
         let precision = std::cmp::max(m_prec, sd_prec);
@@ -1772,11 +1791,11 @@ pub mod tests {
         );
 
         // Clean up test files
-        let _ = std::fs::remove_file("test_sprite_streaming/samples.parquet");
-        let _ = std::fs::remove_file("test_sprite_streaming/horns.parquet");
-        let _ = std::fs::remove_file("test_sprite_streaming/metrics_main.parquet");
-        let _ = std::fs::remove_file("test_sprite_streaming/metrics_horns.parquet");
-        let _ = std::fs::remove_file("test_sprite_streaming/frequency.parquet");
+        let file_names = ["samples", "horns", "metrics_main", "metrics_horns", "frequency"];
+        for name in file_names {
+            let _ = std::fs::remove_file(format!("test_sprite_streaming/{name}.parquet"));
+        }
+
         let _ = std::fs::remove_dir("test_sprite_streaming");
     }
 
