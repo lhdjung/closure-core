@@ -8,7 +8,7 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use crate::grimmer::{is_near, rust_round};
+use crate::utils::{is_near, rust_round};
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
     samples_to_result_list, create_results_writer, create_stats_writers, results_to_record_batch,
