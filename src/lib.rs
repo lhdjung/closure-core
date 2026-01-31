@@ -350,7 +350,6 @@ impl FrequencyTable {
 /// Main metrics about the CLOSURE results
 #[derive(Clone, Debug)]
 pub struct MetricsMain {
-    pub samples_initial: f64,
     pub samples_all: f64,
     pub values_all: f64,
 }
@@ -589,7 +588,6 @@ where
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
-            samples_initial: 0.0,
             samples_all: 0.0,
             values_all: 0.0,
         },
@@ -733,7 +731,6 @@ where
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
-            samples_initial: count_initial_combinations(scale_min_i32, scale_max_i32) as f64,
             samples_all: samples_all as f64,
             values_all: values_all as f64,
         },
@@ -1294,9 +1291,6 @@ where
             let mm_batch = RecordBatch::try_new(
                 mm_schema,
                 vec![
-                    Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_main.samples_initial,
-                    ])),
                     Arc::new(Float64Array::from(vec![
                         closure_results.metrics_main.samples_all,
                     ])),

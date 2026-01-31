@@ -472,9 +472,6 @@ where
         let mm_batch = RecordBatch::try_new(
             mm_schema,
             vec![
-                Arc::new(Float64Array::from(vec![
-                    results.metrics_main.samples_initial,
-                ])),
                 Arc::new(Float64Array::from(vec![results.metrics_main.samples_all])),
                 Arc::new(Float64Array::from(vec![results.metrics_main.values_all])),
             ],
