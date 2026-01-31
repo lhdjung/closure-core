@@ -1690,7 +1690,7 @@ pub mod tests {
         );
 
         // Clean up test files
-        let file_names = ["samples", "horns", "metrics_main", "metrics_horns", "frequency"];
+        let file_names = ["sample", "horns", "metrics_main", "metrics_horns", "frequency"];
         for name in file_names {
             let _ = std::fs::remove_file(format!("test_sprite_streaming/{name}.parquet"));
         }

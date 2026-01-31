@@ -768,7 +768,7 @@ fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn s
     let fields = vec![
         Field::new("id", DataType::Int32, false),
         Field::new(
-            "samples",
+            "sample",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
             false,
         ), // true for nullable items
@@ -968,7 +968,7 @@ where
     let fields = vec![
         Field::new("id", DataType::Int32, false),
         Field::new(
-            "samples",
+            "sample",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
             false,
         ), // true for nullable items
