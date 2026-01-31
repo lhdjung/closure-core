@@ -633,7 +633,7 @@ where
     }
 
     // Spawn dedicated writer thread
-    let samples_path = format!("{}samples.parquet", base_path);
+    let samples_path = format!("{}sample.parquet", base_path);
     let horns_path = format!("{}horns.parquet", base_path);
 
     let writer_handle = thread::spawn(move || {
@@ -1600,12 +1600,12 @@ pub mod tests {
         assert_eq!(result.file_path, "test_sprite_streaming/");
 
         // Check that files were created
-        assert!(std::path::Path::new("test_sprite_streaming/samples.parquet").exists());
+        assert!(std::path::Path::new("test_sprite_streaming/sample.parquet").exists());
         assert!(std::path::Path::new("test_sprite_streaming/horns.parquet").exists());
 
         // Read and validate the samples from the parquet file
-        let file = File::open("test_sprite_streaming/samples.parquet")
-            .expect("Failed to open samples.parquet");
+        let file = File::open("test_sprite_streaming/sample.parquet")
+            .expect("Failed to open sample.parquet");
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .expect("Failed to create parquet reader builder");
         let reader = builder.build().expect("Failed to build parquet reader");

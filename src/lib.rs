@@ -1654,7 +1654,7 @@ where
     }
 
     // Spawn dedicated writer thread for two separate files
-    let samples_path = format!("{}samples.parquet", base_path);
+    let samples_path = format!("{}sample.parquet", base_path);
     let horns_path = format!("{}horns.parquet", base_path);
 
     let n_usize_for_writer = n_usize; // Capture n_usize for the writer thread
@@ -2442,11 +2442,11 @@ mod tests {
         assert_eq!(result.file_path, "test_streaming/");
 
         // Check that both files were created
-        assert!(std::path::Path::new("test_streaming/samples.parquet").exists());
+        assert!(std::path::Path::new("test_streaming/sample.parquet").exists());
         assert!(std::path::Path::new("test_streaming/horns.parquet").exists());
 
         // Clean up test files
-        let _ = std::fs::remove_file("test_streaming/samples.parquet");
+        let _ = std::fs::remove_file("test_streaming/sample.parquet");
         let _ = std::fs::remove_file("test_streaming/horns.parquet");
         let _ = std::fs::remove_file("test_streaming/metrics_main.parquet");
         let _ = std::fs::remove_file("test_streaming/metrics_horns.parquet");
