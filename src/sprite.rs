@@ -8,7 +8,7 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use crate::utils::{is_near, rust_round};
+use crate::utils::{is_near, round_f64};
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
     samples_to_result_list, create_results_writer, create_stats_writers, results_to_record_batch,
@@ -1178,9 +1178,9 @@ where
         let current_mean =
             compute_mean_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
         let target_mean_rounded =
-            T::from(rust_round(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
         let current_mean_rounded =
-            T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
 
         if !is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1216,9 +1216,9 @@ where
         let current_mean =
             compute_mean_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
         let target_mean_rounded =
-            T::from(rust_round(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
         let current_mean_rounded =
-            T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
 
         if is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1458,7 +1458,7 @@ pub mod tests {
         // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
         let first_dist = unscale_distribution(&results.results.sample[0], 100);
         let computed_mean = mean(&first_dist);
-        assert_eq!(rust_round(computed_mean, 1), 2.2);
+        assert_eq!(round_f64(computed_mean, 1), 2.2);
     }
 
     #[test]
@@ -1484,7 +1484,7 @@ pub mod tests {
         for dist_scaled in &results.results.sample {
             let dist = unscale_distribution(dist_scaled, 100);
             let computed_sd = std_dev(&dist).unwrap();
-            assert_eq!(rust_round(computed_sd, 1), 1.3);
+            assert_eq!(round_f64(computed_sd, 1), 1.3);
         }
     }
 
@@ -1540,8 +1540,8 @@ pub mod tests {
             let dist = unscale_distribution(dist_scaled, scale_factor);
             let computed_mean = mean(&dist);
             let computed_sd = std_dev(&dist).unwrap();
-            let rounded_mean = rust_round(computed_mean, test_mean_digits);
-            let rounded_sd = rust_round(computed_sd, test_sd_digits);
+            let rounded_mean = round_f64(computed_mean, test_mean_digits);
+            let rounded_sd = round_f64(computed_sd, test_sd_digits);
 
             assert_eq!(rounded_mean, test_mean);
             assert_eq!(rounded_sd, test_sd);

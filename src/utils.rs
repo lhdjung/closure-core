@@ -5,6 +5,6 @@ pub fn is_near(num_1: f64, num_2: f64, tolerance: f64) -> bool {
 
 /// rust does not have a native function that rounds binary floating point numbers to a set number
 /// of decimals. This is a hacky workaround that nevertheless seems to be the best option
-pub fn rust_round(x: f64, y: i32) -> f64 {
+pub fn round_f64(x: f64, y: i32) -> f64 {
     (x * 10.0f64.powi(y)).round() / 10.0f64.powi(y)
 }
