@@ -61,9 +61,11 @@ fn write_closure_csv(
         scale_max.try_into().unwrap(),
         rounding_error_mean,
         rounding_error_sd,
+        1,
         None,
         None,
-    );
+    )
+    .unwrap();
 
     // Initialize CSV file
     let file = File::create(output_file)?;

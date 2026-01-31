@@ -35,13 +35,86 @@ impl<T> FloatType for T where T: Float + FromPrimitive + Send + Sync {}
 pub trait IntegerType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 
+use thiserror::Error;
+
 mod grimmer;
 mod sprite;
 mod sprite_types;
 
+#[derive(Debug, Error)]
+pub enum ParameterError {
+    #[error("{0}")]
+    InputValidation(String),
+    #[error("{0}")]
+    Consistency(String),
+    #[error("{0}")]
+    Conflict(String),
+}
+
 // Re-export sprite types needed for the public API
-pub use sprite::{sprite_parallel, sprite_parallel_streaming, ParameterError};
+pub use sprite::{sprite_parallel, sprite_parallel_streaming, Sprite};
 pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
+
+/// Unified trait for sample reconstruction techniques (CLOSURE, SPRITE, etc.)
+#[allow(clippy::too_many_arguments)]
+pub trait Technique<T: FloatType, U: IntegerType + 'static> {
+    fn run(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        parquet_config: Option<ParquetConfig>,
+        stop_after: Option<usize>,
+    ) -> Result<ResultListFromMeanSdN<U>, ParameterError>;
+
+    fn run_streaming(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        config: StreamingConfig,
+        stop_after: Option<usize>,
+    ) -> Result<StreamingResult, ParameterError>;
+}
+
+/// CLOSURE technique: complete listing of original samples of underlying raw evidence
+pub struct Closure;
+
+impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
+    fn run(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        parquet_config: Option<ParquetConfig>,
+        stop_after: Option<usize>,
+    ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
+        closure_parallel(
+            mean, sd, n, scale_min, scale_max,
+            rounding_error_mean, rounding_error_sd,
+            items, parquet_config, stop_after,
+        )
+    }
+
+    fn run_streaming(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        config: StreamingConfig,
+        stop_after: Option<usize>,
+    ) -> Result<StreamingResult, ParameterError> {
+        closure_parallel_streaming(
+            mean, sd, n, scale_min, scale_max,
+            rounding_error_mean, rounding_error_sd,
+            items, config, stop_after,
+        )
+    }
+}
 
 /// Configuration for Parquet output in memory mode
 /// Used with `closure_parallel()` to optionally save results while returning them
@@ -1022,7 +1095,9 @@ where
 /// For large result sets, use `closure_parallel_streaming()` instead.
 ///
 /// # Parameters
+/// - `items`: Number of items averaged (must be 1 for CLOSURE)
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+#[allow(clippy::too_many_arguments)]
 pub fn closure_parallel<T, U>(
     mean: T,
     sd: T,
@@ -1031,13 +1106,19 @@ pub fn closure_parallel<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
+    items: u32,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
-) -> ResultListFromMeanSdN<U>
+) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
 {
+    if items != 1 {
+        return Err(ParameterError::InputValidation(
+            "CLOSURE requires items == 1".to_string(),
+        ));
+    }
     let ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
@@ -1279,7 +1360,7 @@ where
         }
     }
 
-    closure_results
+    Ok(closure_results)
 }
 
 /// Structure to hold streaming frequency state
@@ -1483,7 +1564,9 @@ pub(crate) fn write_streaming_statistics(
 /// Returns a StreamingResult with the total count and file path.
 ///
 /// # Parameters
+/// - `items`: Number of items averaged (must be 1 for CLOSURE)
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+#[allow(clippy::too_many_arguments)]
 pub fn closure_parallel_streaming<T, U>(
     mean: T,
     sd: T,
@@ -1492,13 +1575,19 @@ pub fn closure_parallel_streaming<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
+    items: u32,
     config: StreamingConfig,
     stop_after: Option<usize>,
-) -> StreamingResult
+) -> Result<StreamingResult, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
 {
+    if items != 1 {
+        return Err(ParameterError::InputValidation(
+            "CLOSURE requires items == 1".to_string(),
+        ));
+    }
     let ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
@@ -1834,10 +1923,10 @@ where
                 final_freq_state,
             );
 
-            return StreamingResult {
+            return Ok(StreamingResult {
                 total_combinations: total_written,
                 file_path: config.file_path,
-            };
+            });
         }
     }
 
@@ -2010,10 +2099,10 @@ where
     // Check if we successfully wrote any results
     if total_written == 0 {
         eprintln!("\nERROR: No results were written to disk.");
-        return StreamingResult {
+        return Ok(StreamingResult {
             total_combinations: 0,
             file_path: config.file_path,
-        };
+        });
     }
 
     // Write statistics files
@@ -2026,10 +2115,10 @@ where
         final_freq_state,
     );
 
-    StreamingResult {
+    Ok(StreamingResult {
         total_combinations: total_written,
         file_path: config.file_path,
-    }
+    })
 }
 
 // Collect all valid combinations from a starting point
@@ -2242,9 +2331,11 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
+            1,    // items
             None, // no parquet config
             None, // no stop_after limit
-        );
+        )
+        .unwrap();
 
         // Check that results table is properly formed
         assert!(!results.results.sample.is_empty());
@@ -2312,9 +2403,11 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
+            1,    // items
             Some(config),
             None, // no stop_after limit
-        );
+        )
+        .unwrap();
 
         assert!(!results.results.sample.is_empty());
 
@@ -2345,8 +2438,11 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
-            config, None, // no stop_after limit
-        );
+            1,    // items
+            config,
+            None, // no stop_after limit
+        )
+        .unwrap();
 
         assert!(result.total_combinations > 0);
         assert_eq!(result.file_path, "test_streaming/");
@@ -2375,9 +2471,11 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
+            1,    // items
             None, // no parquet config
             None, // no stop_after limit
-        );
+        )
+        .unwrap();
 
         let total_samples = results_unlimited.results.sample.len();
         assert!(total_samples > 10); // Should have many samples
@@ -2391,9 +2489,11 @@ mod tests {
             5,        // scale_max
             0.05,     // rounding_error_mean
             0.05,     // rounding_error_sd
+            1,        // items
             None,     // no parquet config
             Some(10), // stop after 10 samples
-        );
+        )
+        .unwrap();
 
         assert_eq!(results_limited.results.sample.len(), 10);
         assert_eq!(results_limited.results.horns_values.len(), 10);
@@ -2408,9 +2508,11 @@ mod tests {
             5,       // scale_max
             0.05,    // rounding_error_mean
             0.05,    // rounding_error_sd
+            1,       // items
             None,    // no parquet config
             Some(1), // stop after 1 sample
-        );
+        )
+        .unwrap();
 
         assert_eq!(results_one.results.sample.len(), 1);
         assert_eq!(results_one.results.horns_values.len(), 1);
