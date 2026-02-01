@@ -373,7 +373,7 @@ pub struct MetricsHorns {
 pub struct ResultsTable<U> {
     pub id: Vec<usize>,
     pub sample: Vec<Vec<U>>,
-    pub horns_values: Vec<f64>,
+    pub horns: Vec<f64>,
 }
 
 /// Complete CLOSURE results with all statistics
@@ -612,7 +612,7 @@ where
         results: ResultsTable {
             id: Vec::new(),
             sample: Vec::new(),
-            horns_values: Vec::new(),
+            horns: Vec::new(),
         },
     }
 }
@@ -755,7 +755,7 @@ where
         results: ResultsTable {
             id,
             sample: samples,
-            horns_values,
+            horns: horns_values,
         },
     }
 }
@@ -961,7 +961,7 @@ where
     arrays.push(Arc::new(list_builder.finish()));
 
     // Add horns column
-    let horns_data: Vec<f64> = results.horns_values[start_idx..end_idx].to_vec();
+    let horns_data: Vec<f64> = results.horns[start_idx..end_idx].to_vec();
     arrays.push(Arc::new(Float64Array::from(horns_data)));
 
     // Create schema - matching the schema from create_results_writer
@@ -2335,7 +2335,7 @@ mod tests {
         assert!(!results.results.sample.is_empty());
         assert_eq!(
             results.results.sample.len(),
-            results.results.horns_values.len()
+            results.results.horns.len()
         );
         assert_eq!(results.results.sample.len(), results.results.id.len());
         assert_eq!(results.results.id[0], 1);
@@ -2490,7 +2490,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(results_limited.results.sample.len(), 10);
-        assert_eq!(results_limited.results.horns_values.len(), 10);
+        assert_eq!(results_limited.results.horns.len(), 10);
         assert_eq!(results_limited.results.id.len(), 10);
 
         // Test with limit of 1
@@ -2509,7 +2509,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(results_one.results.sample.len(), 1);
-        assert_eq!(results_one.results.horns_values.len(), 1);
+        assert_eq!(results_one.results.horns.len(), 1);
         assert_eq!(results_one.results.id.len(), 1);
     }
 }
