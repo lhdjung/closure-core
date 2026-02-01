@@ -371,7 +371,7 @@ pub struct MetricsHorns {
 /// Results table combining samples and their horns values
 #[derive(Clone, Debug)]
 pub struct ResultsTable<U> {
-    pub id: Vec<usize>,
+    pub id: Vec<f64>,
     pub sample: Vec<Vec<U>>,
     pub horns: Vec<f64>,
 }
@@ -727,7 +727,7 @@ where
     combined_f_relative.extend(max_f_relative);
 
     // Create ID column for results table
-    let id: Vec<usize> = (1..=samples_all).collect();
+    let id: Vec<f64> = (1..=samples_all).map(|i| i as f64).collect();
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
@@ -766,7 +766,7 @@ fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn s
     // Create schema with id column, samples as list column, plus horns column
     // Note: List items are marked as nullable to match what Arrow's ListBuilder produces
     let fields = vec![
-        Field::new("id", DataType::Int32, false),
+        Field::new("id", DataType::Float64, false),
         Field::new(
             "sample",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
@@ -940,11 +940,8 @@ where
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
     // Add ID column
-    let id_data: Vec<i32> = results.id[start_idx..end_idx]
-        .iter()
-        .map(|&id| id as i32)
-        .collect();
-    arrays.push(Arc::new(Int32Array::from(id_data)));
+    let id_data: Vec<f64> = results.id[start_idx..end_idx].to_vec();
+    arrays.push(Arc::new(Float64Array::from(id_data)));
 
     // Add samples column as a list using the standard ListBuilder
     let mut list_builder = ListBuilder::new(Int32Builder::new());
@@ -966,7 +963,7 @@ where
 
     // Create schema - matching the schema from create_results_writer
     let fields = vec![
-        Field::new("id", DataType::Int32, false),
+        Field::new("id", DataType::Float64, false),
         Field::new(
             "sample",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
@@ -2338,10 +2335,10 @@ mod tests {
             results.results.horns.len()
         );
         assert_eq!(results.results.sample.len(), results.results.id.len());
-        assert_eq!(results.results.id[0], 1);
+        assert_eq!(results.results.id[0], 1.0);
         assert_eq!(
             results.results.id.last(),
-            Some(&results.results.sample.len())
+            Some(&(results.results.sample.len() as f64))
         );
 
         // Check metrics
