@@ -2516,6 +2516,88 @@ mod tests {
     }
 
     #[test]
+    fn test_streaming_with_stop_after_and_large_batch() {
+        // Mimics the unsum R package scenario: stop_after=5, batch_size=1000
+        let config = StreamingConfig {
+            file_path: "test_streaming_unsum/".to_string(),
+            batch_size: 1000,
+            show_progress: false,
+        };
+
+        let _ = std::fs::create_dir("test_streaming_unsum");
+
+        let result = closure_parallel_streaming::<f64, i32>(
+            3.0,  // mean
+            1.0,  // sd
+            5,    // n
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            1,    // items
+            config,
+            Some(5), // stop_after = 5
+        )
+        .unwrap();
+
+        assert!(result.total_combinations > 0);
+
+        // Verify all parquet files are valid
+        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+            let path = format!("test_streaming_unsum/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
+
+        // Clean up
+        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
+            let _ = std::fs::remove_file(format!("test_streaming_unsum/{}.parquet", name));
+        }
+        let _ = std::fs::remove_dir("test_streaming_unsum");
+    }
+
+    #[test]
+    fn test_streaming_large_n_no_stop_after() {
+        // Tests the main parallel path (not the small-limit sequential path)
+        let config = StreamingConfig {
+            file_path: "test_streaming_large/".to_string(),
+            batch_size: 1000,
+            show_progress: false,
+        };
+
+        let _ = std::fs::create_dir("test_streaming_large");
+
+        let result = closure_parallel_streaming::<f64, i32>(
+            3.5,  // mean
+            0.5,  // sd
+            10,   // n (large enough for parallel path)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            1,    // items
+            config,
+            None, // no stop_after → main parallel path
+        )
+        .unwrap();
+
+        assert!(result.total_combinations > 0);
+
+        // Verify all parquet files are valid
+        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+            let path = format!("test_streaming_large/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
+
+        // Clean up
+        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
+            let _ = std::fs::remove_file(format!("test_streaming_large/{}.parquet", name));
+        }
+        let _ = std::fs::remove_dir("test_streaming_large");
+    }
+
+    #[test]
     fn test_stop_after_parameter() {
         // Test that stop_after limits the number of results
         let results_unlimited = closure_parallel::<f64, i32>(
