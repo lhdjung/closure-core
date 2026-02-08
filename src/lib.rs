@@ -1421,6 +1421,9 @@ pub(crate) fn write_streaming_statistics(
         // Calculate final statistics
         let samples_all = all_horns.len();
         if samples_all == 0 {
+            let _ = mm_writer.close();
+            let _ = mh_writer.close();
+            let _ = freq_writer.close();
             return;
         }
 
@@ -2109,6 +2112,7 @@ where
                 if tx_results.send(final_results).is_err() {
                     // Channel is closed, writer must have failed
                 }
+                let _ = tx_stats.send((horns_batch, HashMap::new()));
             }
         });
 
@@ -2448,6 +2452,13 @@ mod tests {
 
         assert!(!results.results.sample.is_empty());
 
+        // Verify parquet files are valid (more than just "PAR1" magic bytes)
+        for name in &["metrics_main", "metrics_horns", "frequency", "results"] {
+            let path = format!("test_output/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
+
         // Clean up test files
         let _ = std::fs::remove_file("test_output/results.parquet");
         let _ = std::fs::remove_file("test_output/metrics_main.parquet");
@@ -2487,6 +2498,13 @@ mod tests {
         // Check that both files were created
         assert!(std::path::Path::new("test_streaming/sample.parquet").exists());
         assert!(std::path::Path::new("test_streaming/horns.parquet").exists());
+
+        // Verify parquet files are valid (more than just "PAR1" magic bytes)
+        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+            let path = format!("test_streaming/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
 
         // Clean up test files
         let _ = std::fs::remove_file("test_streaming/sample.parquet");
