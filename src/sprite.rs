@@ -8,13 +8,11 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use thiserror::Error;
-
-use crate::grimmer::{grim_scalar_rust, grimmer_scalar, is_near, rust_round, GrimReturn};
+use crate::utils::{is_near, round_f64};
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
     samples_to_result_list, create_results_writer, create_stats_writers, results_to_record_batch,
-    FloatType, IntegerType, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
+    FloatType, IntegerType, ParameterError, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
     StreamingFrequencyState, StreamingResult,
 };
 
@@ -28,16 +26,6 @@ const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
 const MAX_DUP_LOOPS: u32 = 20;
 const DUST: f64 = 1e-12;
-
-#[derive(Debug, Error)]
-pub enum ParameterError {
-    #[error("{0}")]
-    InputValidation(String),
-    #[error("{0}")]
-    Consistency(String),
-    #[error("{0}")]
-    Conflict(String),
-}
 
 // Internal struct to hold the final, validated parameters (generic version)
 #[derive(Debug)]
@@ -71,7 +59,7 @@ where
 /// This function inverts the relationship: rounding_error = 10^(-precision) / 2
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// // Rounding error 0.05 means values rounded to 1 decimal place (±0.05)
 /// assert_eq!(precision_from_rounding_error(0.05), 1);
 /// // Rounding error 0.005 means values rounded to 2 decimal places (±0.005)
@@ -93,7 +81,7 @@ fn precision_from_rounding_error<T: FloatType>(rounding_error: T) -> i32 {
 /// from the rounding errors.
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// // If mean has rounding error 0.005 (prec 2) and SD has 0.0005 (prec 3),
 /// // max precision is 3, so scale_factor = 10^3 = 1000
 /// let scale = scale_factor_from_rounding_errors(0.005, 0.0005);
@@ -114,15 +102,14 @@ fn scale_factor_from_rounding_errors<T: FloatType>(
 fn build_sprite_params<T, U>(
     mean: T,
     sd: T,
-    n: U,                   // Changed from n_obs: u32
-    scale_min: U,           // Changed from min_val: i32
-    scale_max: U,           // Changed from max_val: i32
-    rounding_error_mean: T, // Replaces m_prec: Option<i32>
-    rounding_error_sd: T,   // Replaces sd_prec: Option<i32>
-    n_items: u32,
+    n: U,
+    scale_min: U,
+    scale_max: U,
+    rounding_error_mean: T,
+    rounding_error_sd: T,
+    items: u32,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
-    mut dont_test: bool,
 ) -> Result<SpriteParams<T, U>, ParameterError>
 where
     T: FloatType,
@@ -138,79 +125,10 @@ where
         ));
     }
 
-    let mean_str = T::to_f64(&mean).unwrap().to_string();
-    let sd_str = T::to_f64(&sd).unwrap().to_string();
-
     // Derive precision and scale factor from rounding errors
     let m_prec = precision_from_rounding_error(rounding_error_mean);
     let sd_prec = precision_from_rounding_error(rounding_error_sd);
     let scale_factor = scale_factor_from_rounding_errors(rounding_error_mean, rounding_error_sd);
-
-    // Convert n to u32 for calculations
-    let n_u32 = U::to_u32(&n).unwrap();
-
-    if n_u32 * n_items <= 10_u32.pow(m_prec as u32) {
-        dont_test = true;
-    }
-
-    // GRIM/GRIMMER tests (still done on f64)
-    if !dont_test {
-        let mean_f64 = T::to_f64(&mean).unwrap();
-        let sd_f64 = T::to_f64(&sd).unwrap();
-
-        let grim_result = grim_scalar_rust(
-            &mean_str,
-            n_u32, // Changed from n_obs
-            vec![false, false, false],
-            n_items,
-            "up_or_down",
-            5.0,
-            f64::EPSILON.sqrt(),
-        );
-        let consistent = match grim_result {
-            Ok(GrimReturn::Bool(b)) => b,
-            Ok(GrimReturn::List(b, _, _, _, _, _)) => b,
-            Err(_) => false,
-        };
-        if !consistent {
-            return Err(ParameterError::Consistency(
-                "Mean fails GRIM test.".to_string(),
-            ));
-        }
-
-        let grimmer_consistent = grimmer_scalar(
-            &mean_str,
-            &sd_str,
-            n_u32, // Changed from n_obs
-            n_items,
-            vec![false, false, false],
-            "up_or_down",
-            5.0,
-            f64::EPSILON.sqrt(),
-        );
-        if !grimmer_consistent {
-            return Err(ParameterError::Consistency(
-                "SD fails GRIMMER test.".to_string(),
-            ));
-        }
-
-        // Check SD limits
-        let sd_lims = sd_limits(
-            n_u32, // Changed from n_obs
-            mean_f64,
-            sd_f64,
-            scale_min_i32, // Changed from min_val
-            scale_max_i32, // Changed from max_val
-            Some(sd_prec),
-            n_items,
-        );
-        if !(sd_f64 >= sd_lims.0 && sd_f64 <= sd_lims.1) {
-            return Err(ParameterError::InputValidation(format!(
-                "SD is outside the possible range: [{}, {}]",
-                sd_lims.0, sd_lims.1
-            )));
-        }
-    }
 
     // Check mean is in range
     let mean_f64 = T::to_f64(&mean).unwrap();
@@ -250,12 +168,12 @@ where
 
     // Generate all possible scaled values
     let mut poss_values_scaled: Vec<U> = Vec::new();
-    for i in 1..=n_items {
+    for i in 1..=items {
         // Iterate over scale range using generic integer arithmetic
         let mut val = scale_min;
         while val < scale_max {
             let val_i32 = U::to_i32(&val).unwrap();
-            let float_val = val_i32 as f64 + (i - 1) as f64 / n_items as f64;
+            let float_val = val_i32 as f64 + (i - 1) as f64 / items as f64;
             let scaled_val = (float_val * scale_factor as f64).round() as i64;
             if let Some(u_val) = NumCast::from(scaled_val) {
                 poss_values_scaled.push(u_val);
@@ -341,6 +259,52 @@ where
     })
 }
 
+/// SPRITE technique: sample parameter reconstruction via iterative techniques
+pub struct Sprite {
+    pub restrictions_exact: Option<HashMap<i32, usize>>,
+    pub restrictions_minimum: RestrictionsOption,
+}
+
+impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
+    fn run(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        parquet_config: Option<ParquetConfig>,
+        stop_after: Option<usize>,
+    ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
+        sprite_parallel(
+            mean, sd, n, scale_min, scale_max,
+            rounding_error_mean, rounding_error_sd,
+            items,
+            self.restrictions_exact.take(),
+            std::mem::replace(&mut self.restrictions_minimum, RestrictionsOption::Default),
+            parquet_config, stop_after,
+        )
+    }
+
+    fn run_streaming(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        config: StreamingConfig,
+        stop_after: Option<usize>,
+    ) -> Result<StreamingResult, ParameterError> {
+        sprite_parallel_streaming(
+            mean, sd, n, scale_min, scale_max,
+            rounding_error_mean, rounding_error_sd,
+            items,
+            self.restrictions_exact.take(),
+            std::mem::replace(&mut self.restrictions_minimum, RestrictionsOption::Default),
+            config, stop_after,
+        )
+    }
+}
+
 /// Main SPRITE API: Generate all valid distributions matching summary statistics
 ///
 /// This is the SPRITE equivalent of `closure_parallel()`. It finds multiple possible
@@ -354,13 +318,11 @@ where
 /// * `scale_max` - The maximum value on the scale (generic integer type)
 /// * `rounding_error_mean` - Tolerance for mean (replaces m_prec)
 /// * `rounding_error_sd` - Tolerance for SD (replaces sd_prec)
-/// * `n_items` - Number of items averaged (default 1)
+/// * `items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
-/// * `dont_test` - Skip GRIM/GRIMMER validation (default false)
 /// * `parquet_config` - Optional configuration for writing results to Parquet files
 /// * `stop_after` - Optional maximum number of distributions to find
-/// * `rng` - Random number generator
 ///
 /// # Returns
 /// A `ResultListFromMeanSdN<U>` containing all distributions and comprehensive statistics
@@ -368,15 +330,11 @@ where
 ///
 /// # Example
 /// ```ignore
-/// use rand::rngs::StdRng;
-/// use rand::SeedableRng;
-///
-/// let mut rng = StdRng::seed_from_u64(42);
 /// let results = sprite_parallel(
 ///     2.2_f64, 1.3_f64, 20, 1, 5,
 ///     0.05, 0.05, 1,
 ///     None, RestrictionsOption::Default,
-///     false, None, Some(5), &mut rng
+///     None, Some(5),
 /// ).unwrap();
 /// ```
 #[allow(clippy::too_many_arguments)]
@@ -388,13 +346,11 @@ pub fn sprite_parallel<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
-    n_items: u32,
+    items: u32,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
-    dont_test: bool,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
-    rng: &mut impl Rng,
 ) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
     T: FloatType,
@@ -409,15 +365,14 @@ where
         scale_max,
         rounding_error_mean,
         rounding_error_sd,
-        n_items,
+        items,
         restrictions_exact,
         restrictions_minimum,
-        dont_test,
     )?;
 
     // Find distributions (scaled integer values)
     let n_distributions = stop_after.unwrap_or(usize::MAX);
-    let results_scaled = find_distributions_all_internal(&params, n_distributions, rng);
+    let results_scaled = find_distributions_all_internal(&params, n_distributions);
 
     // Convert scaled values to the 100x scale for compatibility with CLOSURE statistics
     // SPRITE internally uses scale_factor (e.g., 10000 for precision 4), but statistics
@@ -517,9 +472,6 @@ where
         let mm_batch = RecordBatch::try_new(
             mm_schema,
             vec![
-                Arc::new(Float64Array::from(vec![
-                    results.metrics_main.samples_initial,
-                ])),
                 Arc::new(Float64Array::from(vec![results.metrics_main.samples_all])),
                 Arc::new(Float64Array::from(vec![results.metrics_main.values_all])),
             ],
@@ -588,15 +540,14 @@ where
 /// * `scale_max` - The maximum value on the scale (generic integer type)
 /// * `rounding_error_mean` - Tolerance for mean (replaces m_prec)
 /// * `rounding_error_sd` - Tolerance for SD (replaces sd_prec)
-/// * `n_items` - Number of items averaged (default 1)
+/// * `items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
-/// * `dont_test` - Skip GRIM/GRIMMER validation (default false)
 /// * `config` - Streaming configuration (file path, batch size, progress reporting)
 /// * `stop_after` - Optional limit on number of distributions to find
 ///
 /// # Returns
-/// A `StreamingResult` with the total count and file path.
+/// A `Result<StreamingResult, ParameterError>` with the total count and file path.
 #[allow(clippy::too_many_arguments)]
 pub fn sprite_parallel_streaming<T, U>(
     mean: T,
@@ -606,13 +557,12 @@ pub fn sprite_parallel_streaming<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
-    n_items: u32,
+    items: u32,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
-    dont_test: bool,
     config: StreamingConfig,
     stop_after: Option<usize>,
-) -> StreamingResult
+) -> Result<StreamingResult, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
@@ -624,7 +574,7 @@ where
     use std::collections::HashMap;
 
     // Build and validate parameters
-    let params = match build_sprite_params(
+    let params = build_sprite_params(
         mean,
         sd,
         n,
@@ -632,20 +582,10 @@ where
         scale_max,
         rounding_error_mean,
         rounding_error_sd,
-        n_items,
+        items,
         restrictions_exact,
         restrictions_minimum,
-        dont_test,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("ERROR: Parameter validation failed: {}", e);
-            return StreamingResult {
-                total_combinations: 0,
-                file_path: config.file_path,
-            };
-        }
-    };
+    )?;
 
     let _scale_factor = params.scale_factor;
     let n_usize = U::to_usize(&params.n).unwrap();
@@ -693,7 +633,7 @@ where
     }
 
     // Spawn dedicated writer thread
-    let samples_path = format!("{}samples.parquet", base_path);
+    let samples_path = format!("{}sample.parquet", base_path);
     let horns_path = format!("{}horns.parquet", base_path);
 
     let writer_handle = thread::spawn(move || {
@@ -849,10 +789,10 @@ where
 
     if total_written == 0 {
         eprintln!("\nERROR: No results were written to disk.");
-        return StreamingResult {
+        return Ok(StreamingResult {
             total_combinations: 0,
             file_path: config.file_path,
-        };
+        });
     }
 
     // Write statistics files
@@ -865,13 +805,14 @@ where
         final_freq_state,
     );
 
-    StreamingResult {
+    Ok(StreamingResult {
         total_combinations: total_written,
         file_path: config.file_path,
-    }
+    })
 }
 
 /// Find distributions using streaming approach (parallelized with rayon)
+#[allow(clippy::too_many_arguments)]
 fn find_distributions_all_streaming<T, U>(
     params: &SpriteParams<T, U>,
     stop_after: Option<usize>,
@@ -1066,7 +1007,6 @@ fn find_distributions_all_streaming<T, U>(
 fn find_distributions_all_internal<T, U>(
     params: &SpriteParams<T, U>,
     n_distributions: usize,
-    _rng: &mut impl Rng,
 ) -> Vec<Vec<U>>
 where
     T: FloatType,
@@ -1235,9 +1175,9 @@ where
         let current_mean =
             compute_mean_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
         let target_mean_rounded =
-            T::from(rust_round(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
         let current_mean_rounded =
-            T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
 
         if !is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1273,9 +1213,9 @@ where
         let current_mean =
             compute_mean_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
         let target_mean_rounded =
-            T::from(rust_round(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
         let current_mean_rounded =
-            T::from(rust_round(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
 
         if is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1480,41 +1420,10 @@ fn std_dev(data: &[f64]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
-/// Calculate SD limits for parameter validation
-fn sd_limits(
-    n_obs: u32,
-    _mean: f64,
-    sd: f64,
-    min_val: i32,
-    max_val: i32,
-    _sd_prec_opt: Option<i32>,
-    _n_items: u32,
-) -> (f64, f64) {
-    // Simplified SD limit calculation
-    // For a more accurate calculation, this would need the full abm_internal implementation
-    // For now, return conservative bounds
-    let _n = n_obs as f64;
-    let range = (max_val - min_val) as f64;
-
-    // Maximum possible SD is approximately range / 2 for a uniform distribution
-    let max_sd = range / 2.0;
-
-    // Minimum SD is close to 0 when all values are near the mean
-    let min_sd = 0.0;
-
-    // For validation purposes, accept SD values that are reasonable
-    // given the mean and range
-    let practical_min = (sd * 0.5).max(min_sd);
-    let practical_max = (sd * 1.5).min(max_sd);
-
-    (practical_min.max(0.0), practical_max)
-}
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
 
     /// Helper to convert scaled integers to floats
     fn unscale_distribution(scaled_values: &[i32], scale_factor: u32) -> Vec<f64> {
@@ -1526,7 +1435,6 @@ pub mod tests {
 
     #[test]
     fn sprite_test_mean() {
-        let mut rng = StdRng::seed_from_u64(1234);
         let results = sprite_parallel(
             2.2_f64, // mean
             1.3_f64, // sd
@@ -1535,13 +1443,11 @@ pub mod tests {
             5,       // scale_max
             0.05,    // rounding_error_mean (precision 1: 0.1^1/2 = 0.05)
             0.05,    // rounding_error_sd (precision 1)
-            1,       // n_items
+            1,       // items
             None,    // restrictions_exact
             RestrictionsOption::Default,
-            false,   // dont_test
             None,    // parquet_config
             Some(5), // stop_after (was n_distributions)
-            &mut rng,
         )
         .unwrap();
 
@@ -1549,12 +1455,11 @@ pub mod tests {
         // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
         let first_dist = unscale_distribution(&results.results.sample[0], 100);
         let computed_mean = mean(&first_dist);
-        assert_eq!(rust_round(computed_mean, 1), 2.2);
+        assert_eq!(round_f64(computed_mean, 1), 2.2);
     }
 
     #[test]
     fn sprite_test_sd() {
-        let mut rng = StdRng::seed_from_u64(1234);
         let results = sprite_parallel(
             2.2_f64, // mean
             1.3_f64, // sd
@@ -1563,13 +1468,11 @@ pub mod tests {
             5,       // scale_max
             0.05,    // rounding_error_mean (precision 1)
             0.05,    // rounding_error_sd (precision 1)
-            1,       // n_items
+            1,       // items
             None,    // restrictions_exact
             RestrictionsOption::Default,
-            false,   // dont_test
             None,    // parquet_config
             Some(5), // stop_after
-            &mut rng,
         )
         .unwrap();
 
@@ -1578,7 +1481,7 @@ pub mod tests {
         for dist_scaled in &results.results.sample {
             let dist = unscale_distribution(dist_scaled, 100);
             let computed_sd = std_dev(&dist).unwrap();
-            assert_eq!(rust_round(computed_sd, 1), 1.3);
+            assert_eq!(round_f64(computed_sd, 1), 1.3);
         }
     }
 
@@ -1602,8 +1505,6 @@ pub mod tests {
         // How many distributions should SPRITE generate?
         let target_runs = 5000;
 
-        let mut rng = StdRng::seed_from_u64(42);
-
         let results = sprite_parallel(
             test_mean,
             test_sd,
@@ -1615,10 +1516,8 @@ pub mod tests {
             1,
             None,
             RestrictionsOption::Default,
-            true,
             None,              // parquet_config
             Some(target_runs), // stop_after
-            &mut rng,
         )
         .unwrap();
 
@@ -1638,8 +1537,8 @@ pub mod tests {
             let dist = unscale_distribution(dist_scaled, scale_factor);
             let computed_mean = mean(&dist);
             let computed_sd = std_dev(&dist).unwrap();
-            let rounded_mean = rust_round(computed_mean, test_mean_digits);
-            let rounded_sd = rust_round(computed_sd, test_sd_digits);
+            let rounded_mean = round_f64(computed_mean, test_mean_digits);
+            let rounded_sd = round_f64(computed_sd, test_sd_digits);
 
             assert_eq!(rounded_mean, test_mean);
             assert_eq!(rounded_sd, test_sd);
@@ -1689,24 +1588,24 @@ pub mod tests {
             5,    // scale_max
             rounding_error_mean,
             rounding_error_sd,
-            1,    // n_items
+            1,    // items
             None, // restrictions_exact
             RestrictionsOption::Default,
-            false, // dont_test
             config,
             Some(3), // stop_after - only generate 3 samples for faster testing
-        );
+        )
+        .unwrap();
 
         assert!(result.total_combinations > 0);
         assert_eq!(result.file_path, "test_sprite_streaming/");
 
         // Check that files were created
-        assert!(std::path::Path::new("test_sprite_streaming/samples.parquet").exists());
+        assert!(std::path::Path::new("test_sprite_streaming/sample.parquet").exists());
         assert!(std::path::Path::new("test_sprite_streaming/horns.parquet").exists());
 
         // Read and validate the samples from the parquet file
-        let file = File::open("test_sprite_streaming/samples.parquet")
-            .expect("Failed to open samples.parquet");
+        let file = File::open("test_sprite_streaming/sample.parquet")
+            .expect("Failed to open sample.parquet");
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .expect("Failed to create parquet reader builder");
         let reader = builder.build().expect("Failed to build parquet reader");
@@ -1791,7 +1690,7 @@ pub mod tests {
         );
 
         // Clean up test files
-        let file_names = ["samples", "horns", "metrics_main", "metrics_horns", "frequency"];
+        let file_names = ["sample", "horns", "metrics_main", "metrics_horns", "frequency"];
         for name in file_names {
             let _ = std::fs::remove_file(format!("test_sprite_streaming/{name}.parquet"));
         }
@@ -1809,8 +1708,6 @@ pub mod tests {
 
         let _ = std::fs::create_dir("test_sprite_parquet");
 
-        let mut rng = StdRng::seed_from_u64(42);
-
         let results = sprite_parallel::<f64, i32>(
             2.2_f64, // mean
             1.3_f64, // sd
@@ -1819,13 +1716,11 @@ pub mod tests {
             5,       // scale_max
             0.05,    // rounding_error_mean (precision 1)
             0.05,    // rounding_error_sd (precision 1)
-            1,       // n_items
+            1,       // items
             None,    // restrictions_exact
             RestrictionsOption::Default,
-            false,        // dont_test
             Some(config), // parquet_config
             Some(5),      // stop_after
-            &mut rng,
         )
         .unwrap();
 

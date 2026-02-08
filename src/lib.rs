@@ -35,13 +35,86 @@ impl<T> FloatType for T where T: Float + FromPrimitive + Send + Sync {}
 pub trait IntegerType: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send + Sync {}
 
-mod grimmer;
+use thiserror::Error;
+
+mod utils;
 mod sprite;
 mod sprite_types;
 
+#[derive(Debug, Error)]
+pub enum ParameterError {
+    #[error("{0}")]
+    InputValidation(String),
+    #[error("{0}")]
+    Consistency(String),
+    #[error("{0}")]
+    Conflict(String),
+}
+
 // Re-export sprite types needed for the public API
-pub use sprite::{sprite_parallel, sprite_parallel_streaming, ParameterError};
+pub use sprite::{sprite_parallel, sprite_parallel_streaming, Sprite};
 pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
+
+/// Unified trait for sample reconstruction techniques (CLOSURE, SPRITE, etc.)
+#[allow(clippy::too_many_arguments)]
+pub trait Technique<T: FloatType, U: IntegerType + 'static> {
+    fn run(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        parquet_config: Option<ParquetConfig>,
+        stop_after: Option<usize>,
+    ) -> Result<ResultListFromMeanSdN<U>, ParameterError>;
+
+    fn run_streaming(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        config: StreamingConfig,
+        stop_after: Option<usize>,
+    ) -> Result<StreamingResult, ParameterError>;
+}
+
+/// CLOSURE technique: complete listing of original samples of underlying raw evidence
+pub struct Closure;
+
+impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
+    fn run(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        parquet_config: Option<ParquetConfig>,
+        stop_after: Option<usize>,
+    ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
+        closure_parallel(
+            mean, sd, n, scale_min, scale_max,
+            rounding_error_mean, rounding_error_sd,
+            items, parquet_config, stop_after,
+        )
+    }
+
+    fn run_streaming(
+        &mut self,
+        mean: T, sd: T, n: U,
+        scale_min: U, scale_max: U,
+        rounding_error_mean: T, rounding_error_sd: T,
+        items: u32,
+        config: StreamingConfig,
+        stop_after: Option<usize>,
+    ) -> Result<StreamingResult, ParameterError> {
+        closure_parallel_streaming(
+            mean, sd, n, scale_min, scale_max,
+            rounding_error_mean, rounding_error_sd,
+            items, config, stop_after,
+        )
+    }
+}
 
 /// Configuration for Parquet output in memory mode
 /// Used with `closure_parallel()` to optionally save results while returning them
@@ -277,7 +350,6 @@ impl FrequencyTable {
 /// Main metrics about the CLOSURE results
 #[derive(Clone, Debug)]
 pub struct MetricsMain {
-    pub samples_initial: f64,
     pub samples_all: f64,
     pub values_all: f64,
 }
@@ -299,9 +371,9 @@ pub struct MetricsHorns {
 /// Results table combining samples and their horns values
 #[derive(Clone, Debug)]
 pub struct ResultsTable<U> {
-    pub id: Vec<usize>,
+    pub id: Vec<f64>,
     pub sample: Vec<Vec<U>>,
-    pub horns_values: Vec<f64>,
+    pub horns: Vec<f64>,
 }
 
 /// Complete CLOSURE results with all statistics
@@ -379,20 +451,26 @@ struct Combination<T, U> {
     running_m2: T,
 }
 
-/// Count first set of integers
+/// Count initial combinations with replacement
 ///
-/// The first set of integers that can be formed
-/// given a range defined by `scale_min` and `scale_max`.
-/// This function calculates the number of unique pairs (i, j) where i and j are integers
-/// within the specified range, and i <= j.
+/// Computes the number of sorted combinations of length `depth` from
+/// `scale_min..=scale_max`, i.e., the multiset coefficient
+/// C(range_size + depth - 1, depth).
 /// # Arguments
 /// * `scale_min` - The minimum value of the scale.
 /// * `scale_max` - The maximum value of the scale.
+/// * `depth` - The length of each combination.
 /// # Returns
-/// The total number of unique combinations of integers within the specified range.
-pub fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
-    let range_size = scale_max - scale_min + 1;
-    (range_size * (range_size + 1)) / 2
+/// The total number of unique combinations.
+pub fn count_initial_combinations(scale_min: i32, scale_max: i32, depth: usize) -> i64 {
+    let range_size = (scale_max - scale_min + 1) as i64;
+    // C(range_size + depth - 1, depth) via iterative multiplication
+    let k = depth as i64;
+    let mut result: i64 = 1;
+    for i in 0..k {
+        result = result * (range_size + k - 1 - i) / (i + 1);
+    }
+    result
 }
 
 /// Calculate horns index for a frequency distribution
@@ -516,7 +594,6 @@ where
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
-            samples_initial: 0.0,
             samples_all: 0.0,
             values_all: 0.0,
         },
@@ -541,7 +618,7 @@ where
         results: ResultsTable {
             id: Vec::new(),
             sample: Vec::new(),
-            horns_values: Vec::new(),
+            horns: Vec::new(),
         },
     }
 }
@@ -656,11 +733,10 @@ where
     combined_f_relative.extend(max_f_relative);
 
     // Create ID column for results table
-    let id: Vec<usize> = (1..=samples_all).collect();
+    let id: Vec<f64> = (1..=samples_all).map(|i| i as f64).collect();
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
-            samples_initial: count_initial_combinations(scale_min_i32, scale_max_i32) as f64,
             samples_all: samples_all as f64,
             values_all: values_all as f64,
         },
@@ -685,7 +761,7 @@ where
         results: ResultsTable {
             id,
             sample: samples,
-            horns_values,
+            horns: horns_values,
         },
     }
 }
@@ -696,9 +772,9 @@ fn create_results_writer(file_path: &str) -> Result<ArrowWriter<File>, Box<dyn s
     // Create schema with id column, samples as list column, plus horns column
     // Note: List items are marked as nullable to match what Arrow's ListBuilder produces
     let fields = vec![
-        Field::new("id", DataType::Int32, false),
+        Field::new("id", DataType::Float64, false),
         Field::new(
-            "samples",
+            "sample",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
             false,
         ), // true for nullable items
@@ -811,7 +887,6 @@ fn create_stats_writers(
 > {
     // Metrics main writer
     let metrics_main_schema = Arc::new(Schema::new(vec![
-        Field::new("samples_initial", DataType::Float64, false),
         Field::new("samples_all", DataType::Float64, false),
         Field::new("values_all", DataType::Float64, false),
     ]));
@@ -870,11 +945,8 @@ where
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
     // Add ID column
-    let id_data: Vec<i32> = results.id[start_idx..end_idx]
-        .iter()
-        .map(|&id| id as i32)
-        .collect();
-    arrays.push(Arc::new(Int32Array::from(id_data)));
+    let id_data: Vec<f64> = results.id[start_idx..end_idx].to_vec();
+    arrays.push(Arc::new(Float64Array::from(id_data)));
 
     // Add samples column as a list using the standard ListBuilder
     let mut list_builder = ListBuilder::new(Int32Builder::new());
@@ -891,14 +963,14 @@ where
     arrays.push(Arc::new(list_builder.finish()));
 
     // Add horns column
-    let horns_data: Vec<f64> = results.horns_values[start_idx..end_idx].to_vec();
+    let horns_data: Vec<f64> = results.horns[start_idx..end_idx].to_vec();
     arrays.push(Arc::new(Float64Array::from(horns_data)));
 
     // Create schema - matching the schema from create_results_writer
     let fields = vec![
-        Field::new("id", DataType::Int32, false),
+        Field::new("id", DataType::Float64, false),
         Field::new(
-            "samples",
+            "sample",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
             false,
         ), // true for nullable items
@@ -982,30 +1054,65 @@ where
     }
 }
 
-/// Generate initial combinations for parallel processing
-fn generate_initial_combinations<T, U>(scale_min: U, scale_max_plus_1: U) -> Vec<(Vec<U>, T, T)>
+/// Generate initial combinations for parallel processing at a given depth
+fn generate_initial_combinations<T, U>(
+    scale_min: U,
+    scale_max_plus_1: U,
+    depth: usize,
+) -> Vec<(Vec<U>, T, T)>
 where
     T: FloatType,
     U: IntegerType,
 {
-    range_u(scale_min, scale_max_plus_1)
-        .flat_map(|i| {
-            range_u(i, scale_max_plus_1).map(move |j| {
-                let initial_combination = vec![i, j];
+    let mut results = Vec::new();
+    let mut combo = Vec::with_capacity(depth);
+    generate_combinations_recursive(
+        scale_min,
+        scale_max_plus_1,
+        scale_min,
+        depth,
+        &mut combo,
+        &mut results,
+    );
+    results
+}
 
-                let i_float = T::from(i).unwrap();
-                let j_float = T::from(j).unwrap();
-                let sum = i_float + j_float;
-                let current_mean = sum / T::from(2).unwrap();
-
-                let diff_i = i_float - current_mean;
-                let diff_j = j_float - current_mean;
-                let current_m2 = diff_i * diff_i + diff_j * diff_j;
-
-                (initial_combination, sum, current_m2)
-            })
-        })
-        .collect()
+/// Recursively generate sorted combinations with replacement and compute
+/// running_sum and running_m2 for each.
+fn generate_combinations_recursive<T, U>(
+    _scale_min: U,
+    scale_max_plus_1: U,
+    min_value: U,
+    remaining: usize,
+    combo: &mut Vec<U>,
+    results: &mut Vec<(Vec<U>, T, T)>,
+) where
+    T: FloatType,
+    U: IntegerType,
+{
+    if remaining == 0 {
+        let depth = combo.len();
+        let sum: T = combo.iter().fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
+        let mean = sum / T::from(depth).unwrap();
+        let m2: T = combo.iter().fold(T::zero(), |acc, &v| {
+            let diff = T::from(v).unwrap() - mean;
+            acc + diff * diff
+        });
+        results.push((combo.clone(), sum, m2));
+        return;
+    }
+    for value in range_u(min_value, scale_max_plus_1) {
+        combo.push(value);
+        generate_combinations_recursive(
+            _scale_min,
+            scale_max_plus_1,
+            value,
+            remaining - 1,
+            combo,
+            results,
+        );
+        combo.pop();
+    }
 }
 
 /// Generate all valid combinations (memory mode) with summary statistics
@@ -1022,7 +1129,9 @@ where
 /// For large result sets, use `closure_parallel_streaming()` instead.
 ///
 /// # Parameters
+/// - `items`: Number of items averaged (must be 1 for CLOSURE)
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+#[allow(clippy::too_many_arguments)]
 pub fn closure_parallel<T, U>(
     mean: T,
     sd: T,
@@ -1031,13 +1140,19 @@ pub fn closure_parallel<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
+    items: u32,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
-) -> ResultListFromMeanSdN<U>
+) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
 {
+    if items != 1 {
+        return Err(ParameterError::InputValidation(
+            "CLOSURE requires items == 1".to_string(),
+        ));
+    }
     let ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
@@ -1058,8 +1173,9 @@ where
         rounding_error_sd,
     );
 
-    // Generate initial combinations
-    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
+    // Generate initial combinations at configurable depth
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
     // Process combinations in parallel with optional early termination
     let results: Vec<Vec<U>> = if let Some(limit) = stop_after {
@@ -1214,9 +1330,6 @@ where
                 mm_schema,
                 vec![
                     Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_main.samples_initial,
-                    ])),
-                    Arc::new(Float64Array::from(vec![
                         closure_results.metrics_main.samples_all,
                     ])),
                     Arc::new(Float64Array::from(vec![
@@ -1279,7 +1392,7 @@ where
         }
     }
 
-    closure_results
+    Ok(closure_results)
 }
 
 /// Structure to hold streaming frequency state
@@ -1308,6 +1421,9 @@ pub(crate) fn write_streaming_statistics(
         // Calculate final statistics
         let samples_all = all_horns.len();
         if samples_all == 0 {
+            let _ = mm_writer.close();
+            let _ = mh_writer.close();
+            let _ = freq_writer.close();
             return;
         }
 
@@ -1335,10 +1451,6 @@ pub(crate) fn write_streaming_statistics(
         let mm_batch = RecordBatch::try_new(
             mm_schema,
             vec![
-                Arc::new(Float64Array::from(vec![count_initial_combinations(
-                    scale_min_i32,
-                    scale_max_i32,
-                ) as f64])),
                 Arc::new(Float64Array::from(vec![samples_all as f64])),
                 Arc::new(Float64Array::from(vec![values_all as f64])),
             ],
@@ -1483,7 +1595,9 @@ pub(crate) fn write_streaming_statistics(
 /// Returns a StreamingResult with the total count and file path.
 ///
 /// # Parameters
+/// - `items`: Number of items averaged (must be 1 for CLOSURE)
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+#[allow(clippy::too_many_arguments)]
 pub fn closure_parallel_streaming<T, U>(
     mean: T,
     sd: T,
@@ -1492,13 +1606,19 @@ pub fn closure_parallel_streaming<T, U>(
     scale_max: U,
     rounding_error_mean: T,
     rounding_error_sd: T,
+    items: u32,
     config: StreamingConfig,
     stop_after: Option<usize>,
-) -> StreamingResult
+) -> Result<StreamingResult, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
 {
+    if items != 1 {
+        return Err(ParameterError::InputValidation(
+            "CLOSURE requires items == 1".to_string(),
+        ));
+    }
     let ClosureSearchContext {
         target_sum_upper,
         target_sum_lower,
@@ -1534,9 +1654,11 @@ where
 
     // Counter for tracking progress through initial combinations
     let initial_combo_counter = Arc::new(AtomicUsize::new(0));
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
     let initial_combo_total = count_initial_combinations(
         U::to_i32(&scale_min).unwrap(),
         U::to_i32(&scale_max).unwrap(),
+        depth,
     ) as usize;
 
     // Shared state for tracking min/max horns frequencies
@@ -1571,7 +1693,7 @@ where
     }
 
     // Spawn dedicated writer thread for two separate files
-    let samples_path = format!("{}samples.parquet", base_path);
+    let samples_path = format!("{}sample.parquet", base_path);
     let horns_path = format!("{}horns.parquet", base_path);
 
     let n_usize_for_writer = n_usize; // Capture n_usize for the writer thread
@@ -1717,8 +1839,9 @@ where
         (all_horns, freq_state_for_stats)
     });
 
-    // Generate initial combinations
-    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
+    // Generate initial combinations at configurable depth
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
@@ -1834,10 +1957,10 @@ where
                 final_freq_state,
             );
 
-            return StreamingResult {
+            return Ok(StreamingResult {
                 total_combinations: total_written,
                 file_path: config.file_path,
-            };
+            });
         }
     }
 
@@ -1989,6 +2112,7 @@ where
                 if tx_results.send(final_results).is_err() {
                     // Channel is closed, writer must have failed
                 }
+                let _ = tx_stats.send((horns_batch, HashMap::new()));
             }
         });
 
@@ -2010,10 +2134,10 @@ where
     // Check if we successfully wrote any results
     if total_written == 0 {
         eprintln!("\nERROR: No results were written to disk.");
-        return StreamingResult {
+        return Ok(StreamingResult {
             total_combinations: 0,
             file_path: config.file_path,
-        };
+        });
     }
 
     // Write statistics files
@@ -2026,10 +2150,10 @@ where
         final_freq_state,
     );
 
-    StreamingResult {
+    Ok(StreamingResult {
         total_combinations: total_written,
         file_path: config.file_path,
-    }
+    })
 }
 
 // Collect all valid combinations from a starting point
@@ -2144,8 +2268,14 @@ mod tests {
 
     #[test]
     fn test_count_initial_combinations() {
-        assert_eq!(count_initial_combinations(1, 3), 6);
-        assert_eq!(count_initial_combinations(1, 4), 10);
+        // Depth 2: C(3+1, 2) = 6, C(4+1, 2) = 10
+        assert_eq!(count_initial_combinations(1, 3, 2), 6);
+        assert_eq!(count_initial_combinations(1, 4, 2), 10);
+        // Depth 3: C(3+2, 3) = 10, C(4+2, 3) = 20
+        assert_eq!(count_initial_combinations(1, 3, 3), 10);
+        assert_eq!(count_initial_combinations(1, 4, 3), 20);
+        // Depth 1: C(range_size, 1) = range_size
+        assert_eq!(count_initial_combinations(1, 7, 1), 7);
     }
 
     #[test]
@@ -2242,21 +2372,23 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
+            1,    // items
             None, // no parquet config
             None, // no stop_after limit
-        );
+        )
+        .unwrap();
 
         // Check that results table is properly formed
         assert!(!results.results.sample.is_empty());
         assert_eq!(
             results.results.sample.len(),
-            results.results.horns_values.len()
+            results.results.horns.len()
         );
         assert_eq!(results.results.sample.len(), results.results.id.len());
-        assert_eq!(results.results.id[0], 1);
+        assert_eq!(results.results.id[0], 1.0);
         assert_eq!(
             results.results.id.last(),
-            Some(&results.results.sample.len())
+            Some(&(results.results.sample.len() as f64))
         );
 
         // Check metrics
@@ -2312,11 +2444,20 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
+            1,    // items
             Some(config),
             None, // no stop_after limit
-        );
+        )
+        .unwrap();
 
         assert!(!results.results.sample.is_empty());
+
+        // Verify parquet files are valid (more than just "PAR1" magic bytes)
+        for name in &["metrics_main", "metrics_horns", "frequency", "results"] {
+            let path = format!("test_output/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
 
         // Clean up test files
         let _ = std::fs::remove_file("test_output/results.parquet");
@@ -2345,23 +2486,115 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
-            config, None, // no stop_after limit
-        );
+            1,    // items
+            config,
+            None, // no stop_after limit
+        )
+        .unwrap();
 
         assert!(result.total_combinations > 0);
         assert_eq!(result.file_path, "test_streaming/");
 
         // Check that both files were created
-        assert!(std::path::Path::new("test_streaming/samples.parquet").exists());
+        assert!(std::path::Path::new("test_streaming/sample.parquet").exists());
         assert!(std::path::Path::new("test_streaming/horns.parquet").exists());
 
+        // Verify parquet files are valid (more than just "PAR1" magic bytes)
+        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+            let path = format!("test_streaming/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
+
         // Clean up test files
-        let _ = std::fs::remove_file("test_streaming/samples.parquet");
+        let _ = std::fs::remove_file("test_streaming/sample.parquet");
         let _ = std::fs::remove_file("test_streaming/horns.parquet");
         let _ = std::fs::remove_file("test_streaming/metrics_main.parquet");
         let _ = std::fs::remove_file("test_streaming/metrics_horns.parquet");
         let _ = std::fs::remove_file("test_streaming/frequency.parquet");
         let _ = std::fs::remove_dir("test_streaming");
+    }
+
+    #[test]
+    fn test_streaming_with_stop_after_and_large_batch() {
+        // Mimics the unsum R package scenario: stop_after=5, batch_size=1000
+        let config = StreamingConfig {
+            file_path: "test_streaming_unsum/".to_string(),
+            batch_size: 1000,
+            show_progress: false,
+        };
+
+        let _ = std::fs::create_dir("test_streaming_unsum");
+
+        let result = closure_parallel_streaming::<f64, i32>(
+            3.0,  // mean
+            1.0,  // sd
+            5,    // n
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            1,    // items
+            config,
+            Some(5), // stop_after = 5
+        )
+        .unwrap();
+
+        assert!(result.total_combinations > 0);
+
+        // Verify all parquet files are valid
+        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+            let path = format!("test_streaming_unsum/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
+
+        // Clean up
+        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
+            let _ = std::fs::remove_file(format!("test_streaming_unsum/{}.parquet", name));
+        }
+        let _ = std::fs::remove_dir("test_streaming_unsum");
+    }
+
+    #[test]
+    fn test_streaming_large_n_no_stop_after() {
+        // Tests the main parallel path (not the small-limit sequential path)
+        let config = StreamingConfig {
+            file_path: "test_streaming_large/".to_string(),
+            batch_size: 1000,
+            show_progress: false,
+        };
+
+        let _ = std::fs::create_dir("test_streaming_large");
+
+        let result = closure_parallel_streaming::<f64, i32>(
+            3.5,  // mean
+            0.5,  // sd
+            10,   // n (large enough for parallel path)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            1,    // items
+            config,
+            None, // no stop_after → main parallel path
+        )
+        .unwrap();
+
+        assert!(result.total_combinations > 0);
+
+        // Verify all parquet files are valid
+        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+            let path = format!("test_streaming_large/{}.parquet", name);
+            let size = std::fs::metadata(&path).unwrap().len();
+            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+        }
+
+        // Clean up
+        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
+            let _ = std::fs::remove_file(format!("test_streaming_large/{}.parquet", name));
+        }
+        let _ = std::fs::remove_dir("test_streaming_large");
     }
 
     #[test]
@@ -2375,9 +2608,11 @@ mod tests {
             5,    // scale_max
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
+            1,    // items
             None, // no parquet config
             None, // no stop_after limit
-        );
+        )
+        .unwrap();
 
         let total_samples = results_unlimited.results.sample.len();
         assert!(total_samples > 10); // Should have many samples
@@ -2391,12 +2626,14 @@ mod tests {
             5,        // scale_max
             0.05,     // rounding_error_mean
             0.05,     // rounding_error_sd
+            1,        // items
             None,     // no parquet config
             Some(10), // stop after 10 samples
-        );
+        )
+        .unwrap();
 
         assert_eq!(results_limited.results.sample.len(), 10);
-        assert_eq!(results_limited.results.horns_values.len(), 10);
+        assert_eq!(results_limited.results.horns.len(), 10);
         assert_eq!(results_limited.results.id.len(), 10);
 
         // Test with limit of 1
@@ -2408,12 +2645,14 @@ mod tests {
             5,       // scale_max
             0.05,    // rounding_error_mean
             0.05,    // rounding_error_sd
+            1,       // items
             None,    // no parquet config
             Some(1), // stop after 1 sample
-        );
+        )
+        .unwrap();
 
         assert_eq!(results_one.results.sample.len(), 1);
-        assert_eq!(results_one.results.horns_values.len(), 1);
+        assert_eq!(results_one.results.horns.len(), 1);
         assert_eq!(results_one.results.id.len(), 1);
     }
 }
