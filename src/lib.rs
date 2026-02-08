@@ -881,7 +881,6 @@ fn create_stats_writers(
 > {
     // Metrics main writer
     let metrics_main_schema = Arc::new(Schema::new(vec![
-        Field::new("samples_initial", DataType::Float64, false),
         Field::new("samples_all", DataType::Float64, false),
         Field::new("values_all", DataType::Float64, false),
     ]));
@@ -1407,10 +1406,6 @@ pub(crate) fn write_streaming_statistics(
         let mm_batch = RecordBatch::try_new(
             mm_schema,
             vec![
-                Arc::new(Float64Array::from(vec![count_initial_combinations(
-                    scale_min_i32,
-                    scale_max_i32,
-                ) as f64])),
                 Arc::new(Float64Array::from(vec![samples_all as f64])),
                 Arc::new(Float64Array::from(vec![values_all as f64])),
             ],
