@@ -43,7 +43,9 @@ fn write_closure_csv(
     }
 
     // Setup progress bar
-    let initial_count = count_initial_combinations(scale_min, scale_max);
+    let n_usize = n as usize;
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let initial_count = count_initial_combinations(scale_min, scale_max, depth);
     let bar = ProgressBar::new(initial_count as u64);
     bar.set_style(
         ProgressStyle::default_bar()

@@ -451,20 +451,26 @@ struct Combination<T, U> {
     running_m2: T,
 }
 
-/// Count first set of integers
+/// Count initial combinations with replacement
 ///
-/// The first set of integers that can be formed
-/// given a range defined by `scale_min` and `scale_max`.
-/// This function calculates the number of unique pairs (i, j) where i and j are integers
-/// within the specified range, and i <= j.
+/// Computes the number of sorted combinations of length `depth` from
+/// `scale_min..=scale_max`, i.e., the multiset coefficient
+/// C(range_size + depth - 1, depth).
 /// # Arguments
 /// * `scale_min` - The minimum value of the scale.
 /// * `scale_max` - The maximum value of the scale.
+/// * `depth` - The length of each combination.
 /// # Returns
-/// The total number of unique combinations of integers within the specified range.
-pub fn count_initial_combinations(scale_min: i32, scale_max: i32) -> i32 {
-    let range_size = scale_max - scale_min + 1;
-    (range_size * (range_size + 1)) / 2
+/// The total number of unique combinations.
+pub fn count_initial_combinations(scale_min: i32, scale_max: i32, depth: usize) -> i64 {
+    let range_size = (scale_max - scale_min + 1) as i64;
+    // C(range_size + depth - 1, depth) via iterative multiplication
+    let k = depth as i64;
+    let mut result: i64 = 1;
+    for i in 0..k {
+        result = result * (range_size + k - 1 - i) / (i + 1);
+    }
+    result
 }
 
 /// Calculate horns index for a frequency distribution
@@ -1048,30 +1054,65 @@ where
     }
 }
 
-/// Generate initial combinations for parallel processing
-fn generate_initial_combinations<T, U>(scale_min: U, scale_max_plus_1: U) -> Vec<(Vec<U>, T, T)>
+/// Generate initial combinations for parallel processing at a given depth
+fn generate_initial_combinations<T, U>(
+    scale_min: U,
+    scale_max_plus_1: U,
+    depth: usize,
+) -> Vec<(Vec<U>, T, T)>
 where
     T: FloatType,
     U: IntegerType,
 {
-    range_u(scale_min, scale_max_plus_1)
-        .flat_map(|i| {
-            range_u(i, scale_max_plus_1).map(move |j| {
-                let initial_combination = vec![i, j];
+    let mut results = Vec::new();
+    let mut combo = Vec::with_capacity(depth);
+    generate_combinations_recursive(
+        scale_min,
+        scale_max_plus_1,
+        scale_min,
+        depth,
+        &mut combo,
+        &mut results,
+    );
+    results
+}
 
-                let i_float = T::from(i).unwrap();
-                let j_float = T::from(j).unwrap();
-                let sum = i_float + j_float;
-                let current_mean = sum / T::from(2).unwrap();
-
-                let diff_i = i_float - current_mean;
-                let diff_j = j_float - current_mean;
-                let current_m2 = diff_i * diff_i + diff_j * diff_j;
-
-                (initial_combination, sum, current_m2)
-            })
-        })
-        .collect()
+/// Recursively generate sorted combinations with replacement and compute
+/// running_sum and running_m2 for each.
+fn generate_combinations_recursive<T, U>(
+    _scale_min: U,
+    scale_max_plus_1: U,
+    min_value: U,
+    remaining: usize,
+    combo: &mut Vec<U>,
+    results: &mut Vec<(Vec<U>, T, T)>,
+) where
+    T: FloatType,
+    U: IntegerType,
+{
+    if remaining == 0 {
+        let depth = combo.len();
+        let sum: T = combo.iter().fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
+        let mean = sum / T::from(depth).unwrap();
+        let m2: T = combo.iter().fold(T::zero(), |acc, &v| {
+            let diff = T::from(v).unwrap() - mean;
+            acc + diff * diff
+        });
+        results.push((combo.clone(), sum, m2));
+        return;
+    }
+    for value in range_u(min_value, scale_max_plus_1) {
+        combo.push(value);
+        generate_combinations_recursive(
+            _scale_min,
+            scale_max_plus_1,
+            value,
+            remaining - 1,
+            combo,
+            results,
+        );
+        combo.pop();
+    }
 }
 
 /// Generate all valid combinations (memory mode) with summary statistics
@@ -1132,8 +1173,9 @@ where
         rounding_error_sd,
     );
 
-    // Generate initial combinations
-    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
+    // Generate initial combinations at configurable depth
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
     // Process combinations in parallel with optional early termination
     let results: Vec<Vec<U>> = if let Some(limit) = stop_after {
@@ -1609,9 +1651,11 @@ where
 
     // Counter for tracking progress through initial combinations
     let initial_combo_counter = Arc::new(AtomicUsize::new(0));
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
     let initial_combo_total = count_initial_combinations(
         U::to_i32(&scale_min).unwrap(),
         U::to_i32(&scale_max).unwrap(),
+        depth,
     ) as usize;
 
     // Shared state for tracking min/max horns frequencies
@@ -1792,8 +1836,9 @@ where
         (all_horns, freq_state_for_stats)
     });
 
-    // Generate initial combinations
-    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1);
+    // Generate initial combinations at configurable depth
+    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
@@ -2219,8 +2264,14 @@ mod tests {
 
     #[test]
     fn test_count_initial_combinations() {
-        assert_eq!(count_initial_combinations(1, 3), 6);
-        assert_eq!(count_initial_combinations(1, 4), 10);
+        // Depth 2: C(3+1, 2) = 6, C(4+1, 2) = 10
+        assert_eq!(count_initial_combinations(1, 3, 2), 6);
+        assert_eq!(count_initial_combinations(1, 4, 2), 10);
+        // Depth 3: C(3+2, 3) = 10, C(4+2, 3) = 20
+        assert_eq!(count_initial_combinations(1, 3, 3), 10);
+        assert_eq!(count_initial_combinations(1, 4, 3), 20);
+        // Depth 1: C(range_size, 1) = range_size
+        assert_eq!(count_initial_combinations(1, 7, 1), 7);
     }
 
     #[test]
