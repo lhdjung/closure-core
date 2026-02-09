@@ -344,4 +344,94 @@ mod tests {
         let count = closure_count(3.0, 2.0, 10, 1, 7, 0.0, 0.0);
         assert!(count > 0, "Expected nonzero count for n=10 benchmark case");
     }
+
+    /// Helper: assert closure_count and closure_parallel agree for given parameters
+    fn assert_count_matches_parallel(
+        mean: f64, sd: f64, n: i32, smin: i32, smax: i32,
+        re_m: f64, re_s: f64, label: &str,
+    ) {
+        use crate::closure_parallel;
+
+        let counted = closure_count(mean, sd, n, smin, smax, re_m, re_s);
+
+        let results = closure_parallel::<f64, i32>(
+            mean, sd, n, smin, smax, re_m, re_s, 1, None, None,
+        )
+        .unwrap();
+        let enumerated = results.results.sample.len() as u64;
+
+        assert_eq!(
+            counted, enumerated,
+            "{label}: closure_count={counted}, closure_parallel={enumerated}"
+        );
+    }
+
+    /// Sweep small-n cases (n=3..8) with varied scales and statistics
+    #[test]
+    fn test_count_vs_closure_parallel_small_n() {
+        let cases: &[(f64, f64, i32, i32, i32, f64, f64, &str)] = &[
+            (2.0, 0.5, 3, 1, 3, 0.05, 0.05, "n=3, [1,3], centered"),
+            (2.0, 1.0, 3, 1, 3, 0.05, 0.05, "n=3, [1,3], high sd"),
+            (2.0, 0.5, 4, 1, 3, 0.05, 0.05, "n=4, [1,3]"),
+            (3.0, 1.0, 4, 1, 5, 0.05, 0.05, "n=4, [1,5]"),
+            (2.0, 0.5, 5, 1, 4, 0.05, 0.05, "n=5, [1,4]"),
+            (3.0, 1.5, 5, 1, 5, 0.05, 0.05, "n=5, [1,5], high sd"),
+            (2.0, 0.0, 4, 1, 3, 0.05, 0.05, "n=4, zero sd"),
+            (3.0, 0.0, 5, 1, 5, 0.05, 0.05, "n=5, zero sd"),
+            (2.5, 1.0, 5, 1, 4, 0.2, 0.2, "n=5, wide rounding"),
+            (3.0, 1.0, 6, 1, 5, 0.15, 0.15, "n=6, [1,5]"),
+            (4.0, 1.5, 8, 1, 7, 0.05, 0.05, "n=8, [1,7]"),
+            (3.5, 2.0, 8, 1, 7, 0.05, 0.05, "n=8, [1,7], high sd"),
+            (1.0, 3.0, 5, 1, 3, 0.05, 0.05, "impossible sd"),
+            (6.5, 0.5, 4, 1, 7, 0.05, 0.05, "near-top mean"),
+        ];
+        for &(mean, sd, n, smin, smax, re_m, re_s, label) in cases {
+            assert_count_matches_parallel(mean, sd, n, smin, smax, re_m, re_s, label);
+        }
+    }
+
+    /// Cross-validate with realistic n=10..30, typical Likert-scale survey parameters
+    #[test]
+    fn test_count_vs_closure_parallel_medium_n() {
+        let cases: &[(f64, f64, i32, i32, i32, f64, f64, &str)] = &[
+            // n=10: 7-point Likert, various means and SDs
+            (4.0, 1.50, 10, 1, 7, 0.05, 0.05, "n=10, [1,7], centered"),
+            (3.0, 2.00, 10, 1, 7, 0.05, 0.05, "n=10, [1,7], plan benchmark"),
+            (2.5, 1.00, 10, 1, 5, 0.05, 0.05, "n=10, [1,5], low mean"),
+            // n=12-15: 5-point and 7-point scales
+            (3.0, 1.00, 12, 1, 5, 0.05, 0.05, "n=12, [1,5]"),
+            (4.0, 2.00, 15, 1, 7, 0.05, 0.05, "n=15, [1,7]"),
+            (3.0, 1.00, 15, 1, 5, 0.10, 0.10, "n=15, [1,5], wider rounding"),
+            (4.0, 2.50, 15, 1, 7, 0.05, 0.05, "n=15, [1,7], high sd"),
+            // n=20: covers common small-group research
+            (3.0, 1.20, 20, 1, 5, 0.05, 0.05, "n=20, [1,5]"),
+            (4.0, 1.50, 20, 1, 7, 0.05, 0.05, "n=20, [1,7]"),
+            (2.5, 0.80, 20, 1, 4, 0.05, 0.05, "n=20, [1,4]"),
+            (3.0, 0.50, 20, 1, 5, 0.05, 0.05, "n=20, [1,5], low sd"),
+            (5.5, 1.00, 20, 1, 7, 0.05, 0.05, "n=20, [1,7], high mean"),
+            (1.5, 0.50, 20, 1, 5, 0.05, 0.05, "n=20, [1,5], low mean"),
+            (3.5, 1.20, 20, 1, 7, 0.10, 0.10, "n=20, [1,7], wider rounding"),
+            // n=25-30: medium groups
+            (3.0, 1.00, 25, 1, 5, 0.05, 0.05, "n=25, [1,5]"),
+            (4.0, 1.80, 25, 1, 7, 0.05, 0.05, "n=25, [1,7]"),
+            (3.5, 1.00, 30, 1, 5, 0.05, 0.05, "n=30, [1,5]"),
+            (4.0, 1.50, 30, 1, 7, 0.05, 0.05, "n=30, [1,7]"),
+        ];
+        for &(mean, sd, n, smin, smax, re_m, re_s, label) in cases {
+            assert_count_matches_parallel(mean, sd, n, smin, smax, re_m, re_s, label);
+        }
+    }
+
+    /// Cross-validate at n=40..50 — realistic group sizes where CLOSURE is slow
+    /// but still finishes within a test timeout
+    #[test]
+    fn test_count_vs_closure_parallel_large_n() {
+        let cases: &[(f64, f64, i32, i32, i32, f64, f64, &str)] = &[
+            (3.0, 1.00, 40, 1, 5, 0.05, 0.05, "n=40, [1,5]"),
+            (4.0, 1.50, 50, 1, 7, 0.05, 0.05, "n=50, [1,7]"),
+        ];
+        for &(mean, sd, n, smin, smax, re_m, re_s, label) in cases {
+            assert_count_matches_parallel(mean, sd, n, smin, smax, re_m, re_s, label);
+        }
+    }
 }
