@@ -2152,11 +2152,34 @@ where
     })
 }
 
+/// Immutable context for the recursive closure search, precomputed once per branch.
+///
+/// Bundles lookup tables and thresholds to avoid recomputing them at every node
+/// and to keep the recursive function's parameter list manageable.
+struct ClosureBranchCtx<T, U> {
+    n: usize,
+    target_sum_upper: T,
+    target_sum_lower: T,
+    m2_upper_threshold: T,   // sd_upper² * (n-1)
+    m2_lower_threshold: T,   // sd_lower² * (n-1)
+    min_scale_sum_t: Vec<Vec<T>>,  // Borrowed from caller via clone-free ref would be ideal,
+    scale_max_sum_t: Vec<T>,       // but we just store refs below
+    limit: usize,
+    /// Float value for each scale index: value_as_t[i] = T::from(scale_min + i)
+    value_as_t: Vec<T>,
+    /// Integer value for each scale index: value_as_u[i] = scale_min + i
+    value_as_u: Vec<U>,
+    /// Reciprocal table: inv_len[k] = 1.0 / k for k=1..=n (inv_len[0] is unused)
+    inv_len: Vec<T>,
+}
+
 // Collect all valid combinations from a starting point.
 //
 // Uses recursive backtracking with a single reusable Vec (push/pop) to avoid
 // heap-allocating a clone of the combination at every search tree node.
 // SD checks use squared comparisons (M2 vs threshold) to avoid sqrt() per node.
+// All generic conversions (T::from, U::to_usize) are precomputed into lookup
+// tables so the hot loop uses only array indexing and floating-point arithmetic.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn closure_branch<T, U>(
@@ -2184,8 +2207,6 @@ where
     let mut combo = start_combination;
 
     // Precompute squared SD thresholds to avoid sqrt() in the hot loop.
-    // Terminal check: m2 >= sd_lower² * (n-1)  (replaces sqrt(m2/(n-1)) >= sd_lower)
-    // Pruning check:  m2 <= sd_upper² * (n-1)  (replaces sqrt(m2/(n-1)) <= sd_upper)
     let n_minus_1_float = T::from(n - 1).unwrap();
     // When sd_lower <= 0, the original check sqrt(m2/(n-1)) >= sd_lower is trivially
     // true (sqrt is non-negative). Set threshold to zero so m2 >= 0 always passes.
@@ -2196,20 +2217,46 @@ where
     };
     let m2_upper_threshold = sd_upper * sd_upper * n_minus_1_float;
 
-    closure_branch_recurse(
-        &mut combo,
-        running_sum_init,
-        running_m2_init,
+    // Precompute scale value lookup tables (eliminates T::from / U arithmetic per iteration)
+    let scale_range = min_scale_sum_t.len();
+    let mut value_as_t = Vec::with_capacity(scale_range);
+    let mut value_as_u = Vec::with_capacity(scale_range);
+    for v in range_u(scale_min, scale_max_plus_1) {
+        value_as_t.push(T::from(v).unwrap());
+        value_as_u.push(v);
+    }
+
+    // Precompute reciprocal table: inv_len[k] = 1/k (eliminates division per node)
+    let mut inv_len = Vec::with_capacity(n + 1);
+    inv_len.push(T::zero()); // inv_len[0] unused
+    for k in 1..=n {
+        inv_len.push(T::one() / T::from(k).unwrap());
+    }
+
+    // Compute the starting min_value_idx from the last element of the start combination
+    let last_value = combo[combo.len() - 1];
+    let min_value_idx = U::to_usize(&(last_value - scale_min)).unwrap();
+
+    let ctx = ClosureBranchCtx {
         n,
         target_sum_upper,
         target_sum_lower,
         m2_upper_threshold,
         m2_lower_threshold,
-        min_scale_sum_t,
-        scale_max_sum_t,
-        scale_max_plus_1,
-        scale_min,
+        min_scale_sum_t: min_scale_sum_t.to_vec(),
+        scale_max_sum_t: scale_max_sum_t.to_vec(),
         limit,
+        value_as_t,
+        value_as_u,
+        inv_len,
+    };
+
+    closure_branch_recurse(
+        &mut combo,
+        running_sum_init,
+        running_m2_init,
+        min_value_idx,
+        &ctx,
         &mut results,
     );
 
@@ -2220,21 +2267,14 @@ where
 ///
 /// Extends `combo` one element at a time (push on entry, pop on exit),
 /// reusing a single Vec allocation across the entire search tree.
-#[allow(clippy::too_many_arguments)]
+/// The inner loop iterates over precomputed usize indices, avoiding all
+/// generic trait conversions (T::from, U::to_usize) in the hot path.
 fn closure_branch_recurse<T, U>(
     combo: &mut Vec<U>,
     running_sum: T,
     running_m2: T,
-    n: usize,
-    target_sum_upper: T,
-    target_sum_lower: T,
-    m2_upper_threshold: T,  // sd_upper² * (n-1)
-    m2_lower_threshold: T,  // sd_lower² * (n-1)
-    min_scale_sum_t: &[Vec<T>],
-    scale_max_sum_t: &[T],
-    scale_max_plus_1: U,
-    scale_min: U,
-    limit: usize,
+    min_value_idx: usize,  // index into ctx.value_as_t/value_as_u for the minimum next value
+    ctx: &ClosureBranchCtx<T, U>,
     results: &mut Vec<Vec<U>>,
 ) where
     T: FloatType,
@@ -2243,71 +2283,56 @@ fn closure_branch_recurse<T, U>(
     let current_len = combo.len();
 
     // Terminal: combination is complete
-    if current_len >= n {
+    if current_len >= ctx.n {
         // Check SD lower bound: m2 >= sd_lower² * (n-1), no sqrt needed
-        if running_m2 >= m2_lower_threshold {
+        if running_m2 >= ctx.m2_lower_threshold {
             results.push(combo.clone()); // Only clone when emitting a result
-            if results.len() >= limit {
-                return;
-            }
         }
         return;
     }
 
-    let n_left = n - current_len - 1;
+    let n_left = ctx.n - current_len - 1;
     let next_n = current_len + 1;
-    let current_mean = running_sum / T::from(current_len).unwrap();
-    let last_value = combo[current_len - 1];
+    let current_mean = running_sum * ctx.inv_len[current_len];
+    let inv_next_n = ctx.inv_len[next_n];
+    let scale_range = ctx.value_as_t.len();
 
-    for next_value in range_u(last_value, scale_max_plus_1) {
-        let next_value_as_t = T::from(next_value).unwrap();
+    for vi in min_value_idx..scale_range {
+        let next_value_as_t = ctx.value_as_t[vi];
         let next_sum = running_sum + next_value_as_t;
 
-        let value_index = U::to_usize(&(next_value - scale_min)).unwrap();
+        // vi is already the value_index for min_scale_sum_t
+        let minmean = next_sum + ctx.min_scale_sum_t[vi][n_left];
+        if minmean > ctx.target_sum_upper {
+            break;
+        }
 
-        if value_index < min_scale_sum_t.len() && n_left < min_scale_sum_t[value_index].len() {
-            let minmean = next_sum + min_scale_sum_t[value_index][n_left];
-            if minmean > target_sum_upper {
-                break;
-            }
+        let maxmean = next_sum + ctx.scale_max_sum_t[n_left];
+        if maxmean < ctx.target_sum_lower {
+            continue;
+        }
 
-            if n_left < scale_max_sum_t.len() {
-                let maxmean = next_sum + scale_max_sum_t[n_left];
-                if maxmean < target_sum_lower {
-                    continue;
-                }
+        let next_mean = next_sum * inv_next_n;
+        let delta = next_value_as_t - current_mean;
+        let delta2 = next_value_as_t - next_mean;
+        let next_m2 = running_m2 + delta * delta2;
 
-                let next_mean = next_sum / T::from(next_n).unwrap();
-                let delta = next_value_as_t - current_mean;
-                let delta2 = next_value_as_t - next_mean;
-                let next_m2 = running_m2 + delta * delta2;
+        // SD upper bound pruning: m2 <= sd_upper² * (n-1), no sqrt needed
+        if next_m2 <= ctx.m2_upper_threshold {
+            combo.push(ctx.value_as_u[vi]);
+            closure_branch_recurse(
+                combo,
+                next_sum,
+                next_m2,
+                vi, // next value must be >= this value
+                ctx,
+                results,
+            );
+            combo.pop();
 
-                // SD upper bound pruning: m2 <= sd_upper² * (n-1), no sqrt needed
-                if next_m2 <= m2_upper_threshold {
-                    combo.push(next_value);
-                    closure_branch_recurse(
-                        combo,
-                        next_sum,
-                        next_m2,
-                        n,
-                        target_sum_upper,
-                        target_sum_lower,
-                        m2_upper_threshold,
-                        m2_lower_threshold,
-                        min_scale_sum_t,
-                        scale_max_sum_t,
-                        scale_max_plus_1,
-                        scale_min,
-                        limit,
-                        results,
-                    );
-                    combo.pop();
-
-                    // Early exit if we've hit the limit
-                    if results.len() >= limit {
-                        return;
-                    }
-                }
+            // Early exit if we've hit the limit
+            if results.len() >= ctx.limit {
+                return;
             }
         }
     }
