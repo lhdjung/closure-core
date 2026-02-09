@@ -17,7 +17,7 @@ use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
@@ -446,13 +446,6 @@ fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
     }
 }
 
-// Define the Combination struct
-#[derive(Clone)]
-struct Combination<T, U> {
-    values: Vec<U>,
-    running_sum: T,
-    running_m2: T,
-}
 
 /// Count initial combinations with replacement
 ///
@@ -2159,7 +2152,11 @@ where
     })
 }
 
-// Collect all valid combinations from a starting point
+// Collect all valid combinations from a starting point.
+//
+// Uses recursive backtracking with a single reusable Vec (push/pop) to avoid
+// heap-allocating a clone of the combination at every search tree node.
+// SD checks use squared comparisons (M2 vs threshold) to avoid sqrt() per node.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn closure_branch<T, U>(
@@ -2182,87 +2179,138 @@ where
     T: FloatType,
     U: IntegerType,
 {
-    let mut stack = VecDeque::with_capacity(n * 2);
     let mut results = Vec::new();
-
-    // Use usize::MAX as sentinel when no limit is specified
     let limit = stop_after.unwrap_or(usize::MAX);
+    let mut combo = start_combination;
 
-    stack.push_back(Combination {
-        values: start_combination.clone(),
-        running_sum: running_sum_init,
-        running_m2: running_m2_init,
-    });
+    // Precompute squared SD thresholds to avoid sqrt() in the hot loop.
+    // Terminal check: m2 >= sd_lower² * (n-1)  (replaces sqrt(m2/(n-1)) >= sd_lower)
+    // Pruning check:  m2 <= sd_upper² * (n-1)  (replaces sqrt(m2/(n-1)) <= sd_upper)
+    let n_minus_1_float = T::from(n - 1).unwrap();
+    // When sd_lower <= 0, the original check sqrt(m2/(n-1)) >= sd_lower is trivially
+    // true (sqrt is non-negative). Set threshold to zero so m2 >= 0 always passes.
+    let m2_lower_threshold = if sd_lower <= T::zero() {
+        T::zero()
+    } else {
+        sd_lower * sd_lower * n_minus_1_float
+    };
+    let m2_upper_threshold = sd_upper * sd_upper * n_minus_1_float;
 
-    while let Some(current) = stack.pop_back() {
-        if current.values.len() >= n {
-            let n_minus_1_float = T::from(n - 1).unwrap();
-            let current_std = (current.running_m2 / n_minus_1_float).sqrt();
-            if current_std >= sd_lower {
-                results.push(current.values);
-                // Early exit if we've reached the limit
-                if results.len() >= limit {
-                    results.truncate(limit);
-                    return results;
-                }
+    closure_branch_recurse(
+        &mut combo,
+        running_sum_init,
+        running_m2_init,
+        n,
+        target_sum_upper,
+        target_sum_lower,
+        m2_upper_threshold,
+        m2_lower_threshold,
+        min_scale_sum_t,
+        scale_max_sum_t,
+        scale_max_plus_1,
+        scale_min,
+        limit,
+        &mut results,
+    );
+
+    results
+}
+
+/// Recursive backtracking core for closure_branch.
+///
+/// Extends `combo` one element at a time (push on entry, pop on exit),
+/// reusing a single Vec allocation across the entire search tree.
+#[allow(clippy::too_many_arguments)]
+fn closure_branch_recurse<T, U>(
+    combo: &mut Vec<U>,
+    running_sum: T,
+    running_m2: T,
+    n: usize,
+    target_sum_upper: T,
+    target_sum_lower: T,
+    m2_upper_threshold: T,  // sd_upper² * (n-1)
+    m2_lower_threshold: T,  // sd_lower² * (n-1)
+    min_scale_sum_t: &[Vec<T>],
+    scale_max_sum_t: &[T],
+    scale_max_plus_1: U,
+    scale_min: U,
+    limit: usize,
+    results: &mut Vec<Vec<U>>,
+) where
+    T: FloatType,
+    U: IntegerType,
+{
+    let current_len = combo.len();
+
+    // Terminal: combination is complete
+    if current_len >= n {
+        // Check SD lower bound: m2 >= sd_lower² * (n-1), no sqrt needed
+        if running_m2 >= m2_lower_threshold {
+            results.push(combo.clone()); // Only clone when emitting a result
+            if results.len() >= limit {
+                return;
             }
-            continue;
         }
+        return;
+    }
 
-        // Calculate remaining items to add
-        let current_len = current.values.len();
-        let n_left = n - current_len - 1; // How many more items after the next one
-        let next_n = current_len + 1;
+    let n_left = n - current_len - 1;
+    let next_n = current_len + 1;
+    let current_mean = running_sum / T::from(current_len).unwrap();
+    let last_value = combo[current_len - 1];
 
-        // Get current mean
-        let current_mean = current.running_sum / T::from(current_len).unwrap();
+    for next_value in range_u(last_value, scale_max_plus_1) {
+        let next_value_as_t = T::from(next_value).unwrap();
+        let next_sum = running_sum + next_value_as_t;
 
-        // Get the last value
-        let last_value = current.values[current_len - 1];
+        let value_index = U::to_usize(&(next_value - scale_min)).unwrap();
 
-        for next_value in range_u(last_value, scale_max_plus_1) {
-            let next_value_as_t = T::from(next_value).unwrap();
-            let next_sum = current.running_sum + next_value_as_t;
+        if value_index < min_scale_sum_t.len() && n_left < min_scale_sum_t[value_index].len() {
+            let minmean = next_sum + min_scale_sum_t[value_index][n_left];
+            if minmean > target_sum_upper {
+                break;
+            }
 
-            // Calculate index for 2D array access
-            // Index is (next_value - scale_min) to map to 0-based array
-            let value_index = U::to_usize(&(next_value - scale_min)).unwrap();
-
-            // Safe indexing with bounds check
-            if value_index < min_scale_sum_t.len() && n_left < min_scale_sum_t[value_index].len() {
-                // Access as min_scale_sum_t[next_value-scale_min][n_left]
-                let minmean = next_sum + min_scale_sum_t[value_index][n_left];
-                if minmean > target_sum_upper {
-                    break; // Early termination
+            if n_left < scale_max_sum_t.len() {
+                let maxmean = next_sum + scale_max_sum_t[n_left];
+                if maxmean < target_sum_lower {
+                    continue;
                 }
 
-                // Safe indexing with bounds check
-                if n_left < scale_max_sum_t.len() {
-                    let maxmean = next_sum + scale_max_sum_t[n_left];
-                    if maxmean < target_sum_lower {
-                        continue;
-                    }
+                let next_mean = next_sum / T::from(next_n).unwrap();
+                let delta = next_value_as_t - current_mean;
+                let delta2 = next_value_as_t - next_mean;
+                let next_m2 = running_m2 + delta * delta2;
 
-                    let next_mean = next_sum / T::from(next_n).unwrap();
-                    let delta = next_value_as_t - current_mean;
-                    let delta2 = next_value_as_t - next_mean;
-                    let next_m2 = current.running_m2 + delta * delta2;
+                // SD upper bound pruning: m2 <= sd_upper² * (n-1), no sqrt needed
+                if next_m2 <= m2_upper_threshold {
+                    combo.push(next_value);
+                    closure_branch_recurse(
+                        combo,
+                        next_sum,
+                        next_m2,
+                        n,
+                        target_sum_upper,
+                        target_sum_lower,
+                        m2_upper_threshold,
+                        m2_lower_threshold,
+                        min_scale_sum_t,
+                        scale_max_sum_t,
+                        scale_max_plus_1,
+                        scale_min,
+                        limit,
+                        results,
+                    );
+                    combo.pop();
 
-                    let min_sd = (next_m2 / T::from(n - 1).unwrap()).sqrt();
-                    if min_sd <= sd_upper {
-                        let mut new_values = current.values.clone();
-                        new_values.push(next_value);
-                        stack.push_back(Combination {
-                            values: new_values,
-                            running_sum: next_sum,
-                            running_m2: next_m2,
-                        });
+                    // Early exit if we've hit the limit
+                    if results.len() >= limit {
+                        return;
                     }
                 }
             }
         }
     }
-    results
 }
 
 #[cfg(test)]
