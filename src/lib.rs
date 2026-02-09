@@ -37,9 +37,12 @@ impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send
 
 use thiserror::Error;
 
+mod count;
 mod utils;
 mod sprite;
 mod sprite_types;
+
+pub use count::closure_count;
 
 #[derive(Debug, Error)]
 pub enum ParameterError {
