@@ -206,7 +206,7 @@ impl FrequencySamplesColumn {
         Self { repetitions }
     }
 
-    /// Convert to a Vec<String> for compatibility with existing code
+    /// Convert to a `Vec<String>` for compatibility with existing code
     ///
     /// Returns a vector with category names repeated x times each, in declaration order.
     pub fn to_vec(&self) -> Vec<String> {
@@ -388,6 +388,17 @@ pub struct ResultListFromMeanSdN<U> {
     pub results: ResultsTable<U>,
 }
 
+impl<U: Integer + ToPrimitive + Copy> ResultListFromMeanSdN<U> {
+    /// Create an empty result list for cases with no valid distributions
+    ///
+    /// Returns a `ResultListFromMeanSdN` with all metrics set to `NaN` or zero
+    /// (depending on the metric), and with empty result vectors.
+    /// Used when CLOSURE or SPRITE fail to find any distributions.
+    pub fn empty(scale_min: U, scale_max: U) -> Self {
+        empty_result_list(scale_min, scale_max)
+    }
+}
+
 /// Context for CLOSURE search containing precomputed bounds and lookup tables
 /// for efficient DFS pruning during sample space exploration
 struct ClosureSearchContext<T, U> {
@@ -558,18 +569,7 @@ fn mad(values: &[f64], median_val: f64) -> f64 {
     median(&deviations)
 }
 
-/// Create an empty result list for cases with no valid distributions
-///
-/// Returns a ResultListFromMeanSdN with all metrics set to NaN or zero
-/// (depending on the metric), and with empty result vectors. Used when no
-/// distributions are found or when an algorithm returns early with no results.
-///
-/// # Parameters
-/// - `scale_min`: Minimum value in the scale range
-/// - `scale_max`: Maximum value in the scale range
-///
-/// # Returns
-/// An empty ResultListFromMeanSdN<U> with appropriate structure
+/// Used by `ResultListFromMeanSdN::empty()`
 pub(crate) fn empty_result_list<U>(scale_min: U, scale_max: U) -> ResultListFromMeanSdN<U>
 where
     U: Integer + ToPrimitive + Copy,
