@@ -1170,7 +1170,7 @@ where
     );
 
     // Generate initial combinations at configurable depth
-    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let depth = 2;
     let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
     // Process combinations in parallel with optional early termination
@@ -1650,7 +1650,7 @@ where
 
     // Counter for tracking progress through initial combinations
     let initial_combo_counter = Arc::new(AtomicUsize::new(0));
-    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let depth = 2;
     let initial_combo_total = count_initial_combinations(
         U::to_i32(&scale_min).unwrap(),
         U::to_i32(&scale_max).unwrap(),
@@ -1836,7 +1836,7 @@ where
     });
 
     // Generate initial combinations at configurable depth
-    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
+    let depth = 2;
     let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
