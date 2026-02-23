@@ -1156,10 +1156,32 @@ where
     let granule_sd = T::from(0.1f64).unwrap().powi(params.sd_prec) / T::from(2.0).unwrap()
         + T::from(DUST).unwrap();
 
+    // Precompute fixed-part sums (constant for the lifetime of this attempt)
+    let fixed_sum: i64 = params.fixed_responses_scaled.iter()
+        .map(|v| U::to_i64(v).unwrap())
+        .sum();
+    let fixed_sum_sq: i64 = params.fixed_responses_scaled.iter()
+        .map(|v| { let v64 = U::to_i64(v).unwrap(); v64 * v64 })
+        .sum();
+
+    // Running sums for the mutable part of the distribution
+    let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
+    let mut running_sum_sq: i64 = vec.iter()
+        .map(|v| { let v64 = U::to_i64(v).unwrap(); v64 * v64 })
+        .sum();
+
+    // Hoisted constant: target mean rounded to reporting precision
+    let target_mean_rounded =
+        T::from(round_f64(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
+
     for _ in 1..=max_loops_sd {
-        // Check for success
-        let current_sd: T =
-            compute_sd_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
+        // Check for success (O(1) using running sums)
+        let current_sd: T = T::from(sd_from_running(
+            running_sum + fixed_sum,
+            running_sum_sq + fixed_sum_sq,
+            n_usize,
+            params.scale_factor,
+        )).unwrap();
 
         if (current_sd - params.sd).abs() <= granule_sd {
             // Success - combine vec with fixed responses
@@ -1168,16 +1190,22 @@ where
             return Ok(full_vec);
         }
 
-        // Shift values to adjust SD
-        shift_values_internal(&mut vec, params, rng);
+        // Shift values to adjust SD (updates running sums in O(1))
+        let increase_sd = current_sd < params.sd;
+        shift_values_internal(
+            &mut vec, params, increase_sd,
+            &mut running_sum, &mut running_sum_sq,
+            rng,
+        );
 
-        // Check for and correct mean drift
-        let current_mean =
-            compute_mean_scaled(&vec, &params.fixed_responses_scaled, params.scale_factor);
-        let target_mean_rounded =
-            T::from(round_f64(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
+        // Check for and correct mean drift (O(1) using running sum)
+        let current_mean_f64 = mean_from_running(
+            running_sum + fixed_sum,
+            n_usize,
+            params.scale_factor,
+        );
         let current_mean_rounded =
-            T::from(round_f64(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
 
         if !is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1185,6 +1213,11 @@ where
             DUST,
         ) {
             adjust_mean_internal(&mut vec, params, 20, rng).unwrap_or(());
+            // Re-sync: adjust_mean modified vec (rare path, O(n) is acceptable here)
+            running_sum = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
+            running_sum_sq = vec.iter()
+                .map(|v| { let v64 = U::to_i64(v).unwrap(); v64 * v64 })
+                .sum();
         }
     }
 
@@ -1209,13 +1242,22 @@ where
 
     let target_mean = params.mean;
 
+    // Compute fixed sum once; maintain running sum for vec
+    let fixed_sum: i64 = params.fixed_responses_scaled.iter()
+        .map(|v| U::to_i64(v).unwrap())
+        .sum();
+    let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
+    let n_total = vec.len() + params.fixed_responses_scaled.len();
+
+    // Hoist constant: target mean rounded to reporting precision
+    let target_mean_rounded =
+        T::from(round_f64(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
+
     for _ in 0..max_iter {
-        let current_mean =
-            compute_mean_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
-        let target_mean_rounded =
-            T::from(round_f64(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
+        let current_mean_f64 =
+            mean_from_running(running_sum + fixed_sum, n_total, params.scale_factor);
         let current_mean_rounded =
-            T::from(round_f64(T::to_f64(&current_mean).unwrap(), params.m_prec)).unwrap();
+            T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
 
         if is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1225,6 +1267,7 @@ where
             return Ok(());
         }
 
+        let current_mean = T::from(current_mean_f64).unwrap();
         let increase_mean = current_mean < target_mean;
         let min_poss_val = params.possible_values_scaled[0];
         let max_poss_val = params.possible_values_scaled[params.possible_values_scaled.len() - 1];
@@ -1254,6 +1297,9 @@ where
                         pos.saturating_sub(1)
                     };
                     if let Some(&new_val) = params.possible_values_scaled.get(new_pos) {
+                        let old_i64 = U::to_i64(&current_val).unwrap();
+                        let new_i64 = U::to_i64(&new_val).unwrap();
+                        running_sum += new_i64 - old_i64;
                         vec[index_to_try] = new_val;
                         changed = true;
                         break;
@@ -1279,15 +1325,15 @@ where
 fn shift_values_internal<T, U>(
     vec: &mut [U],
     params: &SpriteParams<T, U>,
+    increase_sd: bool,
+    running_sum: &mut i64,
+    running_sum_sq: &mut i64,
     rng: &mut impl Rng,
 ) -> bool
 where
     T: FloatType,
     U: IntegerType,
 {
-    let current_sd: T = compute_sd_scaled(vec, &params.fixed_responses_scaled, params.scale_factor);
-    let increase_sd = current_sd < params.sd;
-
     let max_attempts = vec.len() * 2;
 
     for _ in 0..max_attempts {
@@ -1343,6 +1389,11 @@ where
                 if !is_pointless {
                     vec[i] = val1_new;
                     vec[j] = val2_new;
+                    *running_sum +=
+                        (val1_new_i64 - val1_i64) + (val2_new_i64 - val2_i64);
+                    *running_sum_sq +=
+                        (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
+                        + (val2_new_i64 * val2_new_i64 - val2_i64 * val2_i64);
                     return true;
                 }
             }
@@ -1353,6 +1404,7 @@ where
 }
 
 /// Compute mean from scaled integer values
+#[allow(dead_code)]
 fn compute_mean_scaled<T, U>(vec: &[U], fixed_vals: &[U], scale_factor: u32) -> T
 where
     T: FloatType,
@@ -1367,6 +1419,7 @@ where
 }
 
 /// Compute standard deviation from scaled integer values
+#[allow(dead_code)]
 fn compute_sd_scaled<T, U>(vec: &[U], fixed_vals: &[U], scale_factor: u32) -> T
 where
     T: FloatType,
@@ -1420,6 +1473,29 @@ fn std_dev(data: &[f64]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
+/// Compute mean from running integer sums (O(1)).
+/// `total_sum` is the sum of all scaled integers (vec + fixed combined).
+#[inline]
+fn mean_from_running(total_sum: i64, n: usize, scale_factor: u32) -> f64 {
+    total_sum as f64 / (scale_factor as f64 * n as f64)
+}
+
+/// Compute sample SD from running integer sums (O(1)).
+/// Uses the computational formula: Var = (n·Σx² − (Σx)²) / (n·(n−1)·s²)
+/// where s = scale_factor.  Returns 0.0 when n < 2 or variance ≤ 0.
+#[inline]
+fn sd_from_running(total_sum: i64, total_sum_sq: i64, n: usize, scale_factor: u32) -> f64 {
+    if n < 2 {
+        return 0.0;
+    }
+    let n_f = n as f64;
+    let scale_f = scale_factor as f64;
+    let numerator = n_f * total_sum_sq as f64 - (total_sum as f64).powi(2);
+    if numerator <= 0.0 {
+        return 0.0;
+    }
+    (numerator / (scale_f * scale_f * n_f * (n_f - 1.0))).sqrt()
+}
 
 #[cfg(test)]
 pub mod tests {
