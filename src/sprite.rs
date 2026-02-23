@@ -26,6 +26,9 @@ const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
 const MAX_DUP_LOOPS: u32 = 20;
 const DUST: f64 = 1e-12;
+/// Lincoln-Petersen coverage target: stop when N̂ = n_found + cumulative_dup and
+/// n_found / N̂ ≥ this threshold (i.e. we estimate ≥ 99 % of all valid distributions found).
+const LP_COVERAGE_THRESHOLD: f64 = 0.99;
 
 // Internal struct to hold the final, validated parameters (generic version)
 #[derive(Debug)]
@@ -1021,13 +1024,12 @@ where
     T: FloatType,
     U: IntegerType,
 {
-    // Shared state protected by mutexes
-    let unique_distributions = Arc::new(Mutex::new(HashSet::<Vec<i64>>::new()));
-    let results = Arc::new(Mutex::new(Vec::<Vec<U>>::new()));
-
-    // Atomic counters for tracking failures and duplicates
-    let total_failures = Arc::new(AtomicU32::new(0));
-    let total_duplicates = Arc::new(AtomicU32::new(0));
+    // All state lives on the main thread; only the early-exit signal is shared.
+    let mut unique_distributions = HashSet::<Vec<i64>>::new();
+    let mut results = Vec::<Vec<U>>::new();
+    let mut total_failures: u32 = 0;
+    // Cumulative duplicates across all batches (never reset); used by LP estimator.
+    let mut cumulative_duplicates: u64 = 0;
     let should_stop = Arc::new(AtomicBool::new(false));
 
     // Process in batches for better control and early termination
@@ -1035,104 +1037,83 @@ where
     let max_iterations = n_distributions * MAX_DUP_LOOPS as usize;
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
-        if should_stop.load(Ordering::Relaxed) {
+        if should_stop.load(Ordering::Relaxed) || results.len() >= n_distributions {
             break;
         }
 
-        // Check if we already have enough distributions
-        {
-            let unique = unique_distributions.lock().unwrap();
-            if unique.len() >= n_distributions {
+        let batch_end = (batch_start + batch_size).min(max_iterations);
+
+        // Parallel phase: pure computation, zero shared-state locking.
+        // Items where should_stop is already set are skipped.
+        let batch_results: Vec<Result<Vec<U>, String>> = (batch_start..batch_end)
+            .into_par_iter()
+            .filter(|_| !should_stop.load(Ordering::Relaxed))
+            .map(|_| {
+                let mut thread_rng = rand::rng();
+                find_distribution_internal(params, &mut thread_rng)
+            })
+            .collect();
+
+        // Serial phase: merge results into local state — no locking needed.
+        for result in batch_results {
+            match result {
+                Ok(mut distribution) => {
+                    distribution
+                        .sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
+                    let hashable: Vec<i64> =
+                        distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
+                    if unique_distributions.insert(hashable) {
+                        results.push(distribution);
+                        total_failures = 0;
+                    } else {
+                        cumulative_duplicates += 1;
+                    }
+                }
+                Err(_) => {
+                    total_failures += 1;
+                }
+            }
+            if results.len() >= n_distributions {
+                should_stop.store(true, Ordering::Relaxed);
                 break;
             }
         }
 
-        let batch_end = (batch_start + batch_size).min(max_iterations);
-        let batch_range = batch_start..batch_end;
-
-        // Parallel processing of the current batch using rayon
-        batch_range.into_par_iter().for_each(|_| {
-            if should_stop.load(Ordering::Relaxed) {
-                return;
-            }
-
-            // Check whether the target number of distributions was reached
-            {
-                let unique = unique_distributions.lock().unwrap();
-                if unique.len() >= n_distributions {
-                    should_stop.store(true, Ordering::Relaxed);
-                    return;
-                }
-            }
-
-            // Use thread-local RNG for thread safety
-            let mut thread_rng = rand::rng();
-
-            match find_distribution_internal(params, &mut thread_rng) {
-                Ok(mut distribution) => {
-                    distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
-
-                    // Convert to hashable format for uniqueness check
-                    let hashable_values: Vec<i64> =
-                        distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
-
-                    let mut unique = unique_distributions.lock().unwrap();
-                    if unique.insert(hashable_values) {
-                        results.lock().unwrap().push(distribution);
-                        total_failures.store(0, Ordering::Relaxed);
-                        total_duplicates.store(0, Ordering::Relaxed);
-                    } else {
-                        total_duplicates.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                Err(_) => {
-                    total_failures.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        });
-
         // Check early stopping conditions after each batch
-        let failures = total_failures.load(Ordering::Relaxed);
-        let duplicates = total_duplicates.load(Ordering::Relaxed);
-
-        if failures >= 1000 {
+        if total_failures >= 1000 {
             eprintln!(
                 "Warning: Too many failed attempts ({}). Stopping search.",
-                failures
+                total_failures
             );
-            should_stop.store(true, Ordering::Relaxed);
             break;
         }
 
-        let n_found = unique_distributions.lock().unwrap().len() as f64;
-        let max_duplications = if n_found > 0.0 {
-            (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32
-        } else {
-            1000
-        }
-        .max(1000);
-
-        if duplicates > max_duplications {
-            eprintln!(
-                "Warning: Found too many duplicate distributions ({}). Stopping search.",
-                duplicates
-            );
-            should_stop.store(true, Ordering::Relaxed);
-            break;
+        // Lincoln-Petersen coverage estimate:
+        // N̂ = n_found + cumulative_duplicates (all draws = n_found unique + d duplicate)
+        // coverage = n_found / N̂ — stop when we estimate ≥ LP_COVERAGE_THRESHOLD found.
+        let n_found = unique_distributions.len() as f64;
+        if n_found > 0.0 && cumulative_duplicates > 0 {
+            let n_hat = n_found + cumulative_duplicates as f64;
+            let coverage = n_found / n_hat;
+            if coverage >= LP_COVERAGE_THRESHOLD {
+                eprintln!(
+                    "Warning: Estimated {:.1}% of all valid distributions found ({}). Stopping search.",
+                    coverage * 100.0,
+                    unique_distributions.len()
+                );
+                break;
+            }
         }
     }
 
-    let final_results = results.lock().unwrap().clone();
-    let unique_count = unique_distributions.lock().unwrap().len();
-
-    if unique_count < n_distributions {
+    if results.len() < n_distributions {
         eprintln!(
             "Only {} matching distributions could be found.",
-            unique_count
+            results.len()
         );
     }
 
-    final_results
+    results
 }
 
 /// Internal function to find a single distribution
@@ -1150,17 +1131,76 @@ where
         return Err("No possible values to sample from for initialization.".to_string());
     }
 
-    // Initialize with random scaled values
-    let mut vec: Vec<U> = (0..r_n)
-        .map(|_| *params.possible_values_scaled.choose(rng).unwrap())
-        .collect();
-
-    // Initial mean adjustment
     let n_u32 = U::to_u32(&params.n).unwrap();
-    let max_loops_mean = n_u32 * params.possible_values_scaled.len() as u32;
+
+    // Direct mean initialization (O(n)):
+    // Fill r_n slots with floor_val; raise exactly n_ceil of them to ceil_val so
+    // the integer sum equals the target sum exactly — no iterative adjustment needed.
+    let pv = &params.possible_values_scaled;
+    let mean_f64 = T::to_f64(&params.mean).unwrap();
+    let scale_f64 = params.scale_factor as f64;
+    let mean_scaled_f64 = mean_f64 * scale_f64;
+
+    let fixed_sum_init: i64 = params
+        .fixed_responses_scaled
+        .iter()
+        .map(|v| U::to_i64(v).unwrap())
+        .sum();
+    let total_target_sum: i64 =
+        (mean_f64 * n_usize as f64 * scale_f64).round() as i64;
+    let vec_target_sum = total_target_sum - fixed_sum_init;
+
+    // Index of the largest pv entry ≤ mean_scaled (floor)
+    let floor_idx = pv
+        .partition_point(|v| (U::to_i64(v).unwrap() as f64) <= mean_scaled_f64 + 1e-9)
+        .saturating_sub(1);
+
+    let mut vec: Vec<U> = if !pv.is_empty() && r_n > 0 {
+        let floor_i64 = U::to_i64(&pv[floor_idx]).unwrap();
+        let direct: Option<Vec<U>> = if floor_idx + 1 < pv.len() {
+            let ceil_i64 = U::to_i64(&pv[floor_idx + 1]).unwrap();
+            let step = ceil_i64 - floor_i64;
+            let deficit = vec_target_sum - r_n as i64 * floor_i64;
+            if step > 0 && deficit >= 0 && deficit % step == 0 {
+                let n_ceil = (deficit / step) as usize;
+                if n_ceil <= r_n {
+                    let ceil_val = pv[floor_idx + 1];
+                    let floor_val = pv[floor_idx];
+                    let mut v: Vec<U> = (0..r_n)
+                        .map(|k| if k < n_ceil { ceil_val } else { floor_val })
+                        .collect();
+                    v.shuffle(rng);
+                    Some(v)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            // Mean is at the maximum; all elements must equal floor_val
+            if vec_target_sum == r_n as i64 * floor_i64 {
+                Some(vec![pv[floor_idx]; r_n])
+            } else {
+                None
+            }
+        };
+        direct.unwrap_or_else(|| {
+            // Fallback: random fill (handles edge cases from restrictions)
+            (0..r_n)
+                .map(|_| *pv.choose(rng).unwrap())
+                .collect()
+        })
+    } else {
+        Vec::new()
+    };
+
+    // Mean correction: no-op on the direct path (sum is exact); recovers the
+    // fallback path or any floating-point edge case.
+    let max_loops_mean = n_u32 * pv.len() as u32;
     adjust_mean_internal(&mut vec, params, max_loops_mean, rng)?;
 
-    let max_loops_sd = (n_u32 * (params.possible_values_scaled.len().pow(2) as u32))
+    let max_loops_sd = (n_u32 * (pv.len().pow(2) as u32))
         .clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
     let granule_sd = T::from(0.1f64).unwrap().powi(params.sd_prec) / T::from(2.0).unwrap()
         + T::from(DUST).unwrap();
