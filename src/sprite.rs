@@ -51,6 +51,8 @@ where
     fixed_responses_scaled: Vec<U>,
     /// The number of fixed responses
     n_fixed: usize,
+    /// Maps each scaled value (as i64) to its index in `possible_values_scaled` (O(1) lookup)
+    value_to_index: HashMap<i64, usize>,
 }
 
 /// Infer precision (decimal places) from rounding error
@@ -244,6 +246,12 @@ where
 
     let n_fixed = fixed_responses_scaled.len();
 
+    let value_to_index: HashMap<i64, usize> = final_possible_values_scaled
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (U::to_i64(v).unwrap(), i))
+        .collect();
+
     Ok(SpriteParams {
         mean,
         sd,
@@ -256,6 +264,7 @@ where
         possible_values_scaled: final_possible_values_scaled,
         fixed_responses_scaled,
         n_fixed,
+        value_to_index,
     })
 }
 
@@ -1286,11 +1295,7 @@ where
             };
 
             if is_valid_to_bump {
-                if let Some(pos) = params
-                    .possible_values_scaled
-                    .iter()
-                    .position(|&p| U::to_i64(&p).unwrap() == U::to_i64(&current_val).unwrap())
-                {
+                if let Some(&pos) = params.value_to_index.get(&U::to_i64(&current_val).unwrap()) {
                     let new_pos = if increase_mean {
                         pos + 1
                     } else {
@@ -1335,6 +1340,8 @@ where
     U: IntegerType,
 {
     let max_attempts = vec.len() * 2;
+    let pv = &params.possible_values_scaled;
+    let scale_f = params.scale_factor as f64;
 
     for _ in 0..max_attempts {
         let i = rng.random_range(0..vec.len());
@@ -1346,56 +1353,160 @@ where
             continue;
         }
 
-        let val1 = vec[i];
-        let val2 = vec[j];
-        let val1_i64 = U::to_i64(&val1).unwrap();
-        let val2_i64 = U::to_i64(&val2).unwrap();
+        let val1_i64 = U::to_i64(&vec[i]).unwrap();
+        let val2_i64 = U::to_i64(&vec[j]).unwrap();
 
-        // Find next larger value for val1
-        let val1_new_opt = params
-            .possible_values_scaled
-            .iter()
-            .find(|&&v| U::to_i64(&v).unwrap() > val1_i64);
+        // O(1) index lookups
+        let val1_idx = match params.value_to_index.get(&val1_i64) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+        let val2_idx = match params.value_to_index.get(&val2_i64) {
+            Some(&idx) => idx,
+            None => continue,
+        };
 
-        // Find next smaller value for val2
-        let val2_new_opt = params
-            .possible_values_scaled
-            .iter()
-            .rev()
-            .find(|&&v| U::to_i64(&v).unwrap() < val2_i64);
+        // Next larger for val1, next smaller for val2 (O(1))
+        let val1_new = match pv.get(val1_idx + 1) {
+            Some(&v) => v,
+            None => continue,
+        };
+        let val2_new = match val2_idx.checked_sub(1).and_then(|k| pv.get(k)) {
+            Some(&v) => v,
+            None => continue,
+        };
+        let val1_new_i64 = U::to_i64(&val1_new).unwrap();
+        let val2_new_i64 = U::to_i64(&val2_new).unwrap();
 
-        if let (Some(&val1_new), Some(&val2_new)) = (val1_new_opt, val2_new_opt) {
-            let val1_new_i64 = U::to_i64(&val1_new).unwrap();
-            let val2_new_i64 = U::to_i64(&val2_new).unwrap();
+        let delta1 = val1_new_i64 - val1_i64; // > 0
+        let delta2 = val2_i64 - val2_new_i64; // > 0
 
-            // Check if the swap preserves mean
-            if val1_new_i64 - val1_i64 == val2_i64 - val2_new_i64 {
-                // Check if this swap increases/decreases SD as needed
-                let scale_f = params.scale_factor as f64;
-                let v1_f = val1_i64 as f64 / scale_f;
-                let v2_f = val2_i64 as f64 / scale_f;
-                let v1_new_f = val1_new_i64 as f64 / scale_f;
-                let v2_new_f = val2_new_i64 as f64 / scale_f;
+        // Helper: is a (before, after) pair SD-pointless?
+        let is_pointless = |a_before: i64, a_after: i64, b_before: i64, b_after: i64| -> bool {
+            let sd_before = std_dev(&[
+                a_before as f64 / scale_f,
+                b_before as f64 / scale_f,
+            ]).unwrap_or(0.0);
+            let sd_after = std_dev(&[
+                a_after as f64 / scale_f,
+                b_after as f64 / scale_f,
+            ]).unwrap_or(0.0);
+            if increase_sd { sd_after <= sd_before } else { sd_after >= sd_before }
+        };
 
-                let sd_before = std_dev(&[v1_f, v2_f]).unwrap_or(0.0);
-                let sd_after = std_dev(&[v1_new_f, v2_new_f]).unwrap_or(0.0);
+        if delta1 == delta2 {
+            // Equal gaps — standard mean-preserving swap
+            if !is_pointless(val1_i64, val1_new_i64, val2_i64, val2_new_i64) {
+                vec[i] = val1_new;
+                vec[j] = val2_new;
+                *running_sum += (val1_new_i64 - val1_i64) + (val2_new_i64 - val2_i64);
+                *running_sum_sq +=
+                    (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
+                    + (val2_new_i64 * val2_new_i64 - val2_i64 * val2_i64);
+                return true;
+            }
+        } else {
+            // Gap resolution: gaps differ (items>1 or restrictions with non-uniform spacing)
 
-                let is_pointless = if increase_sd {
-                    sd_after <= sd_before
-                } else {
-                    sd_after >= sd_before
-                };
-
-                if !is_pointless {
-                    vec[i] = val1_new;
-                    vec[j] = val2_new;
-                    *running_sum +=
-                        (val1_new_i64 - val1_i64) + (val2_new_i64 - val2_i64);
-                    *running_sum_sq +=
-                        (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
-                        + (val2_new_i64 * val2_new_i64 - val2_i64 * val2_i64);
-                    return true;
+            // Stage 1: find a single pair in pv with spacing == delta1 whose
+            // "high" member exists in vec at some position k != i.
+            let mut stage1_resolved = false;
+            'stage1: for p in 0..pv.len().saturating_sub(1) {
+                let low_i64 = U::to_i64(&pv[p]).unwrap();
+                let high_i64 = U::to_i64(&pv[p + 1]).unwrap();
+                if high_i64 - low_i64 != delta1 {
+                    continue;
                 }
+                // Don't undo step 1
+                if high_i64 == val1_i64 {
+                    continue;
+                }
+                for k in 0..vec.len() {
+                    if k == i {
+                        continue;
+                    }
+                    if U::to_i64(&vec[k]).unwrap() == high_i64 {
+                        if !is_pointless(val1_i64, val1_new_i64, high_i64, low_i64) {
+                            vec[i] = val1_new;
+                            vec[k] = pv[p];
+                            // delta1 + (low - high) = delta1 - delta1 = 0 ✓
+                            *running_sum += (val1_new_i64 - val1_i64) + (low_i64 - high_i64);
+                            *running_sum_sq +=
+                                (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
+                                + (low_i64 * low_i64 - high_i64 * high_i64);
+                            stage1_resolved = true;
+                        }
+                        break 'stage1;
+                    }
+                }
+            }
+            if stage1_resolved {
+                return true;
+            }
+
+            // Stage 2: split delta1 into num_steps equal sub-steps.
+            // Find num_steps vec positions (all != i) each decrementable by sub_delta.
+            let min_step = (0..pv.len().saturating_sub(1))
+                .map(|p| U::to_i64(&pv[p + 1]).unwrap() - U::to_i64(&pv[p]).unwrap())
+                .min()
+                .unwrap_or(delta1);
+            let max_steps = ((delta1 / min_step).min(10)) as usize;
+
+            'stage2: for num_steps in 2..=max_steps {
+                if delta1 % num_steps as i64 != 0 {
+                    continue;
+                }
+                let sub_delta = delta1 / num_steps as i64;
+
+                // Collect (low, high) pairs with gap == sub_delta
+                let highs: Vec<(i64, i64)> = (0..pv.len().saturating_sub(1))
+                    .filter_map(|p| {
+                        let l = U::to_i64(&pv[p]).unwrap();
+                        let h = U::to_i64(&pv[p + 1]).unwrap();
+                        if h - l == sub_delta { Some((l, h)) } else { None }
+                    })
+                    .collect();
+                if highs.is_empty() {
+                    continue;
+                }
+
+                // Find num_steps distinct vec positions (all != i) whose value is a "high"
+                let mut positions: Vec<(usize, i64, i64)> = Vec::with_capacity(num_steps);
+                let mut excluded: Vec<usize> = vec![i];
+                for _ in 0..num_steps {
+                    let mut found = false;
+                    'find: for k in 0..vec.len() {
+                        if excluded.contains(&k) {
+                            continue;
+                        }
+                        let vk = U::to_i64(&vec[k]).unwrap();
+                        for &(low_i64, high_i64) in &highs {
+                            if vk == high_i64 {
+                                positions.push((k, low_i64, high_i64));
+                                excluded.push(k);
+                                found = true;
+                                break 'find;
+                            }
+                        }
+                    }
+                    if !found {
+                        continue 'stage2;
+                    }
+                }
+
+                // Apply all changes
+                vec[i] = val1_new;
+                *running_sum += val1_new_i64 - val1_i64;
+                *running_sum_sq += val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64;
+                for (k, low_i64, high_i64) in positions {
+                    let new_val = *params.value_to_index.get(&low_i64)
+                        .and_then(|&idx| pv.get(idx))
+                        .unwrap();
+                    vec[k] = new_val;
+                    *running_sum += low_i64 - high_i64;
+                    *running_sum_sq += low_i64 * low_i64 - high_i64 * high_i64;
+                }
+                return true;
             }
         }
     }
