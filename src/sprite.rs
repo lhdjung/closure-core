@@ -18,7 +18,7 @@ use crate::{
 
 use arrow::array::{Float64Array, Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::channel;
 use std::thread;
 
@@ -844,6 +844,7 @@ fn find_distributions_all_streaming<T, U>(
     let unique_distributions = Arc::new(Mutex::new(HashSet::<Vec<i64>>::new()));
     let total_failures = Arc::new(AtomicU32::new(0));
     let total_duplicates = Arc::new(AtomicU32::new(0));
+    let cumulative_duplicates = Arc::new(AtomicU64::new(0));
 
     let batch_size = 100;
     let max_iterations = 100_000_000;
@@ -971,6 +972,7 @@ fn find_distributions_all_streaming<T, U>(
                         total_duplicates.store(0, Ordering::Relaxed);
                     } else {
                         total_duplicates.fetch_add(1, Ordering::Relaxed);
+                        cumulative_duplicates.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(_) => {
@@ -981,7 +983,7 @@ fn find_distributions_all_streaming<T, U>(
 
         // Check early stopping conditions
         let failures = total_failures.load(Ordering::Relaxed);
-        let duplicates = total_duplicates.load(Ordering::Relaxed);
+        let cum_dup = cumulative_duplicates.load(Ordering::Relaxed);
 
         if failures >= 1000 {
             if config.show_progress {
@@ -994,23 +996,25 @@ fn find_distributions_all_streaming<T, U>(
             break;
         }
 
+        // Lincoln-Petersen coverage estimate (same formula as non-streaming path):
+        // duplicate_rate = c_dup / total_draws converges to n_found / N_total under
+        // uniform sampling, so it directly estimates the fraction of the space covered.
         let n_found = unique_distributions.lock().unwrap().len() as f64;
-        let max_duplications = if n_found > 0.0 {
-            (0.00001f64.ln() / (n_found / (n_found + 1.0)).ln()).round() as u32
-        } else {
-            1000
-        }
-        .max(1000);
-
-        if duplicates > max_duplications {
-            if config.show_progress {
-                eprintln!(
-                    "Warning: Found too many duplicate distributions ({}). Stopping search.",
-                    duplicates
-                );
+        if n_found > 0.0 && cum_dup > 0 {
+            let total_draws = n_found + cum_dup as f64;
+            let duplicate_rate = cum_dup as f64 / total_draws;
+            if duplicate_rate >= LP_COVERAGE_THRESHOLD {
+                if config.show_progress {
+                    eprintln!(
+                        "Warning: Duplicate rate {:.1}% — estimated {:.1}% of valid distributions found ({} unique). Stopping search.",
+                        duplicate_rate * 100.0,
+                        duplicate_rate * 100.0,
+                        n_found as usize
+                    );
+                }
+                should_stop.store(true, Ordering::Relaxed);
+                break;
             }
-            should_stop.store(true, Ordering::Relaxed);
-            break;
         }
     }
 }
@@ -1089,16 +1093,18 @@ where
         }
 
         // Lincoln-Petersen coverage estimate:
-        // N̂ = n_found + cumulative_duplicates (all draws = n_found unique + d duplicate)
-        // coverage = n_found / N̂ — stop when we estimate ≥ LP_COVERAGE_THRESHOLD found.
+        // Under uniform sampling, the duplicate rate c_dup / total_draws converges to
+        // n_found / N_total, so it directly estimates the fraction of the space covered.
+        // Stop when duplicate_rate >= LP_COVERAGE_THRESHOLD (default 0.99).
         let n_found = unique_distributions.len() as f64;
         if n_found > 0.0 && cumulative_duplicates > 0 {
-            let n_hat = n_found + cumulative_duplicates as f64;
-            let coverage = n_found / n_hat;
-            if coverage >= LP_COVERAGE_THRESHOLD {
+            let total_draws = n_found + cumulative_duplicates as f64;
+            let duplicate_rate = cumulative_duplicates as f64 / total_draws;
+            if duplicate_rate >= LP_COVERAGE_THRESHOLD {
                 eprintln!(
-                    "Warning: Estimated {:.1}% of all valid distributions found ({}). Stopping search.",
-                    coverage * 100.0,
+                    "Warning: Duplicate rate {:.1}% — estimated {:.1}% of valid distributions found ({} unique). Stopping search.",
+                    duplicate_rate * 100.0,
+                    duplicate_rate * 100.0,
                     unique_distributions.len()
                 );
                 break;
@@ -1966,5 +1972,58 @@ pub mod tests {
         let _ = std::fs::remove_file("test_sprite_parquet/metrics_horns.parquet");
         let _ = std::fs::remove_file("test_sprite_parquet/frequency.parquet");
         let _ = std::fs::remove_dir("test_sprite_parquet");
+    }
+
+    /// Regression test for the LP stopping criterion formula.
+    ///
+    /// The old formula `n_found / (n_found + c_dup) >= 0.99` is equivalent to checking that
+    /// 99% of all draws have been *unique*, which is what the early phase of any search looks
+    /// like. It fires at c_dup = 1 the moment n_found >= 99, i.e., on the very first duplicate
+    /// once 99 unique distributions have been found — regardless of how many total valid
+    /// distributions exist.
+    ///
+    /// The corrected formula `c_dup / (n_found + c_dup) >= 0.99` checks the *duplicate rate*,
+    /// which only reaches 0.99 once the accessible neighborhood is truly saturated.
+    ///
+    /// In practice SPRITE's random walk only reaches a subset of all valid distributions
+    /// (Cause 2, sampling bias), so LP fires when that subset is saturated rather than when
+    /// the full space is covered. The number of unique distributions found is therefore bounded
+    /// by the accessible neighborhood (~168–300 for these inputs in typical runs). This test
+    /// simply verifies that SPRITE finds at least 100 distributions — more than the old
+    /// formula's hard floor of 99 — and that all returned distributions are valid.
+    #[test]
+    fn test_lp_stopping_criterion_not_premature() {
+        let results = sprite_parallel(
+            3.0_f64,
+            1.0_f64,
+            100_i32,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            RestrictionsOption::Default,
+            None,
+            Some(10_000),
+        )
+        .unwrap();
+
+        let n_found = results.results.sample.len();
+
+        // All returned distributions must have correct mean and SD.
+        for dist_scaled in &results.results.sample {
+            let dist = unscale_distribution(dist_scaled, 100);
+            assert_eq!(round_f64(mean(&dist), 1), 3.0);
+            assert_eq!(round_f64(std_dev(&dist).unwrap(), 1), 1.0);
+        }
+
+        // SPRITE should find at least 100 distributions (above the old LP floor of 99).
+        assert!(
+            n_found >= 100,
+            "SPRITE found only {n_found} distributions with stop_after=10000 \
+             (CLOSURE finds 24,907 for these inputs). \
+             LP stopping criterion may be broken."
+        );
     }
 }
