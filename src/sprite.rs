@@ -623,6 +623,7 @@ where
         max_freq: HashMap::new(),
         min_count: 0,
         max_count: 0,
+        freq_dist_map: HashMap::new(),
     }));
     let freq_state_for_thread = freq_state.clone();
 

@@ -10,7 +10,7 @@
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray};
+use arrow::array::{ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
@@ -350,6 +350,16 @@ impl FrequencyTable {
     }
 }
 
+/// Distilled per-scale-value count distribution for efficient overlay rendering.
+/// One row per (value, count) pair that actually occurred across all samples.
+/// Precomputed to avoid expensive per-sample expansion on the R side.
+#[derive(Clone, Debug)]
+pub struct FrequencyDist {
+    pub value: Vec<i32>,     // scale value (e.g. 1, 2, 3, 4, 5)
+    pub count: Vec<i32>,     // raw integer count in a single sample (0..n)
+    pub n_samples: Vec<u32>, // how many samples had this count at this scale value
+}
+
 /// Main metrics about the CLOSURE results
 #[derive(Clone, Debug)]
 pub struct MetricsMain {
@@ -385,6 +395,7 @@ pub struct ResultListFromMeanSdN<U> {
     pub metrics_main: MetricsMain,
     pub metrics_horns: MetricsHorns,
     pub frequency: FrequencyTable,
+    pub frequency_dist: FrequencyDist,
     pub results: ResultsTable<U>,
 }
 
@@ -552,6 +563,44 @@ where
     (value, f_average, f_absolute, f_relative)
 }
 
+/// Calculate the distilled count distribution across all samples.
+/// For each (scale value, raw count) pair that occurred in any sample,
+/// records how many samples produced that count at that scale value.
+fn calculate_frequency_dist<U>(
+    samples: &[Vec<U>],
+    scale_min: U,
+    scale_max: U,
+) -> FrequencyDist
+where
+    U: Integer + ToPrimitive + Copy,
+{
+    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
+    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    let n_scale_vals = (scale_max_i32 - scale_min_i32 + 1) as usize;
+
+    let mut map: HashMap<(i32, i32), u32> = HashMap::new();
+
+    for sample in samples {
+        let mut counts = vec![0i32; n_scale_vals];
+        for &value in sample {
+            let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
+            counts[idx] += 1;
+        }
+        for (v_idx, &cnt) in counts.iter().enumerate() {
+            *map.entry((scale_min_i32 + v_idx as i32, cnt)).or_insert(0) += 1;
+        }
+    }
+
+    let mut entries: Vec<(i32, i32, u32)> = map.into_iter().map(|((v, c), n)| (v, c, n)).collect();
+    entries.sort_unstable_by_key(|&(v, c, _)| (v, c));
+
+    FrequencyDist {
+        value: entries.iter().map(|&(v, _, _)| v).collect(),
+        count: entries.iter().map(|&(_, c, _)| c).collect(),
+        n_samples: entries.iter().map(|&(_, _, n)| n).collect(),
+    }
+}
+
 /// Calculate median of a sorted vector
 fn median(sorted: &[f64]) -> f64 {
     let len = sorted.len();
@@ -611,6 +660,11 @@ where
             vec![0.0; nrow_frequency],
             vec![f64::NAN; nrow_frequency],
         ),
+        frequency_dist: FrequencyDist {
+            value: Vec::new(),
+            count: Vec::new(),
+            n_samples: Vec::new(),
+        },
         results: ResultsTable {
             id: Vec::new(),
             sample: Vec::new(),
@@ -754,6 +808,7 @@ where
             combined_f_absolute,
             combined_f_relative,
         ),
+        frequency_dist: calculate_frequency_dist(&samples, scale_min, scale_max),
         results: ResultsTable {
             id,
             sample: samples,
@@ -1385,6 +1440,11 @@ where
                 let _ = freq_writer.write(&batch);
             }
             let _ = freq_writer.close();
+
+            let _ = write_frequency_dist_to_parquet(
+                &closure_results.frequency_dist,
+                &format!("{}frequency_dist.parquet", base_path),
+            );
         }
     }
 
@@ -1400,6 +1460,32 @@ pub(crate) struct StreamingFrequencyState {
     max_freq: HashMap<i32, i64>,
     min_count: usize,
     max_count: usize,
+    freq_dist_map: HashMap<(i32, i32), u32>, // (scale_value, count) -> n_samples
+}
+
+/// Write a FrequencyDist to a flat Parquet file at `path`.
+fn write_frequency_dist_to_parquet(
+    dist: &FrequencyDist,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("value", DataType::Int32, false),
+        Field::new("count", DataType::Int32, false),
+        Field::new("n_samples", DataType::UInt32, false),
+    ]));
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None)?;
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(dist.value.clone())),
+            Arc::new(Int32Array::from(dist.count.clone())),
+            Arc::new(UInt32Array::from(dist.n_samples.clone())),
+        ],
+    )?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
 }
 
 /// Helper function to write statistics files for streaming mode
@@ -1575,6 +1661,23 @@ pub(crate) fn write_streaming_statistics(
             let _ = freq_writer.write(&batch);
         }
         let _ = freq_writer.close();
+
+        // Build and write frequency_dist from the accumulated map
+        let mut entries: Vec<(i32, i32, u32)> = state
+            .freq_dist_map
+            .iter()
+            .map(|(&(v, c), &n)| (v, c, n))
+            .collect();
+        entries.sort_unstable_by_key(|&(v, c, _)| (v, c));
+        let dist = FrequencyDist {
+            value: entries.iter().map(|&(v, _, _)| v).collect(),
+            count: entries.iter().map(|&(_, c, _)| c).collect(),
+            n_samples: entries.iter().map(|&(_, _, n)| n).collect(),
+        };
+        let _ = write_frequency_dist_to_parquet(
+            &dist,
+            &format!("{}frequency_dist.parquet", base_path),
+        );
     }
 }
 
@@ -1666,6 +1769,7 @@ where
         max_freq: HashMap::new(),
         min_count: 0,
         max_count: 0,
+        freq_dist_map: HashMap::new(),
     }));
     let freq_state_for_thread = freq_state.clone();
 
@@ -1896,6 +2000,12 @@ where
                             *state.all_freq.entry(val).or_insert(0) += count;
                         }
 
+                        // Update distilled count distribution
+                        for v in scale_min_i32..=scale_max_i32 {
+                            let cnt = *sample_freq.get(&v).unwrap_or(&0) as i32;
+                            *state.freq_dist_map.entry((v, cnt)).or_insert(0) += 1;
+                        }
+
                         if (horns - state.current_min_horns).abs() < 1e-10 {
                             for (&val, &count) in &sample_freq {
                                 *state.min_freq.entry(val).or_insert(0) += count;
@@ -2045,6 +2155,12 @@ where
                         // Update all frequencies
                         for (&val, &count) in &sample_freq {
                             *state.all_freq.entry(val).or_insert(0) += count;
+                        }
+
+                        // Update distilled count distribution
+                        for v in scale_min_i32..=scale_max_i32 {
+                            let cnt = *sample_freq.get(&v).unwrap_or(&0) as i32;
+                            *state.freq_dist_map.entry((v, cnt)).or_insert(0) += 1;
                         }
 
                         // Check if this is a new min or max
