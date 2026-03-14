@@ -614,6 +614,10 @@ where
     // Counter for total distributions found
     let total_counter = Arc::new(AtomicUsize::new(0));
 
+    let freq_dist_scale_min = U::to_i32(&scale_min).unwrap();
+    let freq_dist_scale_max = U::to_i32(&scale_max).unwrap();
+    let freq_dist_n_scale_vals = (freq_dist_scale_max - freq_dist_scale_min + 1) as usize;
+
     // Shared state for tracking min/max horns frequencies
     let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
         current_min_horns: f64::INFINITY,
@@ -623,7 +627,10 @@ where
         max_freq: HashMap::new(),
         min_count: 0,
         max_count: 0,
-        freq_dist_map: HashMap::new(),
+        freq_dist: vec![0u32; freq_dist_n_scale_vals * (n_usize + 1)],
+        freq_dist_n_scale_vals,
+        freq_dist_n: n_usize,
+        freq_dist_scale_min,
     }));
     let freq_state_for_thread = freq_state.clone();
 

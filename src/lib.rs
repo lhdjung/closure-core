@@ -574,31 +574,46 @@ fn calculate_frequency_dist<U>(
 where
     U: Integer + ToPrimitive + Copy,
 {
+    if samples.is_empty() {
+        return FrequencyDist { value: Vec::new(), count: Vec::new(), n_samples: Vec::new() };
+    }
+
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
     let n_scale_vals = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let n = samples[0].len();
 
-    let mut map: HashMap<(i32, i32), u32> = HashMap::new();
+    // Flat 2D array: dist[v_idx * (n+1) + count] = number of samples with that count.
+    // Direct index arithmetic replaces HashMap hashing entirely.
+    let mut dist = vec![0u32; n_scale_vals * (n + 1)];
+    let mut per_sample = vec![0usize; n_scale_vals];
 
     for sample in samples {
-        let mut counts = vec![0i32; n_scale_vals];
+        for c in &mut per_sample { *c = 0; }
         for &value in sample {
-            let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
-            counts[idx] += 1;
+            per_sample[(U::to_i32(&value).unwrap() - scale_min_i32) as usize] += 1;
         }
-        for (v_idx, &cnt) in counts.iter().enumerate() {
-            *map.entry((scale_min_i32 + v_idx as i32, cnt)).or_insert(0) += 1;
+        for (v_idx, &cnt) in per_sample.iter().enumerate() {
+            dist[v_idx * (n + 1) + cnt] += 1;
         }
     }
 
-    let mut entries: Vec<(i32, i32, u32)> = map.into_iter().map(|((v, c), n)| (v, c, n)).collect();
-    entries.sort_unstable_by_key(|&(v, c, _)| (v, c));
-
-    FrequencyDist {
-        value: entries.iter().map(|&(v, _, _)| v).collect(),
-        count: entries.iter().map(|&(_, c, _)| c).collect(),
-        n_samples: entries.iter().map(|&(_, _, n)| n).collect(),
+    // Collect non-zero entries; iteration order is already (value asc, count asc)
+    let mut value = Vec::new();
+    let mut count = Vec::new();
+    let mut n_samples = Vec::new();
+    for v_idx in 0..n_scale_vals {
+        for cnt in 0..=n {
+            let n_samp = dist[v_idx * (n + 1) + cnt];
+            if n_samp > 0 {
+                value.push(scale_min_i32 + v_idx as i32);
+                count.push(cnt as i32);
+                n_samples.push(n_samp);
+            }
+        }
     }
+
+    FrequencyDist { value, count, n_samples }
 }
 
 /// Calculate median of a sorted vector
@@ -1460,7 +1475,11 @@ pub(crate) struct StreamingFrequencyState {
     max_freq: HashMap<i32, i64>,
     min_count: usize,
     max_count: usize,
-    freq_dist_map: HashMap<(i32, i32), u32>, // (scale_value, count) -> n_samples
+    // Flat 2D array for frequency_dist: indexed by [v_idx * (n+1) + count]
+    freq_dist: Vec<u32>,
+    freq_dist_n_scale_vals: usize,
+    freq_dist_n: usize,
+    freq_dist_scale_min: i32,
 }
 
 /// Write a FrequencyDist to a flat Parquet file at `path`.
@@ -1662,17 +1681,25 @@ pub(crate) fn write_streaming_statistics(
         }
         let _ = freq_writer.close();
 
-        // Build and write frequency_dist from the accumulated map
-        let mut entries: Vec<(i32, i32, u32)> = state
-            .freq_dist_map
-            .iter()
-            .map(|(&(v, c), &n)| (v, c, n))
-            .collect();
-        entries.sort_unstable_by_key(|&(v, c, _)| (v, c));
+        // Build and write frequency_dist from the flat 2D array
+        let mut dist_value = Vec::new();
+        let mut dist_count = Vec::new();
+        let mut dist_n_samples = Vec::new();
+        let stride = state.freq_dist_n + 1;
+        for v_idx in 0..state.freq_dist_n_scale_vals {
+            for cnt in 0..=state.freq_dist_n {
+                let n_samp = state.freq_dist[v_idx * stride + cnt];
+                if n_samp > 0 {
+                    dist_value.push(state.freq_dist_scale_min + v_idx as i32);
+                    dist_count.push(cnt as i32);
+                    dist_n_samples.push(n_samp);
+                }
+            }
+        }
         let dist = FrequencyDist {
-            value: entries.iter().map(|&(v, _, _)| v).collect(),
-            count: entries.iter().map(|&(_, c, _)| c).collect(),
-            n_samples: entries.iter().map(|&(_, _, n)| n).collect(),
+            value: dist_value,
+            count: dist_count,
+            n_samples: dist_n_samples,
         };
         let _ = write_frequency_dist_to_parquet(
             &dist,
@@ -1760,6 +1787,10 @@ where
         depth,
     ) as usize;
 
+    let freq_dist_scale_min = U::to_i32(&scale_min).unwrap();
+    let freq_dist_scale_max = U::to_i32(&scale_max).unwrap();
+    let freq_dist_n_scale_vals = (freq_dist_scale_max - freq_dist_scale_min + 1) as usize;
+
     // Shared state for tracking min/max horns frequencies
     let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
         current_min_horns: f64::INFINITY,
@@ -1769,7 +1800,10 @@ where
         max_freq: HashMap::new(),
         min_count: 0,
         max_count: 0,
-        freq_dist_map: HashMap::new(),
+        freq_dist: vec![0u32; freq_dist_n_scale_vals * (n_usize + 1)],
+        freq_dist_n_scale_vals,
+        freq_dist_n: n_usize,
+        freq_dist_scale_min,
     }));
     let freq_state_for_thread = freq_state.clone();
 
@@ -2001,9 +2035,11 @@ where
                         }
 
                         // Update distilled count distribution
-                        for v in scale_min_i32..=scale_max_i32 {
-                            let cnt = *sample_freq.get(&v).unwrap_or(&0) as i32;
-                            *state.freq_dist_map.entry((v, cnt)).or_insert(0) += 1;
+                        let stride = state.freq_dist_n + 1;
+                        for v_idx in 0..state.freq_dist_n_scale_vals {
+                            let v = state.freq_dist_scale_min + v_idx as i32;
+                            let cnt = *sample_freq.get(&v).unwrap_or(&0) as usize;
+                            state.freq_dist[v_idx * stride + cnt] += 1;
                         }
 
                         if (horns - state.current_min_horns).abs() < 1e-10 {
@@ -2158,9 +2194,11 @@ where
                         }
 
                         // Update distilled count distribution
-                        for v in scale_min_i32..=scale_max_i32 {
-                            let cnt = *sample_freq.get(&v).unwrap_or(&0) as i32;
-                            *state.freq_dist_map.entry((v, cnt)).or_insert(0) += 1;
+                        let stride = state.freq_dist_n + 1;
+                        for v_idx in 0..state.freq_dist_n_scale_vals {
+                            let v = state.freq_dist_scale_min + v_idx as i32;
+                            let cnt = *sample_freq.get(&v).unwrap_or(&0) as usize;
+                            state.freq_dist[v_idx * stride + cnt] += 1;
                         }
 
                         // Check if this is a new min or max
