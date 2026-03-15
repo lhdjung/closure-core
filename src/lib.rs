@@ -368,8 +368,8 @@ pub struct FrequencyDist {
 /// (`pair_resolved`) and, when it is, which value always has the higher count
 /// (`pair_a_greater`).  Three boolean flags summarise the modality implications:
 ///
-/// - `non_unimodal`: the true-middle value's maximum count is below the minimum
-///   count of at least one scale extreme, so no sample can be bell-shaped.
+/// - `unimodal`: false when the true-middle value's maximum count is below the minimum
+///   count of at least one scale extreme, meaning no sample can be bell-shaped.
 /// - `j_shape_low`: the second-lowest value can exceed the lowest in some samples,
 ///   so an asymmetric J-shape is possible at the low end of the scale.
 /// - `j_shape_high`: mirror of `j_shape_low` at the high end.
@@ -382,9 +382,11 @@ pub struct ModalityAnalysis {
     /// Maximum count of each scale value across all samples
     pub count_hi: Vec<i32>,
 
-    /// True if non-unimodality is established: the true-middle value never
-    /// reaches the minimum count of at least one scale extreme.
-    pub non_unimodal: bool,
+    /// True if every valid sample could be unimodal (peaked at the true-middle
+    /// value).  False when the true-middle value's maximum count is below the
+    /// minimum count of at least one scale extreme — i.e. no sample is
+    /// bell-shaped and non-unimodality is established.
+    pub unimodal: bool,
     /// True if a J-shape is possible at the low end: the second-lowest value
     /// can exceed the lowest value in at least some samples.
     pub j_shape_low: bool,
@@ -673,7 +675,7 @@ impl ModalityAnalysis {
                 value: Vec::new(),
                 count_lo: Vec::new(),
                 count_hi: Vec::new(),
-                non_unimodal: false,
+                unimodal: true,
                 j_shape_low: false,
                 j_shape_high: false,
                 pair_value_a: Vec::new(),
@@ -701,13 +703,15 @@ impl ModalityAnalysis {
         let values: Vec<i32> = (scale_min..=scale_max).collect();
 
         // --- modality flags -----------------------------------------------
-        // non_unimodal: the true-middle value's max count < min count of either extreme
-        let non_unimodal = if n_vals >= 3 {
+        // unimodal: false when at least one extreme always beats the true middle,
+        // i.e. the middle can never be the global mode in any sample.
+        // Use .max() so we require the middle to beat the *higher* extreme minimum.
+        let unimodal = if n_vals >= 3 {
             let mid_idx = n_vals / 2;
-            let lo_extreme = count_lo[0].min(count_lo[n_vals - 1]);
-            count_hi[mid_idx] < lo_extreme
+            let lo_extreme = count_lo[0].max(count_lo[n_vals - 1]);
+            count_hi[mid_idx] >= lo_extreme
         } else {
-            false
+            true
         };
 
         // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
@@ -736,7 +740,7 @@ impl ModalityAnalysis {
             value: values,
             count_lo,
             count_hi,
-            non_unimodal,
+            unimodal,
             j_shape_low,
             j_shape_high,
             pair_value_a,
