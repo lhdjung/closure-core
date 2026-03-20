@@ -360,48 +360,50 @@ pub struct FrequencyDist {
     pub n_samples: Vec<u32>, // how many samples had this count at this scale value
 }
 
-/// Ordering and modality analysis derived from FrequencyDist.
+/// Per-value count ranges derived from all samples.
 ///
-/// For each scale value records the minimum and maximum count observed across
-/// all samples (`count_lo`, `count_hi`).  For each consecutive pair of scale
-/// values records whether their frequency ordering is the same in every sample
-/// (`pair_resolved`) and, when it is, which value always has the higher count
-/// (`pair_a_greater`).  Three boolean flags summarise the modality implications:
-///
-/// - `unimodal`: false when the true-middle value's maximum count is below the minimum
-///   count of at least one scale extreme, meaning no sample can be bell-shaped.
-/// - `j_shape_low`: the second-lowest value can exceed the lowest in some samples,
-///   so an asymmetric J-shape is possible at the low end of the scale.
-/// - `j_shape_high`: mirror of `j_shape_low` at the high end.
+/// One row per scale value: `count_lo` is the minimum count of that value
+/// across all samples, `count_hi` is the maximum.
 #[derive(Clone, Debug)]
-pub struct ModalityAnalysis {
-    /// Scale values (parallel with count_lo and count_hi)
+pub struct ModalityCounts {
+    /// Scale values
     pub value: Vec<i32>,
     /// Minimum count of each scale value across all samples
     pub count_lo: Vec<i32>,
     /// Maximum count of each scale value across all samples
     pub count_hi: Vec<i32>,
+}
 
-    /// True if every valid sample could be unimodal (peaked at the true-middle
-    /// value).  False when the true-middle value's maximum count is below the
-    /// minimum count of at least one scale extreme — i.e. no sample is
-    /// bell-shaped and non-unimodality is established.
-    pub unimodal: bool,
-    /// True if a J-shape is possible at the low end: the second-lowest value
-    /// can exceed the lowest value in at least some samples.
-    pub j_shape_low: bool,
-    /// True if a J-shape is possible at the high end: the second-highest value
-    /// can exceed the highest value in at least some samples.
-    pub j_shape_high: bool,
-
-    /// Lower scale value of each adjacent pair (parallel with pair_resolved and pair_a_greater)
-    pub pair_value_a: Vec<i32>,
+/// Pairwise frequency-ordering resolution for adjacent scale values.
+///
+/// One row per consecutive pair $(v_i, v_{i+1})$: `resolved` is true when
+/// the ordering between the two values is the same in every sample, and
+/// `a_greater` is true when `value_a` always has the higher count.
+#[derive(Clone, Debug)]
+pub struct ModalityPairs {
+    /// Lower scale value of each adjacent pair
+    pub value_a: Vec<i32>,
     /// Higher scale value of each adjacent pair
-    pub pair_value_b: Vec<i32>,
+    pub value_b: Vec<i32>,
     /// True if the ordering between value_a and value_b is the same in every sample
-    pub pair_resolved: Vec<bool>,
-    /// When pair_resolved is true: true if value_a always has a higher count than value_b
-    pub pair_a_greater: Vec<bool>,
+    pub resolved: Vec<bool>,
+    /// When resolved is true: true if value_a always has a higher count than value_b
+    pub a_greater: Vec<bool>,
+}
+
+/// Modality conclusion flags for the full result set.
+///
+/// - `unimodal`: false when the true-middle value's maximum count is below the
+///   minimum count of at least one scale extreme, meaning no sample can be
+///   bell-shaped.
+/// - `j_shape_low`: the second-lowest value can exceed the lowest in some
+///   samples, so an asymmetric J-shape is possible at the low end.
+/// - `j_shape_high`: mirror of `j_shape_low` at the high end.
+#[derive(Clone, Debug)]
+pub struct ModalityConclusion {
+    pub unimodal: bool,
+    pub j_shape_low: bool,
+    pub j_shape_high: bool,
 }
 
 /// Main metrics about the CLOSURE results
@@ -440,7 +442,9 @@ pub struct ResultListFromMeanSdN<U> {
     pub metrics_horns: MetricsHorns,
     pub frequency: FrequencyTable,
     pub frequency_dist: FrequencyDist,
-    pub modality_analysis: ModalityAnalysis,
+    pub modality_counts: ModalityCounts,
+    pub modality_pairs: ModalityPairs,
+    pub modality_conclusion: ModalityConclusion,
     pub results: ResultsTable<U>,
 }
 
@@ -661,94 +665,78 @@ where
     FrequencyDist { value, count, n_samples }
 }
 
-impl ModalityAnalysis {
-    /// Compute ordering and modality analysis from a `FrequencyDist`.
-    ///
-    /// Derives per-value count ranges, pairwise adjacent ordering resolution,
-    /// and three modality flags.  See the struct-level documentation for the
-    /// precise definitions of each field.
-    pub fn new(freq_dist: &FrequencyDist, scale_min: i32, scale_max: i32) -> Self {
-        let n_vals = (scale_max - scale_min + 1) as usize;
+/// Compute modality analysis from a `FrequencyDist`, returning the three
+/// result structs that map directly to the R-level tibbles.
+pub(crate) fn compute_modality(
+    freq_dist: &FrequencyDist,
+    scale_min: i32,
+    scale_max: i32,
+) -> (ModalityCounts, ModalityPairs, ModalityConclusion) {
+    let n_vals = (scale_max - scale_min + 1) as usize;
 
-        if n_vals == 0 || freq_dist.value.is_empty() {
-            return ModalityAnalysis {
-                value: Vec::new(),
-                count_lo: Vec::new(),
-                count_hi: Vec::new(),
-                unimodal: true,
-                j_shape_low: false,
-                j_shape_high: false,
-                pair_value_a: Vec::new(),
-                pair_value_b: Vec::new(),
-                pair_resolved: Vec::new(),
-                pair_a_greater: Vec::new(),
-            };
-        }
-
-        // --- per-value count ranges ---------------------------------------
-        let mut count_lo = vec![i32::MAX; n_vals];
-        let mut count_hi = vec![i32::MIN; n_vals];
-
-        for (&val, &cnt) in freq_dist.value.iter().zip(freq_dist.count.iter()) {
-            let idx = (val - scale_min) as usize;
-            if cnt < count_lo[idx] { count_lo[idx] = cnt; }
-            if cnt > count_hi[idx] { count_hi[idx] = cnt; }
-        }
-
-        // Guard: if a value somehow has no rows, default its range to [0, 0]
-        for i in 0..n_vals {
-            if count_lo[i] == i32::MAX { count_lo[i] = 0; count_hi[i] = 0; }
-        }
-
-        let values: Vec<i32> = (scale_min..=scale_max).collect();
-
-        // --- modality flags -----------------------------------------------
-        // unimodal: false when at least one extreme always beats the true middle,
-        // i.e. the middle can never be the global mode in any sample.
-        // Use .max() so we require the middle to beat the *higher* extreme minimum.
-        let unimodal = if n_vals >= 3 {
-            let mid_idx = n_vals / 2;
-            let lo_extreme = count_lo[0].max(count_lo[n_vals - 1]);
-            count_hi[mid_idx] >= lo_extreme
-        } else {
-            true
-        };
-
-        // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
-        let j_shape_low  = n_vals >= 2 && count_hi[1]          > count_lo[0];
-        // j_shape_high: second-highest can exceed the highest  (hi_{k-1} > lo_k)
-        let j_shape_high = n_vals >= 2 && count_hi[n_vals - 2] > count_lo[n_vals - 1];
-
-        // --- pairwise adjacent orderings ----------------------------------
-        let n_pairs = n_vals - 1;
-        let mut pair_value_a   = Vec::with_capacity(n_pairs);
-        let mut pair_value_b   = Vec::with_capacity(n_pairs);
-        let mut pair_resolved  = Vec::with_capacity(n_pairs);
-        let mut pair_a_greater = Vec::with_capacity(n_pairs);
-
-        for i in 0..n_pairs {
-            // a_always_greater: lo_a > hi_b — value_a always has more counts than value_b
-            let a_always_greater = count_lo[i]     > count_hi[i + 1];
-            let b_always_greater = count_lo[i + 1] > count_hi[i];
-            pair_value_a.push(values[i]);
-            pair_value_b.push(values[i + 1]);
-            pair_resolved.push(a_always_greater || b_always_greater);
-            pair_a_greater.push(a_always_greater);
-        }
-
-        ModalityAnalysis {
-            value: values,
-            count_lo,
-            count_hi,
-            unimodal,
-            j_shape_low,
-            j_shape_high,
-            pair_value_a,
-            pair_value_b,
-            pair_resolved,
-            pair_a_greater,
-        }
+    if n_vals == 0 || freq_dist.value.is_empty() {
+        return (
+            ModalityCounts { value: Vec::new(), count_lo: Vec::new(), count_hi: Vec::new() },
+            ModalityPairs  { value_a: Vec::new(), value_b: Vec::new(), resolved: Vec::new(), a_greater: Vec::new() },
+            ModalityConclusion { unimodal: true, j_shape_low: false, j_shape_high: false },
+        );
     }
+
+    // --- per-value count ranges ---------------------------------------
+    let mut count_lo = vec![i32::MAX; n_vals];
+    let mut count_hi = vec![i32::MIN; n_vals];
+
+    for (&val, &cnt) in freq_dist.value.iter().zip(freq_dist.count.iter()) {
+        let idx = (val - scale_min) as usize;
+        if cnt < count_lo[idx] { count_lo[idx] = cnt; }
+        if cnt > count_hi[idx] { count_hi[idx] = cnt; }
+    }
+
+    // Guard: if a value somehow has no rows, default its range to [0, 0]
+    for i in 0..n_vals {
+        if count_lo[i] == i32::MAX { count_lo[i] = 0; count_hi[i] = 0; }
+    }
+
+    let values: Vec<i32> = (scale_min..=scale_max).collect();
+
+    // --- modality flags -----------------------------------------------
+    // unimodal: false when at least one extreme always beats the true middle.
+    // Use .max() so we require the middle to beat the *higher* extreme minimum.
+    let unimodal = if n_vals >= 3 {
+        let mid_idx = n_vals / 2;
+        let lo_extreme = count_lo[0].max(count_lo[n_vals - 1]);
+        count_hi[mid_idx] >= lo_extreme
+    } else {
+        true
+    };
+
+    // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
+    let j_shape_low  = n_vals >= 2 && count_hi[1]          > count_lo[0];
+    // j_shape_high: second-highest can exceed the highest  (hi_{k-1} > lo_k)
+    let j_shape_high = n_vals >= 2 && count_hi[n_vals - 2] > count_lo[n_vals - 1];
+
+    // --- pairwise adjacent orderings ----------------------------------
+    let n_pairs = n_vals - 1;
+    let mut value_a   = Vec::with_capacity(n_pairs);
+    let mut value_b   = Vec::with_capacity(n_pairs);
+    let mut resolved  = Vec::with_capacity(n_pairs);
+    let mut a_greater = Vec::with_capacity(n_pairs);
+
+    for i in 0..n_pairs {
+        // a_always_greater: lo_a > hi_b — value_a always has more counts than value_b
+        let a_always_greater = count_lo[i]     > count_hi[i + 1];
+        let b_always_greater = count_lo[i + 1] > count_hi[i];
+        value_a.push(values[i]);
+        value_b.push(values[i + 1]);
+        resolved.push(a_always_greater || b_always_greater);
+        a_greater.push(a_always_greater);
+    }
+
+    (
+        ModalityCounts { value: values, count_lo, count_hi },
+        ModalityPairs  { value_a, value_b, resolved, a_greater },
+        ModalityConclusion { unimodal, j_shape_low, j_shape_high },
+    )
 }
 
 /// Calculate median of a sorted vector
@@ -815,11 +803,9 @@ where
             count: Vec::new(),
             n_samples: Vec::new(),
         },
-        modality_analysis: ModalityAnalysis::new(
-            &FrequencyDist { value: Vec::new(), count: Vec::new(), n_samples: Vec::new() },
-            scale_min_i32,
-            scale_max_i32,
-        ),
+        modality_counts: ModalityCounts { value: Vec::new(), count_lo: Vec::new(), count_hi: Vec::new() },
+        modality_pairs: ModalityPairs { value_a: Vec::new(), value_b: Vec::new(), resolved: Vec::new(), a_greater: Vec::new() },
+        modality_conclusion: ModalityConclusion { unimodal: true, j_shape_low: false, j_shape_high: false },
         results: ResultsTable {
             id: Vec::new(),
             sample: Vec::new(),
@@ -941,7 +927,8 @@ where
     let id: Vec<f64> = (1..=samples_all).map(|i| i as f64).collect();
 
     let frequency_dist = calculate_frequency_dist(&samples, scale_min, scale_max);
-    let modality_analysis = ModalityAnalysis::new(&frequency_dist, scale_min_i32, scale_max_i32);
+    let (modality_counts, modality_pairs, modality_conclusion) =
+        compute_modality(&frequency_dist, scale_min_i32, scale_max_i32);
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
@@ -967,7 +954,9 @@ where
             combined_f_relative,
         ),
         frequency_dist,
-        modality_analysis,
+        modality_counts,
+        modality_pairs,
+        modality_conclusion,
         results: ResultsTable {
             id,
             sample: samples,
