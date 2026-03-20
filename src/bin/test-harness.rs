@@ -9,7 +9,7 @@ use std::io::Result;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use closure_core::{count_initial_combinations, closure_parallel};
+use closure_core::{closure_parallel, count_initial_combinations};
 
 fn main() -> std::io::Result<()> {
     println!("Running test harness...");

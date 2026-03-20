@@ -1,5 +1,12 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
+use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
+use crate::utils::{is_near, round_f64};
+use crate::{
+    create_results_writer, create_stats_writers, results_to_record_batch, samples_to_result_list,
+    FloatType, IntegerType, ParameterError, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
+    StreamingFrequencyState, StreamingResult,
+};
 use core::f64;
 use num::NumCast;
 use rand::prelude::*;
@@ -8,13 +15,6 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use crate::utils::{is_near, round_f64};
-use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
-use crate::{
-    samples_to_result_list, create_results_writer, create_stats_writers, results_to_record_batch,
-    FloatType, IntegerType, ParameterError, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
-    StreamingFrequencyState, StreamingResult,
-};
 
 use arrow::array::{Float64Array, Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
@@ -156,8 +156,7 @@ where
     };
 
     if let Some(ref min_map) = restrictions_minimum {
-        let constraints =
-            OccurrenceConstraints::new(restrictions_exact.clone(), min_map.clone());
+        let constraints = OccurrenceConstraints::new(restrictions_exact.clone(), min_map.clone());
         if constraints.check_conflicts() {
             let exact_keys: HashSet<_> = constraints.exact.keys().collect();
             let min_keys: HashSet<_> = constraints.minimum.keys().collect();
@@ -280,39 +279,59 @@ pub struct Sprite {
 impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
     fn run(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
     ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
         sprite_parallel(
-            mean, sd, n, scale_min, scale_max,
-            rounding_error_mean, rounding_error_sd,
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
             items,
             self.restrictions_exact.take(),
             std::mem::replace(&mut self.restrictions_minimum, RestrictionsOption::Default),
-            parquet_config, stop_after,
+            parquet_config,
+            stop_after,
         )
     }
 
     fn run_streaming(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
     ) -> Result<StreamingResult, ParameterError> {
         sprite_parallel_streaming(
-            mean, sd, n, scale_min, scale_max,
-            rounding_error_mean, rounding_error_sd,
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
             items,
             self.restrictions_exact.take(),
             std::mem::replace(&mut self.restrictions_minimum, RestrictionsOption::Default),
-            config, stop_after,
+            config,
+            stop_after,
         )
     }
 }
@@ -423,11 +442,7 @@ where
 
     // Calculate all statistics using the shared function from lib.rs
     // Use original scale values for the frequency table and horns calculations
-    let mut sprite_results = samples_to_result_list(
-        results_original_scale,
-        scale_min,
-        scale_max
-    );
+    let mut sprite_results = samples_to_result_list(results_original_scale, scale_min, scale_max);
 
     // Replace the sample data in the results table with the 100x version
     // This ensures that output data is in the 100x scale (standard for SPRITE/CLOSURE)
@@ -517,7 +532,9 @@ where
         let freq_batch = RecordBatch::try_new(
             freq_schema,
             vec![
-                Arc::new(StringArray::from(results.frequency.samples_group().to_vec())),
+                Arc::new(StringArray::from(
+                    results.frequency.samples_group().to_vec(),
+                )),
                 Arc::new(Int32Array::from(results.frequency.value().to_vec())),
                 Arc::new(Float64Array::from(results.frequency.f_average().to_vec())),
                 Arc::new(Float64Array::from(results.frequency.f_absolute().to_vec())),
@@ -1070,8 +1087,7 @@ where
         for result in batch_results {
             match result {
                 Ok(mut distribution) => {
-                    distribution
-                        .sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
+                    distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
                     let hashable: Vec<i64> =
                         distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
                     if unique_distributions.insert(hashable) {
@@ -1160,8 +1176,7 @@ where
         .iter()
         .map(|v| U::to_i64(v).unwrap())
         .sum();
-    let total_target_sum: i64 =
-        (mean_f64 * n_usize as f64 * scale_f64).round() as i64;
+    let total_target_sum: i64 = (mean_f64 * n_usize as f64 * scale_f64).round() as i64;
     let vec_target_sum = total_target_sum - fixed_sum_init;
 
     // Index of the largest pv entry ≤ mean_scaled (floor)
@@ -1201,9 +1216,7 @@ where
         };
         direct.unwrap_or_else(|| {
             // Fallback: random fill (handles edge cases from restrictions)
-            (0..r_n)
-                .map(|_| *pv.choose(rng).unwrap())
-                .collect()
+            (0..r_n).map(|_| *pv.choose(rng).unwrap()).collect()
         })
     } else {
         Vec::new()
@@ -1214,23 +1227,34 @@ where
     let max_loops_mean = n_u32 * pv.len() as u32;
     adjust_mean_internal(&mut vec, params, max_loops_mean, rng)?;
 
-    let max_loops_sd = (n_u32 * (pv.len().pow(2) as u32))
-        .clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
+    let max_loops_sd =
+        (n_u32 * (pv.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
     let granule_sd = T::from(0.1f64).unwrap().powi(params.sd_prec) / T::from(2.0).unwrap()
         + T::from(DUST).unwrap();
 
     // Precompute fixed-part sums (constant for the lifetime of this attempt)
-    let fixed_sum: i64 = params.fixed_responses_scaled.iter()
+    let fixed_sum: i64 = params
+        .fixed_responses_scaled
+        .iter()
         .map(|v| U::to_i64(v).unwrap())
         .sum();
-    let fixed_sum_sq: i64 = params.fixed_responses_scaled.iter()
-        .map(|v| { let v64 = U::to_i64(v).unwrap(); v64 * v64 })
+    let fixed_sum_sq: i64 = params
+        .fixed_responses_scaled
+        .iter()
+        .map(|v| {
+            let v64 = U::to_i64(v).unwrap();
+            v64 * v64
+        })
         .sum();
 
     // Running sums for the mutable part of the distribution
     let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
-    let mut running_sum_sq: i64 = vec.iter()
-        .map(|v| { let v64 = U::to_i64(v).unwrap(); v64 * v64 })
+    let mut running_sum_sq: i64 = vec
+        .iter()
+        .map(|v| {
+            let v64 = U::to_i64(v).unwrap();
+            v64 * v64
+        })
         .sum();
 
     // Hoisted constant: target mean rounded to reporting precision
@@ -1244,7 +1268,8 @@ where
             running_sum_sq + fixed_sum_sq,
             n_usize,
             params.scale_factor,
-        )).unwrap();
+        ))
+        .unwrap();
 
         if (current_sd - params.sd).abs() <= granule_sd {
             // Success - combine vec with fixed responses
@@ -1256,19 +1281,18 @@ where
         // Shift values to adjust SD (updates running sums in O(1))
         let increase_sd = current_sd < params.sd;
         shift_values_internal(
-            &mut vec, params, increase_sd,
-            &mut running_sum, &mut running_sum_sq,
+            &mut vec,
+            params,
+            increase_sd,
+            &mut running_sum,
+            &mut running_sum_sq,
             rng,
         );
 
         // Check for and correct mean drift (O(1) using running sum)
-        let current_mean_f64 = mean_from_running(
-            running_sum + fixed_sum,
-            n_usize,
-            params.scale_factor,
-        );
-        let current_mean_rounded =
-            T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
+        let current_mean_f64 =
+            mean_from_running(running_sum + fixed_sum, n_usize, params.scale_factor);
+        let current_mean_rounded = T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
 
         if !is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1278,8 +1302,12 @@ where
             adjust_mean_internal(&mut vec, params, 20, rng).unwrap_or(());
             // Re-sync: adjust_mean modified vec (rare path, O(n) is acceptable here)
             running_sum = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
-            running_sum_sq = vec.iter()
-                .map(|v| { let v64 = U::to_i64(v).unwrap(); v64 * v64 })
+            running_sum_sq = vec
+                .iter()
+                .map(|v| {
+                    let v64 = U::to_i64(v).unwrap();
+                    v64 * v64
+                })
                 .sum();
         }
     }
@@ -1306,7 +1334,9 @@ where
     let target_mean = params.mean;
 
     // Compute fixed sum once; maintain running sum for vec
-    let fixed_sum: i64 = params.fixed_responses_scaled.iter()
+    let fixed_sum: i64 = params
+        .fixed_responses_scaled
+        .iter()
         .map(|v| U::to_i64(v).unwrap())
         .sum();
     let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
@@ -1319,8 +1349,7 @@ where
     for _ in 0..max_iter {
         let current_mean_f64 =
             mean_from_running(running_sum + fixed_sum, n_total, params.scale_factor);
-        let current_mean_rounded =
-            T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
+        let current_mean_rounded = T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
 
         if is_near(
             T::to_f64(&current_mean_rounded).unwrap(),
@@ -1437,15 +1466,15 @@ where
 
         // Helper: is a (before, after) pair SD-pointless?
         let is_pointless = |a_before: i64, a_after: i64, b_before: i64, b_after: i64| -> bool {
-            let sd_before = std_dev(&[
-                a_before as f64 / scale_f,
-                b_before as f64 / scale_f,
-            ]).unwrap_or(0.0);
-            let sd_after = std_dev(&[
-                a_after as f64 / scale_f,
-                b_after as f64 / scale_f,
-            ]).unwrap_or(0.0);
-            if increase_sd { sd_after <= sd_before } else { sd_after >= sd_before }
+            let sd_before =
+                std_dev(&[a_before as f64 / scale_f, b_before as f64 / scale_f]).unwrap_or(0.0);
+            let sd_after =
+                std_dev(&[a_after as f64 / scale_f, b_after as f64 / scale_f]).unwrap_or(0.0);
+            if increase_sd {
+                sd_after <= sd_before
+            } else {
+                sd_after >= sd_before
+            }
         };
 
         if delta1 == delta2 {
@@ -1454,8 +1483,7 @@ where
                 vec[i] = val1_new;
                 vec[j] = val2_new;
                 *running_sum += (val1_new_i64 - val1_i64) + (val2_new_i64 - val2_i64);
-                *running_sum_sq +=
-                    (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
+                *running_sum_sq += (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
                     + (val2_new_i64 * val2_new_i64 - val2_i64 * val2_i64);
                 return true;
             }
@@ -1485,8 +1513,7 @@ where
                             vec[k] = pv[p];
                             // delta1 + (low - high) = delta1 - delta1 = 0 ✓
                             *running_sum += (val1_new_i64 - val1_i64) + (low_i64 - high_i64);
-                            *running_sum_sq +=
-                                (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
+                            *running_sum_sq += (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
                                 + (low_i64 * low_i64 - high_i64 * high_i64);
                             stage1_resolved = true;
                         }
@@ -1517,7 +1544,11 @@ where
                     .filter_map(|p| {
                         let l = U::to_i64(&pv[p]).unwrap();
                         let h = U::to_i64(&pv[p + 1]).unwrap();
-                        if h - l == sub_delta { Some((l, h)) } else { None }
+                        if h - l == sub_delta {
+                            Some((l, h))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 if highs.is_empty() {
@@ -1553,7 +1584,9 @@ where
                 *running_sum += val1_new_i64 - val1_i64;
                 *running_sum_sq += val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64;
                 for (k, low_i64, high_i64) in positions {
-                    let new_val = *params.value_to_index.get(&low_i64)
+                    let new_val = *params
+                        .value_to_index
+                        .get(&low_i64)
                         .and_then(|&idx| pv.get(idx))
                         .unwrap();
                     vec[k] = new_val;
@@ -1630,11 +1663,8 @@ fn std_dev(data: &[f64]) -> Option<f64> {
         return None;
     }
     let data_mean = mean(data);
-    let variance = data
-        .iter()
-        .map(|&v| (v - data_mean).powi(2))
-        .sum::<f64>()
-        / (data.len() - 1) as f64;
+    let variance =
+        data.iter().map(|&v| (v - data_mean).powi(2)).sum::<f64>() / (data.len() - 1) as f64;
     Some(variance.sqrt())
 }
 
@@ -1825,8 +1855,8 @@ pub mod tests {
             expected_mean,
             expected_sd,
             expected_n,
-            1,    // scale_min
-            5,    // scale_max
+            1, // scale_min
+            5, // scale_max
             rounding_error_mean,
             rounding_error_sd,
             1,    // items
@@ -1923,15 +1953,19 @@ pub mod tests {
 
         // Verify we checked the expected number of samples
         assert_eq!(
-            total_samples_checked,
-            MAX_SAMPLES_TO_CHECK,
+            total_samples_checked, MAX_SAMPLES_TO_CHECK,
             "Expected to check {} samples, but only checked {}",
-            MAX_SAMPLES_TO_CHECK,
-            total_samples_checked
+            MAX_SAMPLES_TO_CHECK, total_samples_checked
         );
 
         // Clean up test files
-        let file_names = ["sample", "horns", "metrics_main", "metrics_horns", "frequency"];
+        let file_names = [
+            "sample",
+            "horns",
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+        ];
         for name in file_names {
             let _ = std::fs::remove_file(format!("test_sprite_streaming/{name}.parquet"));
         }

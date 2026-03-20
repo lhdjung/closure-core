@@ -50,10 +50,8 @@ pub fn closure_count(
     // --- Sum bounds (integer, since scale values are integers) ---
     let target_sum = mean * n_f64;
     let sum_tolerance = rounding_error_mean * n_f64;
-    let sum_lower = ((target_sum - sum_tolerance).ceil() as i64)
-        .max(n_i64 * scale_min as i64);
-    let sum_upper = ((target_sum + sum_tolerance).floor() as i64)
-        .min(n_i64 * scale_max as i64);
+    let sum_lower = ((target_sum - sum_tolerance).ceil() as i64).max(n_i64 * scale_min as i64);
+    let sum_upper = ((target_sum + sum_tolerance).floor() as i64).min(n_i64 * scale_max as i64);
     if sum_lower > sum_upper {
         return 0;
     }
@@ -95,22 +93,13 @@ pub fn closure_count(
         let next_v = (v + 1) as i64;
         let next_v_sq = next_v * next_v;
 
-        let mut next_dp: HashMap<(u32, i64, i64), u64> =
-            HashMap::with_capacity(dp.len());
+        let mut next_dp: HashMap<(u32, i64, i64), u64> = HashMap::with_capacity(dp.len());
 
         for (&(remaining, sum, sum_sq), &count) in &dp {
             if remaining == 0 {
                 // Complete state; check constraints and accumulate
                 accumulate_if_valid(
-                    &mut total,
-                    count,
-                    sum,
-                    sum_sq,
-                    n_i64,
-                    n_f64,
-                    sum_lower,
-                    sum_upper,
-                    var_nm1_lo,
+                    &mut total, count, sum, sum_sq, n_i64, n_f64, sum_lower, sum_upper, var_nm1_lo,
                     var_nm1_hi,
                 );
                 continue; // Don't propagate — it would just pass through unchanged
@@ -169,20 +158,15 @@ pub fn closure_count(
 
     // Process remaining complete states from the final DP layer
     for (&(remaining, sum, sum_sq), &count) in &dp {
-        debug_assert_eq!(remaining, 0, "All items should be placed after the last scale value");
+        debug_assert_eq!(
+            remaining, 0,
+            "All items should be placed after the last scale value"
+        );
         if remaining != 0 {
             continue;
         }
         accumulate_if_valid(
-            &mut total,
-            count,
-            sum,
-            sum_sq,
-            n_i64,
-            n_f64,
-            sum_lower,
-            sum_upper,
-            var_nm1_lo,
+            &mut total, count, sum, sum_sq, n_i64, n_f64, sum_lower, sum_upper, var_nm1_lo,
             var_nm1_hi,
         );
     }
@@ -312,7 +296,10 @@ mod tests {
         let expected = results.results.sample.len() as u64;
 
         let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd);
-        assert_eq!(counted, expected, "count={counted} but closure_parallel found {expected}");
+        assert_eq!(
+            counted, expected,
+            "count={counted} but closure_parallel found {expected}"
+        );
     }
 
     #[test]
@@ -334,7 +321,10 @@ mod tests {
         let expected = results.results.sample.len() as u64;
 
         let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd);
-        assert_eq!(counted, expected, "count={counted} but closure_parallel found {expected}");
+        assert_eq!(
+            counted, expected,
+            "count={counted} but closure_parallel found {expected}"
+        );
     }
 
     #[test]
@@ -347,17 +337,22 @@ mod tests {
 
     /// Helper: assert closure_count and closure_parallel agree for given parameters
     fn assert_count_matches_parallel(
-        mean: f64, sd: f64, n: i32, smin: i32, smax: i32,
-        re_m: f64, re_s: f64, label: &str,
+        mean: f64,
+        sd: f64,
+        n: i32,
+        smin: i32,
+        smax: i32,
+        re_m: f64,
+        re_s: f64,
+        label: &str,
     ) {
         use crate::closure_parallel;
 
         let counted = closure_count(mean, sd, n, smin, smax, re_m, re_s);
 
-        let results = closure_parallel::<f64, i32>(
-            mean, sd, n, smin, smax, re_m, re_s, 1, None, None,
-        )
-        .unwrap();
+        let results =
+            closure_parallel::<f64, i32>(mean, sd, n, smin, smax, re_m, re_s, 1, None, None)
+                .unwrap();
         let enumerated = results.results.sample.len() as u64;
 
         assert_eq!(
@@ -396,12 +391,30 @@ mod tests {
         let cases: &[(f64, f64, i32, i32, i32, f64, f64, &str)] = &[
             // n=10: 7-point Likert, various means and SDs
             (4.0, 1.50, 10, 1, 7, 0.05, 0.05, "n=10, [1,7], centered"),
-            (3.0, 2.00, 10, 1, 7, 0.05, 0.05, "n=10, [1,7], plan benchmark"),
+            (
+                3.0,
+                2.00,
+                10,
+                1,
+                7,
+                0.05,
+                0.05,
+                "n=10, [1,7], plan benchmark",
+            ),
             (2.5, 1.00, 10, 1, 5, 0.05, 0.05, "n=10, [1,5], low mean"),
             // n=12-15: 5-point and 7-point scales
             (3.0, 1.00, 12, 1, 5, 0.05, 0.05, "n=12, [1,5]"),
             (4.0, 2.00, 15, 1, 7, 0.05, 0.05, "n=15, [1,7]"),
-            (3.0, 1.00, 15, 1, 5, 0.10, 0.10, "n=15, [1,5], wider rounding"),
+            (
+                3.0,
+                1.00,
+                15,
+                1,
+                5,
+                0.10,
+                0.10,
+                "n=15, [1,5], wider rounding",
+            ),
             (4.0, 2.50, 15, 1, 7, 0.05, 0.05, "n=15, [1,7], high sd"),
             // n=20: covers common small-group research
             (3.0, 1.20, 20, 1, 5, 0.05, 0.05, "n=20, [1,5]"),
@@ -410,7 +423,16 @@ mod tests {
             (3.0, 0.50, 20, 1, 5, 0.05, 0.05, "n=20, [1,5], low sd"),
             (5.5, 1.00, 20, 1, 7, 0.05, 0.05, "n=20, [1,7], high mean"),
             (1.5, 0.50, 20, 1, 5, 0.05, 0.05, "n=20, [1,5], low mean"),
-            (3.5, 1.20, 20, 1, 7, 0.10, 0.10, "n=20, [1,7], wider rounding"),
+            (
+                3.5,
+                1.20,
+                20,
+                1,
+                7,
+                0.10,
+                0.10,
+                "n=20, [1,7], wider rounding",
+            ),
             // n=25-30: medium groups
             (3.0, 1.00, 25, 1, 5, 0.05, 0.05, "n=25, [1,5]"),
             (4.0, 1.80, 25, 1, 7, 0.05, 0.05, "n=25, [1,7]"),

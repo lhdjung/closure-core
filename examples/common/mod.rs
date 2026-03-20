@@ -11,6 +11,7 @@ pub struct Case {
     pub label: &'static str,
 }
 
+#[rustfmt::skip]
 pub const CASES: &[Case] = &[
     Case { mean: 4.0, sd: 1.50, n: 10,  scale_min: 1, scale_max: 7, re_mean: 0.05, re_sd: 0.05, label: "n=10,  [1,7]"  },
     Case { mean: 3.0, sd: 1.00, n: 12,  scale_min: 1, scale_max: 5, re_mean: 0.05, re_sd: 0.05, label: "n=12,  [1,5]"  },

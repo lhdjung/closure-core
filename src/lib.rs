@@ -10,7 +10,9 @@
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray, UInt32Array};
+use arrow::array::{
+    ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray, UInt32Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
@@ -38,9 +40,9 @@ impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send
 use thiserror::Error;
 
 mod count;
-mod utils;
 mod sprite;
 mod sprite_types;
+mod utils;
 
 pub use count::closure_count;
 
@@ -63,9 +65,13 @@ pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
 pub trait Technique<T: FloatType, U: IntegerType + 'static> {
     fn run(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
@@ -73,9 +79,13 @@ pub trait Technique<T: FloatType, U: IntegerType + 'static> {
 
     fn run_streaming(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
@@ -88,33 +98,55 @@ pub struct Closure;
 impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
     fn run(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
     ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
         closure_parallel(
-            mean, sd, n, scale_min, scale_max,
-            rounding_error_mean, rounding_error_sd,
-            items, parquet_config, stop_after,
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
+            items,
+            parquet_config,
+            stop_after,
         )
     }
 
     fn run_streaming(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
     ) -> Result<StreamingResult, ParameterError> {
         closure_parallel_streaming(
-            mean, sd, n, scale_min, scale_max,
-            rounding_error_mean, rounding_error_sd,
-            items, config, stop_after,
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
+            items,
+            config,
+            stop_after,
         )
     }
 }
@@ -220,7 +252,6 @@ impl FrequencySamplesColumn {
 
         result
     }
-
 
     /// Get the total length of the samples column
     pub fn len(&self) -> usize {
@@ -517,7 +548,6 @@ fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
     }
 }
 
-
 /// Count initial combinations with replacement
 ///
 /// Computes the number of sorted combinations of length `depth` from
@@ -615,16 +645,16 @@ where
 /// Calculate the distilled count distribution across all samples.
 /// For each (scale value, raw count) pair that occurred in any sample,
 /// records how many samples produced that count at that scale value.
-fn calculate_frequency_dist<U>(
-    samples: &[Vec<U>],
-    scale_min: U,
-    scale_max: U,
-) -> FrequencyDist
+fn calculate_frequency_dist<U>(samples: &[Vec<U>], scale_min: U, scale_max: U) -> FrequencyDist
 where
     U: Integer + ToPrimitive + Copy,
 {
     if samples.is_empty() {
-        return FrequencyDist { value: Vec::new(), count: Vec::new(), n_samples: Vec::new() };
+        return FrequencyDist {
+            value: Vec::new(),
+            count: Vec::new(),
+            n_samples: Vec::new(),
+        };
     }
 
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
@@ -638,7 +668,9 @@ where
     let mut per_sample = vec![0usize; n_scale_vals];
 
     for sample in samples {
-        for c in &mut per_sample { *c = 0; }
+        for c in &mut per_sample {
+            *c = 0;
+        }
         for &value in sample {
             per_sample[(U::to_i32(&value).unwrap() - scale_min_i32) as usize] += 1;
         }
@@ -662,7 +694,11 @@ where
         }
     }
 
-    FrequencyDist { value, count, n_samples }
+    FrequencyDist {
+        value,
+        count,
+        n_samples,
+    }
 }
 
 /// Compute modality analysis from a `FrequencyDist`, returning the three
@@ -676,9 +712,22 @@ pub(crate) fn compute_modality(
 
     if n_vals == 0 || freq_dist.value.is_empty() {
         return (
-            ModalityCounts { value: Vec::new(), count_lo: Vec::new(), count_hi: Vec::new() },
-            ModalityPairs  { value_a: Vec::new(), value_b: Vec::new(), resolved: Vec::new(), a_greater: Vec::new() },
-            ModalityConclusion { unimodal: true, j_shape_low: false, j_shape_high: false },
+            ModalityCounts {
+                value: Vec::new(),
+                count_lo: Vec::new(),
+                count_hi: Vec::new(),
+            },
+            ModalityPairs {
+                value_a: Vec::new(),
+                value_b: Vec::new(),
+                resolved: Vec::new(),
+                a_greater: Vec::new(),
+            },
+            ModalityConclusion {
+                unimodal: true,
+                j_shape_low: false,
+                j_shape_high: false,
+            },
         );
     }
 
@@ -688,13 +737,20 @@ pub(crate) fn compute_modality(
 
     for (&val, &cnt) in freq_dist.value.iter().zip(freq_dist.count.iter()) {
         let idx = (val - scale_min) as usize;
-        if cnt < count_lo[idx] { count_lo[idx] = cnt; }
-        if cnt > count_hi[idx] { count_hi[idx] = cnt; }
+        if cnt < count_lo[idx] {
+            count_lo[idx] = cnt;
+        }
+        if cnt > count_hi[idx] {
+            count_hi[idx] = cnt;
+        }
     }
 
     // Guard: if a value somehow has no rows, default its range to [0, 0]
     for i in 0..n_vals {
-        if count_lo[i] == i32::MAX { count_lo[i] = 0; count_hi[i] = 0; }
+        if count_lo[i] == i32::MAX {
+            count_lo[i] = 0;
+            count_hi[i] = 0;
+        }
     }
 
     let values: Vec<i32> = (scale_min..=scale_max).collect();
@@ -711,20 +767,20 @@ pub(crate) fn compute_modality(
     };
 
     // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
-    let j_shape_low  = n_vals >= 2 && count_hi[1]          > count_lo[0];
+    let j_shape_low = n_vals >= 2 && count_hi[1] > count_lo[0];
     // j_shape_high: second-highest can exceed the highest  (hi_{k-1} > lo_k)
     let j_shape_high = n_vals >= 2 && count_hi[n_vals - 2] > count_lo[n_vals - 1];
 
     // --- pairwise adjacent orderings ----------------------------------
     let n_pairs = n_vals - 1;
-    let mut value_a   = Vec::with_capacity(n_pairs);
-    let mut value_b   = Vec::with_capacity(n_pairs);
-    let mut resolved  = Vec::with_capacity(n_pairs);
+    let mut value_a = Vec::with_capacity(n_pairs);
+    let mut value_b = Vec::with_capacity(n_pairs);
+    let mut resolved = Vec::with_capacity(n_pairs);
     let mut a_greater = Vec::with_capacity(n_pairs);
 
     for i in 0..n_pairs {
         // a_always_greater: lo_a > hi_b — value_a always has more counts than value_b
-        let a_always_greater = count_lo[i]     > count_hi[i + 1];
+        let a_always_greater = count_lo[i] > count_hi[i + 1];
         let b_always_greater = count_lo[i + 1] > count_hi[i];
         value_a.push(values[i]);
         value_b.push(values[i + 1]);
@@ -733,9 +789,22 @@ pub(crate) fn compute_modality(
     }
 
     (
-        ModalityCounts { value: values, count_lo, count_hi },
-        ModalityPairs  { value_a, value_b, resolved, a_greater },
-        ModalityConclusion { unimodal, j_shape_low, j_shape_high },
+        ModalityCounts {
+            value: values,
+            count_lo,
+            count_hi,
+        },
+        ModalityPairs {
+            value_a,
+            value_b,
+            resolved,
+            a_greater,
+        },
+        ModalityConclusion {
+            unimodal,
+            j_shape_low,
+            j_shape_high,
+        },
     )
 }
 
@@ -763,7 +832,7 @@ where
 {
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-    
+
     let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
     let nrow_frequency = group_size * SampleCategory::COUNT;
 
@@ -803,9 +872,22 @@ where
             count: Vec::new(),
             n_samples: Vec::new(),
         },
-        modality_counts: ModalityCounts { value: Vec::new(), count_lo: Vec::new(), count_hi: Vec::new() },
-        modality_pairs: ModalityPairs { value_a: Vec::new(), value_b: Vec::new(), resolved: Vec::new(), a_greater: Vec::new() },
-        modality_conclusion: ModalityConclusion { unimodal: true, j_shape_low: false, j_shape_high: false },
+        modality_counts: ModalityCounts {
+            value: Vec::new(),
+            count_lo: Vec::new(),
+            count_hi: Vec::new(),
+        },
+        modality_pairs: ModalityPairs {
+            value_a: Vec::new(),
+            value_b: Vec::new(),
+            resolved: Vec::new(),
+            a_greater: Vec::new(),
+        },
+        modality_conclusion: ModalityConclusion {
+            unimodal: true,
+            j_shape_low: false,
+            j_shape_high: false,
+        },
         results: ResultsTable {
             id: Vec::new(),
             sample: Vec::new(),
@@ -885,26 +967,14 @@ where
     let max_samples: Vec<Vec<U>> = max_indices.iter().map(|&i| samples[i].clone()).collect();
 
     // Calculate frequency data for all three groups
-    let (
-        all_value,
-        all_f_average,
-        all_f_absolute,
-        all_f_relative,
-    ) = calculate_frequency_rows(&samples, scale_min, scale_max);
+    let (all_value, all_f_average, all_f_absolute, all_f_relative) =
+        calculate_frequency_rows(&samples, scale_min, scale_max);
 
-    let (
-        min_value,
-        min_f_average,
-        min_f_absolute,
-        min_f_relative,
-    ) = calculate_frequency_rows(&min_samples, scale_min, scale_max);
+    let (min_value, min_f_average, min_f_absolute, min_f_relative) =
+        calculate_frequency_rows(&min_samples, scale_min, scale_max);
 
-    let (
-        max_value,
-        max_f_average,
-        max_f_absolute,
-        max_f_relative,
-    ) = calculate_frequency_rows(&max_samples, scale_min, scale_max);
+    let (max_value, max_f_average, max_f_absolute, max_f_relative) =
+        calculate_frequency_rows(&max_samples, scale_min, scale_max);
 
     // Combine all frequency data into a single table
     let mut combined_value = all_value;
@@ -1291,7 +1361,9 @@ fn generate_combinations_recursive<T, U>(
 {
     if remaining == 0 {
         let depth = combo.len();
-        let sum: T = combo.iter().fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
+        let sum: T = combo
+            .iter()
+            .fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
         let mean = sum / T::from(depth).unwrap();
         let m2: T = combo.iter().fold(T::zero(), |acc, &v| {
             let diff = T::from(v).unwrap() - mean;
@@ -1481,11 +1553,7 @@ where
     };
 
     // Calculate all statistics
-    let closure_results = samples_to_result_list(
-        results,
-        scale_min,
-        scale_max
-    );
+    let closure_results = samples_to_result_list(results, scale_min, scale_max);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -1571,7 +1639,9 @@ where
             let freq_batch = RecordBatch::try_new(
                 freq_schema,
                 vec![
-                    Arc::new(StringArray::from(closure_results.frequency.samples_group().to_vec())),
+                    Arc::new(StringArray::from(
+                        closure_results.frequency.samples_group().to_vec(),
+                    )),
                     Arc::new(Int32Array::from(closure_results.frequency.value().to_vec())),
                     Arc::new(Float64Array::from(
                         closure_results.frequency.f_average().to_vec(),
@@ -1834,10 +1904,8 @@ pub(crate) fn write_streaming_statistics(
             count: dist_count,
             n_samples: dist_n_samples,
         };
-        let _ = write_frequency_dist_to_parquet(
-            &dist,
-            &format!("{}frequency_dist.parquet", base_path),
-        );
+        let _ =
+            write_frequency_dist_to_parquet(&dist, &format!("{}frequency_dist.parquet", base_path));
     }
 }
 
@@ -2447,10 +2515,10 @@ struct ClosureBranchCtx<T, U> {
     n: usize,
     target_sum_upper: T,
     target_sum_lower: T,
-    m2_upper_threshold: T,   // sd_upper² * (n-1)
-    m2_lower_threshold: T,   // sd_lower² * (n-1)
-    min_scale_sum_t: Vec<Vec<T>>,  // Borrowed from caller via clone-free ref would be ideal,
-    scale_max_sum_t: Vec<T>,       // but we just store refs below
+    m2_upper_threshold: T,        // sd_upper² * (n-1)
+    m2_lower_threshold: T,        // sd_lower² * (n-1)
+    min_scale_sum_t: Vec<Vec<T>>, // Borrowed from caller via clone-free ref would be ideal,
+    scale_max_sum_t: Vec<T>,      // but we just store refs below
     limit: usize,
     /// Float value for each scale index: value_as_t[i] = T::from(scale_min + i)
     value_as_t: Vec<T>,
@@ -2560,7 +2628,7 @@ fn closure_branch_recurse<T, U>(
     combo: &mut Vec<U>,
     running_sum: T,
     running_m2: T,
-    min_value_idx: usize,  // index into ctx.value_as_t/value_as_u for the minimum next value
+    min_value_idx: usize, // index into ctx.value_as_t/value_as_u for the minimum next value
     ctx: &ClosureBranchCtx<T, U>,
     results: &mut Vec<Vec<U>>,
 ) where
@@ -2608,12 +2676,8 @@ fn closure_branch_recurse<T, U>(
         if next_m2 <= ctx.m2_upper_threshold {
             combo.push(ctx.value_as_u[vi]);
             closure_branch_recurse(
-                combo,
-                next_sum,
-                next_m2,
-                vi, // next value must be >= this value
-                ctx,
-                results,
+                combo, next_sum, next_m2, vi, // next value must be >= this value
+                ctx, results,
             );
             combo.pop();
 
@@ -2644,7 +2708,7 @@ mod tests {
     #[test]
     fn test_frequency_samples_column() {
         let repetitions = 5;
-        
+
         // Test with 5 repetitions (like scale 1..=5)
         let samples = FrequencySamplesColumn::new(repetitions);
 
@@ -2743,10 +2807,7 @@ mod tests {
 
         // Check that results table is properly formed
         assert!(!results.results.sample.is_empty());
-        assert_eq!(
-            results.results.sample.len(),
-            results.results.horns.len()
-        );
+        assert_eq!(results.results.sample.len(), results.results.horns.len());
         assert_eq!(results.results.sample.len(), results.results.id.len());
         assert_eq!(results.results.id[0], 1.0);
         assert_eq!(
@@ -2819,7 +2880,12 @@ mod tests {
         for name in &["metrics_main", "metrics_horns", "frequency", "results"] {
             let path = format!("test_output/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up test files
@@ -2850,8 +2916,7 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             1,    // items
-            config,
-            None, // no stop_after limit
+            config, None, // no stop_after limit
         )
         .unwrap();
 
@@ -2863,10 +2928,21 @@ mod tests {
         assert!(std::path::Path::new("test_streaming/horns.parquet").exists());
 
         // Verify parquet files are valid (more than just "PAR1" magic bytes)
-        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "sample",
+            "horns",
+        ] {
             let path = format!("test_streaming/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up test files
@@ -2906,14 +2982,31 @@ mod tests {
         assert!(result.total_combinations > 0);
 
         // Verify all parquet files are valid
-        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "sample",
+            "horns",
+        ] {
             let path = format!("test_streaming_unsum/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up
-        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
+        for name in &[
+            "sample",
+            "horns",
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+        ] {
             let _ = std::fs::remove_file(format!("test_streaming_unsum/{}.parquet", name));
         }
         let _ = std::fs::remove_dir("test_streaming_unsum");
@@ -2939,22 +3032,38 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             1,    // items
-            config,
-            None, // no stop_after → main parallel path
+            config, None, // no stop_after → main parallel path
         )
         .unwrap();
 
         assert!(result.total_combinations > 0);
 
         // Verify all parquet files are valid
-        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "sample",
+            "horns",
+        ] {
             let path = format!("test_streaming_large/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up
-        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
+        for name in &[
+            "sample",
+            "horns",
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+        ] {
             let _ = std::fs::remove_file(format!("test_streaming_large/{}.parquet", name));
         }
         let _ = std::fs::remove_dir("test_streaming_large");

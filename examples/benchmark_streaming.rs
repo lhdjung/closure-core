@@ -23,8 +23,16 @@ fn main() {
     for c in CASES {
         let start = Instant::now();
         let results = closure_parallel::<f64, i32>(
-            c.mean, c.sd, c.n, c.scale_min, c.scale_max,
-            c.re_mean, c.re_sd, 1, None, None,
+            c.mean,
+            c.sd,
+            c.n,
+            c.scale_min,
+            c.scale_max,
+            c.re_mean,
+            c.re_sd,
+            1,
+            None,
+            None,
         )
         .unwrap();
         let t_parallel = start.elapsed();
@@ -37,8 +45,16 @@ fn main() {
         };
         let start = Instant::now();
         closure_parallel_streaming::<f64, i32>(
-            c.mean, c.sd, c.n, c.scale_min, c.scale_max,
-            c.re_mean, c.re_sd, 1, config, None,
+            c.mean,
+            c.sd,
+            c.n,
+            c.scale_min,
+            c.scale_max,
+            c.re_mean,
+            c.re_sd,
+            1,
+            config,
+            None,
         )
         .unwrap();
         let t_streaming = start.elapsed();
