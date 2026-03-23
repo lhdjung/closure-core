@@ -573,6 +573,72 @@ pub fn count_initial_combinations(scale_min: i32, scale_max: i32, depth: usize) 
     result
 }
 
+/// Returns `true` if `freqs` is unimodal: non-decreasing up to some peak, then
+/// non-increasing. The peak may be anywhere (first, last, or any interior index).
+/// Plateaus are allowed — the constraint is that no "valley" (decrease then
+/// increase) occurs. A length-0 or length-1 vector is trivially unimodal.
+fn is_unimodal(freqs: &[f64]) -> bool {
+    let mut ascending = true;
+    for i in 1..freqs.len() {
+        if freqs[i] > freqs[i - 1] {
+            // Going up after we already started descending — not unimodal.
+            if !ascending {
+                return false;
+            }
+        } else if freqs[i] < freqs[i - 1] {
+            ascending = false;
+        }
+        // freqs[i] == freqs[i-1]: plateau, no direction change needed.
+    }
+    true
+}
+
+/// Returns `true` if `freqs` has at least two strict local maxima **and** the
+/// sample mean lies strictly between the leftmost and rightmost peak values.
+///
+/// A strict local maximum at index `i` requires both neighbours to be strictly
+/// lower (boundary indices treat the missing neighbour as −∞, so the first and
+/// last elements can be peaks if their one neighbour is strictly lower).
+///
+/// `scale_min` is the Likert/scale value corresponding to index 0, so the scale
+/// value for index `i` is `scale_min + i`.
+fn is_bimodal_mean_between(freqs: &[f64], scale_min: i32) -> bool {
+    let n = freqs.len();
+    if n < 3 {
+        return false;
+    }
+
+    // Collect indices of strict local maxima.
+    let peaks: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let left = if i == 0 { -1.0 } else { freqs[i - 1] };
+            let right = if i == n - 1 { -1.0 } else { freqs[i + 1] };
+            freqs[i] > left && freqs[i] > right
+        })
+        .collect();
+
+    if peaks.len() < 2 {
+        return false;
+    }
+
+    // Compute the sample mean (weighted by frequency counts).
+    let total: f64 = freqs.iter().sum();
+    if total == 0.0 {
+        return false;
+    }
+    let mean: f64 = freqs
+        .iter()
+        .enumerate()
+        .map(|(i, &f)| f * (scale_min as f64 + i as f64))
+        .sum::<f64>()
+        / total;
+
+    let first_peak_val = scale_min as f64 + peaks[0] as f64;
+    let last_peak_val = scale_min as f64 + peaks[peaks.len() - 1] as f64;
+
+    first_peak_val < mean && mean < last_peak_val
+}
+
 /// Calculate horns index for a frequency distribution
 fn calculate_horns(freqs: &[f64], scale_min: i32, scale_max: i32) -> f64 {
     let scale_values: Vec<f64> = (scale_min..=scale_max).map(|v| v as f64).collect();
@@ -760,20 +826,10 @@ pub(crate) fn compute_modality(
     let values: Vec<i32> = (scale_min..=scale_max).collect();
 
     // --- modality flags -----------------------------------------------
-    let (can_be_unimodal, can_be_bimodal) = if n_vals >= 3 {
-        let mid_idx = n_vals / 2;
-        // can_be_unimodal: center's max count reaches or exceeds both extremes'
-        // minimums, so a bell-shaped sample cannot be ruled out.
-        // Use .max() so we require the center to beat the *higher* extreme minimum.
-        let lo_extreme = count_lo[0].max(count_lo[n_vals - 1]);
-        let cbu = count_hi[mid_idx] >= lo_extreme;
-        // can_be_bimodal: both extremes can each exceed the center's minimum count,
-        // so a U-shaped (bimodal) sample cannot be ruled out.
-        let cbb = count_hi[0] > count_lo[mid_idx] && count_hi[n_vals - 1] > count_lo[mid_idx];
-        (cbu, cbb)
-    } else {
-        (true, false)
-    };
+    // can_be_unimodal and can_be_bimodal are placeholders; they are always
+    // overridden by the exact per-sample scan in `samples_to_result_list`.
+    let can_be_unimodal = false;
+    let can_be_bimodal = false;
 
     // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
     let j_shape_low = n_vals >= 2 && count_hi[1] > count_lo[0];
@@ -931,9 +987,8 @@ where
     let values_all = samples_all * n;
 
     // Calculate horns for each sample; check per-sample modality in the same pass.
-    let mid_idx = group_size / 2;
-    let mut any_unimodal = false; // any sample has its mode at the center value
-    let mut any_bimodal = false; // any sample has both extremes > center
+    let mut any_unimodal = false;
+    let mut any_bimodal = false;
 
     let mut horns_values = Vec::with_capacity(samples_all);
     for sample in &samples {
@@ -944,16 +999,11 @@ where
         }
         horns_values.push(calculate_horns(&freqs, scale_min_i32, scale_max_i32));
 
-        // freqs values are exact integers (built by += 1.0), so == comparison is safe.
-        if !any_unimodal || !any_bimodal {
-            let mid = freqs[mid_idx];
-            let max_f = freqs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            if !any_unimodal && mid == max_f {
-                any_unimodal = true;
-            }
-            if !any_bimodal && freqs[0] > mid && freqs[group_size - 1] > mid {
-                any_bimodal = true;
-            }
+        if !any_unimodal && is_unimodal(&freqs) {
+            any_unimodal = true;
+        }
+        if !any_bimodal && is_bimodal_mean_between(&freqs, scale_min_i32) {
+            any_bimodal = true;
         }
     }
 
