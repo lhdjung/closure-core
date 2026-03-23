@@ -894,7 +894,7 @@ where
             a_greater: Vec::new(),
         },
         modality_conclusion: ModalityConclusion {
-            can_be_unimodal: true,
+            can_be_unimodal: false,
             can_be_bimodal: false,
             j_shape_low: false,
             j_shape_high: false,
@@ -930,15 +930,31 @@ where
     let samples_all = samples.len();
     let values_all = samples_all * n;
 
-    // Calculate horns for each sample
+    // Calculate horns for each sample; check per-sample modality in the same pass.
+    let mid_idx = group_size / 2;
+    let mut any_unimodal = false; // any sample has its mode at the center value
+    let mut any_bimodal = false; // any sample has both extremes > center
+
     let mut horns_values = Vec::with_capacity(samples_all);
     for sample in &samples {
-        let mut freqs = vec![0.0; group_size];
+        let mut freqs = vec![0.0f64; group_size];
         for &value in sample {
             let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
             freqs[idx] += 1.0;
         }
         horns_values.push(calculate_horns(&freqs, scale_min_i32, scale_max_i32));
+
+        // freqs values are exact integers (built by += 1.0), so == comparison is safe.
+        if !any_unimodal || !any_bimodal {
+            let mid = freqs[mid_idx];
+            let max_f = freqs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if !any_unimodal && mid == max_f {
+                any_unimodal = true;
+            }
+            if !any_bimodal && freqs[0] > mid && freqs[group_size - 1] > mid {
+                any_bimodal = true;
+            }
+        }
     }
 
     // Calculate horns statistics
@@ -1008,8 +1024,11 @@ where
     let id: Vec<f64> = (1..=samples_all).map(|i| i as f64).collect();
 
     let frequency_dist = calculate_frequency_dist(&samples, scale_min, scale_max);
-    let (modality_counts, modality_pairs, modality_conclusion) =
+    let (modality_counts, modality_pairs, mut modality_conclusion) =
         compute_modality(&frequency_dist, scale_min_i32, scale_max_i32);
+    // Override the two "can_be" flags with exact per-sample answers from the loop above.
+    modality_conclusion.can_be_unimodal = any_unimodal;
+    modality_conclusion.can_be_bimodal = any_bimodal;
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
