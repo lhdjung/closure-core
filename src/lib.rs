@@ -424,15 +424,18 @@ pub struct ModalityPairs {
 
 /// Modality conclusion flags for the full result set.
 ///
-/// - `unimodal`: false when the true-middle value's maximum count is below the
-///   minimum count of at least one scale extreme, meaning no sample can be
-///   bell-shaped.
+/// - `can_be_unimodal`: true when the center value's maximum count can reach or
+///   exceed the minimum count of both scale extremes, so a bell-shaped sample
+///   cannot be ruled out.  False proves that no sample can be bell-shaped.
+/// - `can_be_bimodal`: true when both scale extremes can each exceed the center
+///   value's minimum count, so a U-shaped (bimodal) sample cannot be ruled out.
 /// - `j_shape_low`: the second-lowest value can exceed the lowest in some
 ///   samples, so an asymmetric J-shape is possible at the low end.
 /// - `j_shape_high`: mirror of `j_shape_low` at the high end.
 #[derive(Clone, Debug)]
 pub struct ModalityConclusion {
-    pub unimodal: bool,
+    pub can_be_unimodal: bool,
+    pub can_be_bimodal: bool,
     pub j_shape_low: bool,
     pub j_shape_high: bool,
 }
@@ -724,7 +727,8 @@ pub(crate) fn compute_modality(
                 a_greater: Vec::new(),
             },
             ModalityConclusion {
-                unimodal: true,
+                can_be_unimodal: true,
+                can_be_bimodal: false,
                 j_shape_low: false,
                 j_shape_high: false,
             },
@@ -756,14 +760,19 @@ pub(crate) fn compute_modality(
     let values: Vec<i32> = (scale_min..=scale_max).collect();
 
     // --- modality flags -----------------------------------------------
-    // unimodal: false when at least one extreme always beats the true middle.
-    // Use .max() so we require the middle to beat the *higher* extreme minimum.
-    let unimodal = if n_vals >= 3 {
+    let (can_be_unimodal, can_be_bimodal) = if n_vals >= 3 {
         let mid_idx = n_vals / 2;
+        // can_be_unimodal: center's max count reaches or exceeds both extremes'
+        // minimums, so a bell-shaped sample cannot be ruled out.
+        // Use .max() so we require the center to beat the *higher* extreme minimum.
         let lo_extreme = count_lo[0].max(count_lo[n_vals - 1]);
-        count_hi[mid_idx] >= lo_extreme
+        let cbu = count_hi[mid_idx] >= lo_extreme;
+        // can_be_bimodal: both extremes can each exceed the center's minimum count,
+        // so a U-shaped (bimodal) sample cannot be ruled out.
+        let cbb = count_hi[0] > count_lo[mid_idx] && count_hi[n_vals - 1] > count_lo[mid_idx];
+        (cbu, cbb)
     } else {
-        true
+        (true, false)
     };
 
     // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
@@ -801,7 +810,8 @@ pub(crate) fn compute_modality(
             a_greater,
         },
         ModalityConclusion {
-            unimodal,
+            can_be_unimodal,
+            can_be_bimodal,
             j_shape_low,
             j_shape_high,
         },
@@ -884,7 +894,8 @@ where
             a_greater: Vec::new(),
         },
         modality_conclusion: ModalityConclusion {
-            unimodal: true,
+            can_be_unimodal: true,
+            can_be_bimodal: false,
             j_shape_low: false,
             j_shape_high: false,
         },
