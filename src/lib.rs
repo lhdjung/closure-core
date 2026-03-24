@@ -593,27 +593,38 @@ fn is_unimodal(freqs: &[f64]) -> bool {
     true
 }
 
-/// Returns `true` if `freqs` has at least two strict local maxima **and** the
-/// sample mean lies strictly between the leftmost and rightmost peak values.
+/// Returns `true` if `freqs` has at least two **qualifying** strict local maxima
+/// and the sample mean lies strictly between the leftmost and rightmost such
+/// peak values.
 ///
-/// A strict local maximum at index `i` requires both neighbours to be strictly
-/// lower (boundary indices treat the missing neighbour as −∞, so the first and
-/// last elements can be peaks if their one neighbour is strictly lower).
+/// A qualifying peak must (a) be a strict local maximum — both neighbours
+/// strictly lower, with boundary indices treating the missing neighbour as −∞
+/// — and (b) have a frequency that strictly exceeds the per-value average
+/// `total / k`. The average threshold filters out small boundary upticks (e.g.
+/// a J-shape that ends with a single count at the far extreme) which are
+/// not genuine modes.
 ///
-/// `scale_min` is the Likert/scale value corresponding to index 0, so the scale
-/// value for index `i` is `scale_min + i`.
+/// `scale_min` is the Likert/scale value corresponding to index 0.
 fn is_bimodal_mean_between(freqs: &[f64], scale_min: i32) -> bool {
     let n = freqs.len();
     if n < 3 {
         return false;
     }
 
-    // Collect indices of strict local maxima.
+    let total: f64 = freqs.iter().sum();
+    if total == 0.0 {
+        return false;
+    }
+
+    // A peak must exceed the per-value average to count as a genuine mode.
+    let avg = total / n as f64;
+
+    // Collect indices of qualifying strict local maxima.
     let peaks: Vec<usize> = (0..n)
         .filter(|&i| {
             let left = if i == 0 { -1.0 } else { freqs[i - 1] };
             let right = if i == n - 1 { -1.0 } else { freqs[i + 1] };
-            freqs[i] > left && freqs[i] > right
+            freqs[i] > left && freqs[i] > right && freqs[i] > avg
         })
         .collect();
 
@@ -622,10 +633,6 @@ fn is_bimodal_mean_between(freqs: &[f64], scale_min: i32) -> bool {
     }
 
     // Compute the sample mean (weighted by frequency counts).
-    let total: f64 = freqs.iter().sum();
-    if total == 0.0 {
-        return false;
-    }
     let mean: f64 = freqs
         .iter()
         .enumerate()
