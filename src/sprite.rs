@@ -536,8 +536,7 @@ where
                     results.frequency.samples_group().to_vec(),
                 )),
                 Arc::new(Int32Array::from(results.frequency.value().to_vec())),
-                Arc::new(Float64Array::from(results.frequency.f_average().to_vec())),
-                Arc::new(Float64Array::from(results.frequency.f_absolute().to_vec())),
+                Arc::new(Float64Array::from(results.frequency.f_count().to_vec())),
                 Arc::new(Float64Array::from(results.frequency.f_relative().to_vec())),
             ],
         );

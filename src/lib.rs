@@ -178,9 +178,10 @@ pub struct StreamingResult {
 ///
 /// **Important**: While strum makes iteration robust, these three variants have specific
 /// semantic meaning in the CLOSURE algorithm:
-/// - `All`: Frequencies across all samples
-/// - `HornsMin`: Frequencies for samples with minimum horns index
-/// - `HornsMax`: Frequencies for samples with maximum horns index
+/// - `All`: Medoid of all samples (the sample closest by EMD to the grand
+///   centroid). Formerly the grand mean; now an actual sample.
+/// - `HornsMin`: Medoid of samples with the minimum horns index.
+/// - `HornsMax`: Medoid of samples with the maximum horns index.
 ///
 /// Adding new variants requires corresponding changes to the frequency calculation logic
 /// in `samples_to_result_list()` and `write_streaming_statistics()` to define what
@@ -300,8 +301,8 @@ pub struct FrequencyTable {
     /// Sample categories: "all", "horns_min", "horns_max" each repeated for all scale values
     samples_group: FrequencySamplesColumn,
     value: Vec<i32>,
-    f_average: Vec<f64>,
-    f_absolute: Vec<f64>,
+    /// Count of each scale value in the group's medoid sample.
+    f_count: Vec<f64>,
     f_relative: Vec<f64>,
 }
 
@@ -309,21 +310,19 @@ impl FrequencyTable {
     /// Create a new FrequencyTable, validating that all fields have the same length
     ///
     /// # Panics
-    /// Panics if the lengths of value, f_average, f_absolute, or f_relative don't match
+    /// Panics if the lengths of value, f_count, or f_relative don't match
     /// the length of samples_group
     pub fn new(
         samples_group: FrequencySamplesColumn,
         value: Vec<i32>,
-        f_average: Vec<f64>,
-        f_absolute: Vec<f64>,
+        f_count: Vec<f64>,
         f_relative: Vec<f64>,
     ) -> Self {
         let expected_len = samples_group.len();
 
         let name_len_tuples = [
             ("value", value.len()),
-            ("f_average", f_average.len()),
-            ("f_absolute", f_absolute.len()),
+            ("f_count", f_count.len()),
             ("f_relative", f_relative.len()),
         ];
 
@@ -339,8 +338,7 @@ impl FrequencyTable {
         Self {
             samples_group,
             value,
-            f_average,
-            f_absolute,
+            f_count,
             f_relative,
         }
     }
@@ -365,14 +363,9 @@ impl FrequencyTable {
         &self.value
     }
 
-    /// Get a reference to the f_average column
-    pub fn f_average(&self) -> &[f64] {
-        &self.f_average
-    }
-
-    /// Get a reference to the f_absolute column
-    pub fn f_absolute(&self) -> &[f64] {
-        &self.f_absolute
+    /// Get a reference to the f_count column
+    pub fn f_count(&self) -> &[f64] {
+        &self.f_count
     }
 
     /// Get a reference to the f_relative column
@@ -684,38 +677,83 @@ fn calculate_horns_uniform(scale_min: i32, scale_max: i32) -> f64 {
     calculate_horns(&uniform_freqs, scale_min, scale_max)
 }
 
-/// Calculate frequency data for a specific set of samples
-fn calculate_frequency_rows<U>(
+/// Earth Mover's Distance between two 1D count (or frequency) vectors.
+///
+/// For 1D distributions this equals the L1 distance between cumulative sums,
+/// which respects the ordinal structure of the scale: a unit of mass moved one
+/// step along the scale costs 1, correctly treating adjacent values as closer
+/// than distant ones (unlike L1 or L2 on the raw vectors).
+fn emd_1d(f1: &[f64], f2: &[f64]) -> f64 {
+    let mut cum1 = 0.0f64;
+    let mut cum2 = 0.0f64;
+    let mut total = 0.0f64;
+    for (&a, &b) in f1.iter().zip(f2.iter()) {
+        cum1 += a;
+        cum2 += b;
+        total += (cum1 - cum2).abs();
+    }
+    total
+}
+
+/// Return frequency-table rows for the medoid of a set of samples.
+///
+/// The medoid is the sample whose frequency vector has the smallest EMD to the
+/// group centroid (mean frequency vector). For a single sample the medoid is
+/// that sample itself.
+///
+/// Because the medoid is one actual sample, `f_count` is the raw per-value
+/// count, and `f_relative = count / n`.
+fn compute_frequency_rows<U>(
     samples: &[Vec<U>],
     scale_min: U,
     scale_max: U,
-) -> (Vec<i32>, Vec<f64>, Vec<f64>, Vec<f64>)
+) -> (Vec<i32>, Vec<f64>, Vec<f64>)
 where
     U: Integer + ToPrimitive + Copy,
 {
     let scale_min_i32 = U::to_i32(&scale_min).unwrap();
     let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    let k = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let value: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
 
-    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
-
-    let mut f_absolute = vec![0.0; nrow_frequency];
-    let n_samples = samples.len() as f64;
-
-    // Count frequencies
-    for sample in samples {
-        for &value in sample {
-            let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
-            f_absolute[idx] += 1.0;
-        }
+    if samples.is_empty() {
+        return (value, vec![f64::NAN; k], vec![f64::NAN; k]);
     }
 
-    // Calculate derived values
-    let total_values: f64 = f_absolute.iter().sum();
-    let value: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
-    let f_average: Vec<f64> = f_absolute.iter().map(|&f| f / n_samples).collect();
-    let f_relative: Vec<f64> = f_absolute.iter().map(|&f| f / total_values).collect();
+    let n = samples[0].len() as f64;
 
-    (value, f_average, f_absolute, f_relative)
+    // Frequency vector for each sample.
+    let freq_vecs: Vec<Vec<f64>> = samples
+        .iter()
+        .map(|s| {
+            let mut fv = vec![0.0f64; k];
+            for &val in s {
+                let idx = (U::to_i32(&val).unwrap() - scale_min_i32) as usize;
+                fv[idx] += 1.0;
+            }
+            fv
+        })
+        .collect();
+
+    // Centroid of the group.
+    let m = samples.len() as f64;
+    let centroid: Vec<f64> = (0..k)
+        .map(|i| freq_vecs.iter().map(|fv| fv[i]).sum::<f64>() / m)
+        .collect();
+
+    // Medoid: sample with minimum EMD to centroid.
+    let medoid_fv = freq_vecs
+        .iter()
+        .min_by(|a, b| {
+            emd_1d(a, &centroid)
+                .partial_cmp(&emd_1d(b, &centroid))
+                .unwrap()
+        })
+        .unwrap(); // samples is non-empty
+
+    let f_relative: Vec<f64> = medoid_fv.iter().map(|&f| f / n).collect();
+
+    (value, medoid_fv.clone(), f_relative)
 }
 
 /// Calculate the distilled count distribution across all samples.
@@ -937,7 +975,6 @@ where
             FrequencySamplesColumn::new(group_size),
             value,
             vec![f64::NAN; nrow_frequency],
-            vec![0.0; nrow_frequency],
             vec![f64::NAN; nrow_frequency],
         ),
         frequency_dist: FrequencyDist {
@@ -1050,28 +1087,28 @@ where
     let min_samples: Vec<Vec<U>> = min_indices.iter().map(|&i| samples[i].clone()).collect();
     let max_samples: Vec<Vec<U>> = max_indices.iter().map(|&i| samples[i].clone()).collect();
 
-    // Calculate frequency data for all three groups
-    let (all_value, all_f_average, all_f_absolute, all_f_relative) =
-        calculate_frequency_rows(&samples, scale_min, scale_max);
+    // Compute medoid frequency rows for all three groups.
+    // Each group is represented by its medoid — the actual sample whose
+    // frequency vector is closest (by EMD) to the group centroid — rather
+    // than the group mean, which can be a fictional average not corresponding
+    // to any real sample.
+    let (all_value, all_f_count, all_f_relative) =
+        compute_frequency_rows(&samples, scale_min, scale_max);
 
-    let (min_value, min_f_average, min_f_absolute, min_f_relative) =
-        calculate_frequency_rows(&min_samples, scale_min, scale_max);
+    let (min_value, min_f_count, min_f_relative) =
+        compute_frequency_rows(&min_samples, scale_min, scale_max);
 
-    let (max_value, max_f_average, max_f_absolute, max_f_relative) =
-        calculate_frequency_rows(&max_samples, scale_min, scale_max);
+    let (max_value, max_f_count, max_f_relative) =
+        compute_frequency_rows(&max_samples, scale_min, scale_max);
 
     // Combine all frequency data into a single table
     let mut combined_value = all_value;
     combined_value.extend(min_value);
     combined_value.extend(max_value);
 
-    let mut combined_f_average = all_f_average;
-    combined_f_average.extend(min_f_average);
-    combined_f_average.extend(max_f_average);
-
-    let mut combined_f_absolute = all_f_absolute;
-    combined_f_absolute.extend(min_f_absolute);
-    combined_f_absolute.extend(max_f_absolute);
+    let mut combined_f_count = all_f_count;
+    combined_f_count.extend(min_f_count);
+    combined_f_count.extend(max_f_count);
 
     let mut combined_f_relative = all_f_relative;
     combined_f_relative.extend(min_f_relative);
@@ -1106,8 +1143,7 @@ where
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(group_size),
             combined_value,
-            combined_f_average,
-            combined_f_absolute,
+            combined_f_count,
             combined_f_relative,
         ),
         frequency_dist,
@@ -1270,8 +1306,7 @@ fn create_stats_writers(
     let frequency_schema = Arc::new(Schema::new(vec![
         Field::new("samples", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
-        Field::new("f_average", DataType::Float64, false),
-        Field::new("f_absolute", DataType::Float64, false),
+        Field::new("f_count", DataType::Float64, false),
         Field::new("f_relative", DataType::Float64, false),
     ]));
     let frequency_file = File::create(format!("{}frequency.parquet", base_path))?;
@@ -1731,10 +1766,7 @@ where
                     )),
                     Arc::new(Int32Array::from(closure_results.frequency.value().to_vec())),
                     Arc::new(Float64Array::from(
-                        closure_results.frequency.f_average().to_vec(),
-                    )),
-                    Arc::new(Float64Array::from(
-                        closure_results.frequency.f_absolute().to_vec(),
+                        closure_results.frequency.f_count().to_vec(),
                     )),
                     Arc::new(Float64Array::from(
                         closure_results.frequency.f_relative().to_vec(),
@@ -1880,8 +1912,7 @@ pub(crate) fn write_streaming_statistics(
 
         // Build frequency vectors for "all" category
         let mut all_value = Vec::with_capacity(nrow_frequency);
-        let mut all_f_absolute = Vec::with_capacity(nrow_frequency);
-        let mut all_f_average = Vec::with_capacity(nrow_frequency);
+        let mut all_f_count = Vec::with_capacity(nrow_frequency);
         let mut all_f_relative = Vec::with_capacity(nrow_frequency);
 
         let total_values = values_all as f64;
@@ -1890,15 +1921,13 @@ pub(crate) fn write_streaming_statistics(
         for scale_value in scale_min_i32..=scale_max_i32 {
             let count = *state.all_freq.get(&scale_value).unwrap_or(&0) as f64;
             all_value.push(scale_value);
-            all_f_absolute.push(count);
-            all_f_average.push(count / n_samples);
+            all_f_count.push(count / n_samples);
             all_f_relative.push(count / total_values);
         }
 
         // Build frequency vectors for "horns_min" category
         let mut min_value = Vec::with_capacity(nrow_frequency);
-        let mut min_f_absolute = Vec::with_capacity(nrow_frequency);
-        let mut min_f_average = Vec::with_capacity(nrow_frequency);
+        let mut min_f_count = Vec::with_capacity(nrow_frequency);
         let mut min_f_relative = Vec::with_capacity(nrow_frequency);
 
         let min_n_samples = state.min_count as f64;
@@ -1907,15 +1936,13 @@ pub(crate) fn write_streaming_statistics(
         for scale_value in scale_min_i32..=scale_max_i32 {
             let count = *state.min_freq.get(&scale_value).unwrap_or(&0) as f64;
             min_value.push(scale_value);
-            min_f_absolute.push(count);
-            min_f_average.push(count / min_n_samples);
+            min_f_count.push(count / min_n_samples);
             min_f_relative.push(count / min_total_values);
         }
 
         // Build frequency vectors for "horns_max" category
         let mut max_value = Vec::with_capacity(nrow_frequency);
-        let mut max_f_absolute = Vec::with_capacity(nrow_frequency);
-        let mut max_f_average = Vec::with_capacity(nrow_frequency);
+        let mut max_f_count = Vec::with_capacity(nrow_frequency);
         let mut max_f_relative = Vec::with_capacity(nrow_frequency);
 
         let max_n_samples = state.max_count as f64;
@@ -1924,8 +1951,7 @@ pub(crate) fn write_streaming_statistics(
         for scale_value in scale_min_i32..=scale_max_i32 {
             let count = *state.max_freq.get(&scale_value).unwrap_or(&0) as f64;
             max_value.push(scale_value);
-            max_f_absolute.push(count);
-            max_f_average.push(count / max_n_samples);
+            max_f_count.push(count / max_n_samples);
             max_f_relative.push(count / max_total_values);
         }
 
@@ -1934,13 +1960,9 @@ pub(crate) fn write_streaming_statistics(
         combined_value.extend(min_value);
         combined_value.extend(max_value);
 
-        let mut combined_f_average = all_f_average;
-        combined_f_average.extend(min_f_average);
-        combined_f_average.extend(max_f_average);
-
-        let mut combined_f_absolute = all_f_absolute;
-        combined_f_absolute.extend(min_f_absolute);
-        combined_f_absolute.extend(max_f_absolute);
+        let mut combined_f_count = all_f_count;
+        combined_f_count.extend(min_f_count);
+        combined_f_count.extend(max_f_count);
 
         let mut combined_f_relative = all_f_relative;
         combined_f_relative.extend(min_f_relative);
@@ -1950,8 +1972,7 @@ pub(crate) fn write_streaming_statistics(
         let frequency_table = FrequencyTable::new(
             FrequencySamplesColumn::new(nrow_frequency),
             combined_value,
-            combined_f_average,
-            combined_f_absolute,
+            combined_f_count,
             combined_f_relative,
         );
 
@@ -1961,8 +1982,7 @@ pub(crate) fn write_streaming_statistics(
             vec![
                 Arc::new(StringArray::from(frequency_table.samples_group().to_vec())),
                 Arc::new(Int32Array::from(frequency_table.value().to_vec())),
-                Arc::new(Float64Array::from(frequency_table.f_average().to_vec())),
-                Arc::new(Float64Array::from(frequency_table.f_absolute().to_vec())),
+                Arc::new(Float64Array::from(frequency_table.f_count().to_vec())),
                 Arc::new(Float64Array::from(frequency_table.f_relative().to_vec())),
             ],
         );
@@ -2923,8 +2943,7 @@ mod tests {
         assert_eq!(results.frequency.len(), expected_rows);
         assert_eq!(results.frequency.samples_group().len(), expected_rows);
         assert_eq!(results.frequency.value().len(), expected_rows);
-        assert_eq!(results.frequency.f_average().len(), expected_rows);
-        assert_eq!(results.frequency.f_absolute().len(), expected_rows);
+        assert_eq!(results.frequency.f_count().len(), expected_rows);
         assert_eq!(results.frequency.f_relative().len(), expected_rows);
 
         // Check that samples column has correct values
