@@ -36,6 +36,7 @@
 //! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
 //! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
 //! | `modality_summary` | one row: samples per shape class, whether the search was exhaustive, unimodality-deficit spread |
+//! | `modality_prominence` | samples per shape class at each threshold in the prominence envelope |
 //!
 //! # Reading the shape output
 //!
@@ -46,7 +47,9 @@
 //!   shape — but only if the search was exhaustive. A truncated run
 //!   (`stop_after`) and SPRITE both see part of the space, so
 //!   [`modality::ModalityShapes::can_be`] returns `None` for them rather than
-//!   claiming a proof.
+//!   claiming a proof. It is also only a proof relative to a threshold for what
+//!   counts as a mode, so `can_be` requires the class to be empty across a band
+//!   of thresholds rather than at one; `modality_prominence` shows the band.
 //! - A class with **many** members means very little on its own. Since one
 //!   admissible dataset is enough for an author to point at, the useful output
 //!   is the class's *conditional bounds*: what every dataset of that shape would
@@ -2175,6 +2178,42 @@ fn write_modality_to_parquet<U>(
         columns,
     )?;
 
+    // The prominence envelope: per-class counts at every threshold in the band,
+    // one row per (threshold, class). A zero count in `modality_summary` is a
+    // proof of impossibility only as far as this table keeps it at zero, so the
+    // two are meant to be read together.
+    let mut p_prom = Vec::new();
+    let mut p_counts = Vec::new();
+    let mut p_primary = Vec::new();
+    let mut p_class = Vec::new();
+    let mut p_n = Vec::new();
+    for rung in &shapes.ladder {
+        for class in ShapeClass::all() {
+            p_prom.push(rung.min_prominence);
+            p_counts.push(rung.min_prominence_counts);
+            p_primary.push(rung.primary);
+            p_class.push(class.as_str());
+            p_n.push(rung.n_of(class));
+        }
+    }
+    write_table(
+        &format!("{}modality_prominence.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("min_prominence", DataType::Float64, false),
+            Field::new("min_prominence_counts", DataType::UInt32, false),
+            Field::new("primary", DataType::Boolean, false),
+            Field::new("class", DataType::Utf8, false),
+            Field::new("n_samples", DataType::UInt64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(p_prom)),
+            Arc::new(UInt32Array::from(p_counts)),
+            Arc::new(BooleanArray::from(p_primary)),
+            Arc::new(StringArray::from(p_class)),
+            Arc::new(UInt64Array::from(p_n)),
+        ],
+    )?;
+
     Ok(())
 }
 
@@ -2979,6 +3018,24 @@ mod tests {
         assert_eq!(parquet_rows(&format!("{base}modality_counts.parquet")), 5);
         assert_eq!(parquet_rows(&format!("{base}modality_pairs.parquet")), 4);
         assert_eq!(parquet_rows(&format!("{base}modality_summary.parquet")), 1);
+
+        // The prominence envelope behind every `Some(false)`: one row per
+        // (threshold, class), so a reader can see how far the threshold would
+        // have to move before an empty class stopped being empty.
+        assert_eq!(
+            parquet_columns(&format!("{base}modality_prominence.parquet")),
+            vec![
+                "min_prominence",
+                "min_prominence_counts",
+                "primary",
+                "class",
+                "n_samples"
+            ]
+        );
+        assert_eq!(
+            parquet_rows(&format!("{base}modality_prominence.parquet")),
+            modality::DEFAULT_PROMINENCE_LADDER.len() * ShapeClass::all().count()
+        );
 
         let summary = parquet_columns(&format!("{base}modality_summary.parquet"));
         assert!(summary.contains(&"exhaustive".to_string()));

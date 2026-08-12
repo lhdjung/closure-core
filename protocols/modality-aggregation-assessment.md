@@ -746,6 +746,42 @@ single-peaked, zero exactly for weakly unimodal vectors, cross-checked against
 the textbook definition over all 330 count vectors of 7 observations on a 5-point
 scale.
 
+**A single threshold is not enough to carry a `Some(false)`, so `can_be`
+quantifies over a band.** An empty shape class is the strongest thing the crate
+says; resting it on one unvalidated constant would make the proof contingent on
+that constant, and contingent in the wrong direction — raising the threshold
+merges modes, so a *lower* threshold manufactures proofs of impossibility. Every
+sample is now classified at each threshold in
+`DEFAULT_PROMINENCE_LADDER = [0.02, 0.05, 0.10]` as well as at the configured
+one, and `can_be` answers `Some(false)` only when the class is empty across all
+of them. `min_prominence_admitting(class)` reports the margin,
+`can_be_at_primary` keeps the single-threshold answer, and the whole envelope
+reaches disk as `modality_prominence.parquet`. Sharing one run decomposition
+across the rungs makes this free: the `n = 400` cross-check runs in 7.6 s
+against 7.9 s before.
+
+The band's upper end is set by evidence, not taste. Prominence suppresses a peak
+by comparing it to a *taller* peak and ignores how much of the sample the
+suppressed peak holds, so past roughly 10% of `n` it stops measuring modality:
+at 0.15, `(20, 7, 8, 33, 32)` classifies as `OneModeInterior`, because the floor
+spike of 20 responses stands only 13 above the valley beside it. A distribution
+with a fifth of its mass at the bottom of the scale reported as a candidate bell
+is the classifier breaking, not the claim weakening. Both facts are pinned in
+`tests/shape_sweep.rs`.
+
+**The tallest bar of a sample is always a mode**, whatever the threshold. Without
+that exemption a vector spread over more than `1 / min_prominence` grid positions
+can have no bar tall enough to clear the threshold in absolute terms — its
+tallest is only `n / k` — and would be reported as having no mode at all. That
+put it in `Flat`, which is not unimodal, so an exhaustive scan over such samples
+answered `Some(false)` to *every* `can_be` query at once: a proof that the data
+had no shape whatsoever. It was reachable: a multi-item SPRITE grid is
+`(scale_max - scale_min) * items + 1` positions across, so six items on a 1–5
+scale already crosses the line. The regression test is a textbook-unimodal
+histogram on a 41-position grid — 10 everywhere, 11 at the centre — whose
+`unimodality_deficit` is 0 while the old rule called it flat. `Flat` now means
+"every count is equal" and nothing else, as its documentation always claimed.
+
 ### The two numbers this document had wrong
 
 Rebuilding shape detection on prominence changed the worked example in §2.1 and
@@ -830,6 +866,11 @@ Nothing from Part 5 was skipped. Two judgement calls worth flagging:
   §2.4 asked for the threshold to be explicit, named and scale-invariant, which
   it now is; picking its value against a labelled set of shapes is still open,
   and `unimodality_deficit` is the threshold-free reading in the meantime.
+  Since no `Some(false)` rests on that value alone any more — `can_be` requires
+  the class to be empty across `[0.02, 0.05, 0.10]` — what is still open is the
+  *per-class counts* and the conditional bounds, which are reported at the
+  primary threshold and do move with it. Read `modality_prominence.parquet`
+  before quoting a proportion.
 - Removing `ModalityConclusion` and renaming `f_count` are breaking changes for
   the R side.
 

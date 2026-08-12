@@ -10,17 +10,18 @@
 //!    the float DFS on how many samples exist;
 //! 3. shape classes partition the result set;
 //! 4. `can_be_*` really is the disjunction over scanned samples, on every code
-//!    path, so a path that forgets to compute shapes cannot report a proof;
+//!    path and at every rung of the prominence band, so a path that forgets to
+//!    compute shapes cannot report a proof;
 //! 5. widening the rounding tolerance only ever grows the result set, so the
 //!    `can_be_*` answers are monotone in it.
 //!
-//! The full grid runs in about four seconds under `cargo test`. Anything larger
+//! The full grid runs in about six seconds under `cargo test`. Anything larger
 //! is marked `#[ignore]`.
 
 use closure_core::modality::{ShapeClass, DEFAULT_MODE_PROMINENCE};
 use closure_core::{closure_count, closure_parallel};
 
-/// The grid the assessment swept. 156 of these 280 cells are non-empty.
+/// The grid the assessment swept, less its SD 1.8 column: 240 cells.
 const NS: [i32; 4] = [20, 30, 52, 100];
 const MEANS: [f64; 5] = [2.2, 3.0, 3.24, 3.5, 4.1];
 const SDS: [f64; 6] = [0.6, 0.8, 1.0, 1.13, 1.3, 1.5];
@@ -202,7 +203,11 @@ fn can_be_is_the_disjunction_over_scanned_samples() {
     // Re-derives the flags from the raw count vectors and compares. This is the
     // assertion that catches a code path which forgot to run the scan: a
     // hardcoded `false` would pass every other test in this file.
-    let prominence = ((DEFAULT_MODE_PROMINENCE * 100.0).ceil() as u32).max(1);
+    //
+    // `can_be` quantifies over the whole prominence band, not just the primary
+    // threshold, so the re-derivation does too — and the per-rung counts are
+    // checked against a fresh classification at each rung's own threshold.
+    let primary = ((DEFAULT_MODE_PROMINENCE * 100.0).ceil() as u32).max(1);
     for (mean, sd, n) in [
         (3.0, 1.13, 100),
         (3.5, 1.5, 100),
@@ -218,13 +223,37 @@ fn can_be_is_the_disjunction_over_scanned_samples() {
 
         let mut any_bell = false;
         let mut any_unimodal = false;
-        for row in results.results.counts.rows() {
-            let class = closure_core::modality::classify(row, prominence);
-            any_bell |= class.is_bell();
-            any_unimodal |= class.is_unimodal();
+        for rung in &shapes.ladder {
+            let mut per_class = [0u64; 6];
+            for row in results.results.counts.rows() {
+                let class = closure_core::modality::classify(row, rung.min_prominence_counts);
+                any_bell |= class.is_bell();
+                any_unimodal |= class.is_unimodal();
+                per_class[class as usize] += 1;
+            }
+            for (i, class) in ShapeClass::all().enumerate() {
+                assert_eq!(
+                    rung.n_of(class),
+                    per_class[i],
+                    "rung {} disagrees on class {class:?} at mean={mean} sd={sd}",
+                    rung.min_prominence
+                );
+            }
+            assert_eq!(
+                rung.primary,
+                rung.min_prominence_counts == primary
+                    && rung.min_prominence == DEFAULT_MODE_PROMINENCE
+            );
         }
         assert_eq!(shapes.can_be_bell_shaped(), Some(any_bell));
         assert_eq!(shapes.can_be_unimodal(), Some(any_unimodal));
+
+        // Class counts at the primary rung are the ones the conditional bounds
+        // belong to, so those two views must not drift apart.
+        let primary_rung = shapes.ladder.iter().find(|r| r.primary).unwrap();
+        for class in ShapeClass::all() {
+            assert_eq!(primary_rung.n_of(class), shapes.n_of(class));
+        }
     }
 }
 
@@ -324,7 +353,42 @@ fn a_ceiling_effect_is_not_reported_as_a_bell() {
         );
         assert!(shapes.n_of(ShapeClass::OneModeHighEdge) > 0);
         assert_eq!(shapes.n_of(ShapeClass::OneModeLowEdge), 0);
+
+        // The claim is deductive only as far as it is threshold-independent, so
+        // pin the envelope and not just the primary threshold: no rung anywhere
+        // in the band admits an interior mode.
+        assert_eq!(
+            shapes.min_prominence_admitting(ShapeClass::OneModeInterior),
+            None,
+            "an interior mode appears somewhere in the band at tolerance {rem}"
+        );
+        for rung in &shapes.ladder {
+            assert_eq!(
+                rung.n_of(ShapeClass::OneModeInterior),
+                0,
+                "prominence {} admits a bell at tolerance {rem}",
+                rung.min_prominence
+            );
+            assert!(rung.n_of(ShapeClass::OneModeHighEdge) > 0);
+        }
     }
+
+    // Where it *would* break, and why the band stops short of there. Past ~0.10
+    // of n, prominence starts erasing peaks that hold a large share of the
+    // sample: at 0.15 the floor spike in (20, 7, 8, 33, 32) is suppressed
+    // because it stands only 13 above the valley beside it, and a distribution
+    // with a fifth of its mass at the bottom of the scale gets reported as a
+    // candidate bell. That is the classifier breaking, not the claim weakening.
+    let artefact = [20u32, 7, 8, 33, 32];
+    assert_eq!(
+        closure_core::modality::classify(&artefact, 15),
+        ShapeClass::OneModeInterior
+    );
+    assert_eq!(
+        closure_core::modality::classify(&artefact, 10),
+        ShapeClass::TwoModes,
+        "inside the band the floor spike is a mode, which is what it is"
+    );
 
     // Conditional bounds are what make the "our data were one of those" reply
     // checkable: within the ceiling-peaked class the whole distribution is
