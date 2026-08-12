@@ -33,6 +33,27 @@
 //! | `scale_values.parquet` | which scale value each count column stands for |
 //! | `format.parquet` | format name, version, technique, `n`, `k`, `items`, scale bounds |
 //! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics |
+//! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
+//! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
+//! | `modality_summary` | one row: samples per shape class, whether the search was exhaustive, unimodality-deficit spread |
+//!
+//! # Reading the shape output
+//!
+//! [`modality::ModalityShapes`] answers what the raw data could have looked
+//! like. Three points decide how much its answers are worth:
+//!
+//! - A shape class with **zero** members means the raw data did not have that
+//!   shape — but only if the search was exhaustive. A truncated run
+//!   (`stop_after`) and SPRITE both see part of the space, so
+//!   [`modality::ModalityShapes::can_be`] returns `None` for them rather than
+//!   claiming a proof.
+//! - A class with **many** members means very little on its own. Since one
+//!   admissible dataset is enough for an author to point at, the useful output
+//!   is the class's *conditional bounds*: what every dataset of that shape would
+//!   also have to look like. Those are in `modality_shapes`.
+//! - Class **proportions** weight admissible datasets equally, the same
+//!   weighting `metrics_horns` already uses. That is a sensitivity analysis, not
+//!   a posterior probability.
 //!
 //! Set [`OutputFormat::Samples`] or [`OutputFormat::Both`] on the config to
 //! also write the older per-position layout (`sample.parquet` /
@@ -41,8 +62,10 @@
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
+use crate::modality::{ModalityShapes, ShapeAccumulator, ShapeClass, DEFAULT_MODE_PROMINENCE};
 use arrow::array::{
-    ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray, UInt32Array,
+    ArrayRef, BooleanArray, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray,
+    UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -72,6 +95,7 @@ impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send
 use thiserror::Error;
 
 mod count;
+pub mod modality;
 pub mod sample_counts;
 mod sprite;
 mod sprite_types;
@@ -369,6 +393,21 @@ impl FrequencySamplesColumn {
 /// Combined frequency data for a set of samples
 /// Each row represents frequency data for a specific value in a specific sample group
 ///
+/// Two different summaries of the same group sit side by side, because they
+/// answer different questions and neither substitutes for the other:
+///
+/// - `f_expected` is the mean count of the value across the group. It is a
+///   central tendency over admissible datasets, not itself a dataset — it need
+///   not be integral and generally does not satisfy the reported mean and SD.
+/// - `f_representative` is the count in one *actual* member of the group, the
+///   medoid (see [`medoid_of`]). It is a real reconstruction, but only one of
+///   many, and the group can be very widely spread around it. Read it alongside
+///   `modality_counts`, which gives the per-value range across the whole set.
+///
+/// `f_representative` is `NaN` in streaming mode, which cannot pick a medoid in
+/// a single pass. That is deliberate: the column means the same thing in every
+/// output file or is visibly absent, rather than quietly switching definition.
+///
 /// Invariant: All fields must have the same length to ensure valid data frame structure
 #[derive(Clone, Debug)]
 pub struct FrequencyTable {
@@ -377,8 +416,12 @@ pub struct FrequencyTable {
     /// Scale value of each row. Held as a float because a multi-item SPRITE
     /// grid has fractional values; at `items == 1` these are whole numbers.
     value: Vec<f64>,
-    /// Count of each scale value in the group's medoid sample.
-    f_count: Vec<f64>,
+    /// Mean count of the value across the group. Sums to `n` over a group.
+    f_expected: Vec<f64>,
+    /// Count of the value in the group's medoid. `NaN` when no medoid was
+    /// computed, which is the case for every streaming run.
+    f_representative: Vec<f64>,
+    /// `f_expected / n`: the expected proportion of responses at this value.
     f_relative: Vec<f64>,
 }
 
@@ -386,19 +429,21 @@ impl FrequencyTable {
     /// Create a new FrequencyTable, validating that all fields have the same length
     ///
     /// # Panics
-    /// Panics if the lengths of value, f_count, or f_relative don't match
-    /// the length of samples_group
+    /// Panics if the lengths of value, f_expected, f_representative, or
+    /// f_relative don't match the length of samples_group
     pub fn new(
         samples_group: FrequencySamplesColumn,
         value: Vec<f64>,
-        f_count: Vec<f64>,
+        f_expected: Vec<f64>,
+        f_representative: Vec<f64>,
         f_relative: Vec<f64>,
     ) -> Self {
         let expected_len = samples_group.len();
 
         let name_len_tuples = [
             ("value", value.len()),
-            ("f_count", f_count.len()),
+            ("f_expected", f_expected.len()),
+            ("f_representative", f_representative.len()),
             ("f_relative", f_relative.len()),
         ];
 
@@ -414,7 +459,8 @@ impl FrequencyTable {
         Self {
             samples_group,
             value,
-            f_count,
+            f_expected,
+            f_representative,
             f_relative,
         }
     }
@@ -439,9 +485,14 @@ impl FrequencyTable {
         &self.value
     }
 
-    /// Get a reference to the f_count column
-    pub fn f_count(&self) -> &[f64] {
-        &self.f_count
+    /// Get a reference to the f_expected column
+    pub fn f_expected(&self) -> &[f64] {
+        &self.f_expected
+    }
+
+    /// Get a reference to the f_representative column
+    pub fn f_representative(&self) -> &[f64] {
+        &self.f_representative
     }
 
     /// Get a reference to the f_relative column
@@ -491,23 +542,12 @@ pub struct ModalityPairs {
     pub a_greater: Vec<bool>,
 }
 
-/// Modality conclusion flags for the full result set.
-///
-/// - `can_be_unimodal`: true when the center value's maximum count can reach or
-///   exceed the minimum count of both scale extremes, so a bell-shaped sample
-///   cannot be ruled out.  False proves that no sample can be bell-shaped.
-/// - `can_be_bimodal`: true when both scale extremes can each exceed the center
-///   value's minimum count, so a U-shaped (bimodal) sample cannot be ruled out.
-/// - `j_shape_low`: the second-lowest value can exceed the lowest in some
-///   samples, so an asymmetric J-shape is possible at the low end.
-/// - `j_shape_high`: mirror of `j_shape_low` at the high end.
-#[derive(Clone, Debug)]
-pub struct ModalityConclusion {
-    pub can_be_unimodal: bool,
-    pub can_be_bimodal: bool,
-    pub j_shape_low: bool,
-    pub j_shape_high: bool,
-}
+// Shape conclusions live in `crate::modality` as `ModalityShapes`, which
+// records per-class sample counts and per-class count bounds instead of a fixed
+// set of booleans. `j_shape_low` / `j_shape_high` are now
+// `ModalityShapes::can_be_j_shape_low` / `_high`, derived from the same
+// per-sample scan as every other class rather than from the `count_lo`/
+// `count_hi` box, whose corners are not generally admissible samples.
 
 /// Main metrics about the CLOSURE results
 #[derive(Clone, Debug)]
@@ -605,7 +645,8 @@ pub struct ResultListFromMeanSdN<U> {
     pub frequency_dist: FrequencyDist,
     pub modality_counts: ModalityCounts,
     pub modality_pairs: ModalityPairs,
-    pub modality_conclusion: ModalityConclusion,
+    /// Per-shape-class sample counts and conditional per-value count bounds.
+    pub modality_shapes: ModalityShapes,
     pub results: ResultsTable<U>,
 }
 
@@ -714,79 +755,6 @@ pub fn count_initial_combinations(scale_min: i32, scale_max: i32, depth: usize) 
     result
 }
 
-/// Returns `true` if `freqs` is unimodal: non-decreasing up to some peak, then
-/// non-increasing. The peak may be anywhere (first, last, or any interior index).
-/// Plateaus are allowed — the constraint is that no "valley" (decrease then
-/// increase) occurs. A length-0 or length-1 vector is trivially unimodal.
-fn is_unimodal(freqs: &[f64]) -> bool {
-    let mut ascending = true;
-    for i in 1..freqs.len() {
-        if freqs[i] > freqs[i - 1] {
-            // Going up after we already started descending — not unimodal.
-            if !ascending {
-                return false;
-            }
-        } else if freqs[i] < freqs[i - 1] {
-            ascending = false;
-        }
-        // freqs[i] == freqs[i-1]: plateau, no direction change needed.
-    }
-    true
-}
-
-/// Returns `true` if `freqs` has at least two **qualifying** strict local maxima
-/// and the sample mean lies strictly between the leftmost and rightmost such
-/// peak values.
-///
-/// A qualifying peak must (a) be a strict local maximum — both neighbours
-/// strictly lower, with boundary indices treating the missing neighbour as −∞
-/// — and (b) have a frequency that strictly exceeds the per-value average
-/// `total / k`. The average threshold filters out small boundary upticks (e.g.
-/// a J-shape that ends with a single count at the far extreme) which are
-/// not genuine modes.
-///
-/// `scale_min` is the Likert/scale value corresponding to index 0.
-fn is_bimodal_mean_between(freqs: &[f64], scale_min: i32) -> bool {
-    let n = freqs.len();
-    if n < 3 {
-        return false;
-    }
-
-    let total: f64 = freqs.iter().sum();
-    if total == 0.0 {
-        return false;
-    }
-
-    // A peak must exceed the per-value average to count as a genuine mode.
-    let avg = total / n as f64;
-
-    // Collect indices of qualifying strict local maxima.
-    let peaks: Vec<usize> = (0..n)
-        .filter(|&i| {
-            let left = if i == 0 { -1.0 } else { freqs[i - 1] };
-            let right = if i == n - 1 { -1.0 } else { freqs[i + 1] };
-            freqs[i] > left && freqs[i] > right && freqs[i] > avg
-        })
-        .collect();
-
-    if peaks.len() < 2 {
-        return false;
-    }
-
-    // Compute the sample mean (weighted by frequency counts).
-    let mean: f64 = freqs
-        .iter()
-        .enumerate()
-        .map(|(i, &f)| f * (scale_min as f64 + i as f64))
-        .sum::<f64>()
-        / total;
-
-    let first_peak_val = scale_min as f64 + peaks[0] as f64;
-    let last_peak_val = scale_min as f64 + peaks[peaks.len() - 1] as f64;
-
-    first_peak_val < mean && mean < last_peak_val
-}
-
 /// Calculate horns index for a frequency distribution
 fn calculate_horns(freqs: &[f64], scale_min: i32, scale_max: i32) -> f64 {
     let scale_values: Vec<f64> = (scale_min..=scale_max).map(|v| v as f64).collect();
@@ -837,81 +805,160 @@ pub(crate) fn horns_from_counts(freqs: &[f64]) -> f64 {
     calculate_horns(freqs, 0, freqs.len() as i32 - 1)
 }
 
-/// Earth Mover's Distance between two 1D count (or frequency) vectors.
+/// Earth Mover's Distance between two count vectors over the same grid.
 ///
 /// For 1D distributions this equals the L1 distance between cumulative sums,
 /// which respects the ordinal structure of the scale: a unit of mass moved one
 /// step along the scale costs 1, correctly treating adjacent values as closer
 /// than distant ones (unlike L1 or L2 on the raw vectors).
-fn emd_1d(f1: &[f64], f2: &[f64]) -> f64 {
-    let mut cum1 = 0.0f64;
-    let mut cum2 = 0.0f64;
-    let mut total = 0.0f64;
+///
+/// This is the definition [`medoid_of`] minimises. That function computes the
+/// same quantity by a decomposition that avoids the quadratic pairwise loop, so
+/// this direct form is kept as the reference the tests check it against.
+#[cfg(test)]
+fn emd_1d(f1: &[u32], f2: &[u32]) -> u64 {
+    let mut cum1 = 0i64;
+    let mut cum2 = 0i64;
+    let mut total = 0u64;
     for (&a, &b) in f1.iter().zip(f2.iter()) {
-        cum1 += a;
-        cum2 += b;
-        total += (cum1 - cum2).abs();
+        cum1 += a as i64;
+        cum2 += b as i64;
+        total += (cum1 - cum2).unsigned_abs();
     }
     total
 }
 
-/// Return frequency-table rows for the medoid of a set of samples.
+/// The medoid of a group: the sample minimising the summed EMD to every other
+/// sample in the group.
 ///
-/// The medoid is the sample whose frequency vector has the smallest EMD to the
-/// group centroid (mean frequency vector). For a single sample the medoid is
-/// that sample itself.
+/// This is the real medoid, not the sample nearest the group mean. The two
+/// differ — in CDF space the first is a median and the second is anchored on a
+/// mean — and the medoid is the robust one, which is the entire reason for
+/// preferring an actual sample over a centroid in the first place.
 ///
-/// Because the medoid is one actual sample, `f_count` is the raw per-value
-/// count, and `f_relative = count / n`.
+/// Ties are broken by taking the lexicographically smallest count vector, so
+/// the answer does not depend on enumeration order. That matters because
+/// enumeration order is not reproducible under `stop_after` or for SPRITE.
+///
+/// # Complexity
+///
+/// Naively this is `O(m² k)`. Since 1D EMD is the L1 distance between
+/// cumulative counts, the total cost of a candidate `x` decomposes per grid
+/// position into `Σ_y |F_x(j) − F_y(j)|`, and every `F(j)` is an integer in
+/// `0..=n`. So one pass builds a histogram of cumulative counts per position
+/// and a second pass answers each candidate from its prefix sums: `O(m k + k
+/// n)` overall.
+fn medoid_of<'a, I>(rows: I, k: usize, n: usize) -> Option<Vec<u32>>
+where
+    I: Iterator<Item = &'a [u32]> + Clone,
+{
+    if k == 0 {
+        return None;
+    }
+    // Cumulative counts at the last position are always n, so they contribute
+    // nothing to any distance and are skipped.
+    let cuts = k - 1;
+    let stride = n + 1;
+
+    // hist[j * stride + c] = how many samples have cumulative count c at cut j.
+    let mut hist = vec![0u64; cuts * stride];
+    let mut m = 0u64;
+    for row in rows.clone() {
+        let mut cum = 0usize;
+        for (j, &c) in row[..cuts].iter().enumerate() {
+            cum += c as usize;
+            hist[j * stride + cum.min(n)] += 1;
+        }
+        m += 1;
+    }
+    if m == 0 {
+        return None;
+    }
+
+    // Per cut, prefix counts and prefix weighted sums over cumulative values.
+    let mut pre_count = vec![0u64; cuts * (stride + 1)];
+    let mut pre_weight = vec![0u64; cuts * (stride + 1)];
+    for j in 0..cuts {
+        for c in 0..stride {
+            let h = hist[j * stride + c];
+            pre_count[j * (stride + 1) + c + 1] = pre_count[j * (stride + 1) + c] + h;
+            pre_weight[j * (stride + 1) + c + 1] = pre_weight[j * (stride + 1) + c] + h * c as u64;
+        }
+    }
+
+    let mut best: Option<(u64, Vec<u32>)> = None;
+    for row in rows {
+        let mut cost = 0u64;
+        let mut cum = 0usize;
+        for (j, &c) in row[..cuts].iter().enumerate() {
+            cum += c as usize;
+            let v = cum.min(n);
+            let base = j * (stride + 1);
+            // Samples at or below v, and their summed cumulative counts.
+            let lo_n = pre_count[base + v + 1];
+            let lo_w = pre_weight[base + v + 1];
+            let all_n = pre_count[base + stride];
+            let all_w = pre_weight[base + stride];
+            // Σ|v − c| split at v: those below contribute v·n − Σc, those above Σc − v·n.
+            cost += (v as u64 * lo_n - lo_w) + ((all_w - lo_w) - v as u64 * (all_n - lo_n));
+        }
+        let better = match &best {
+            None => true,
+            Some((best_cost, best_row)) => {
+                cost < *best_cost || (cost == *best_cost && row < best_row.as_slice())
+            }
+        };
+        if better {
+            best = Some((cost, row.to_vec()));
+        }
+    }
+    best.map(|(_, row)| row)
+}
+
+/// Return the frequency-table rows for one group of samples.
+///
+/// Yields `(value, f_expected, f_representative, f_relative)`, where
+/// `f_expected` is the mean count per sample, `f_representative` is the count in
+/// the group medoid, and `f_relative` is `f_expected / n`. See
+/// [`FrequencyTable`] for why both summaries are reported.
 fn compute_frequency_rows<'a, I>(
     grid: &ValueGrid,
     n: usize,
     rows: I,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>)
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)
 where
     I: Iterator<Item = &'a [u32]> + Clone,
 {
     let k = grid.len();
     let value = grid.values().to_vec();
 
-    // Centroid of the group, and the group size, in one pass.
-    let mut centroid = vec![0.0f64; k];
+    // Summed counts and group size in one pass.
+    let mut summed = vec![0u64; k];
     let mut m = 0usize;
     for row in rows.clone() {
-        for (acc, &c) in centroid.iter_mut().zip(row.iter()) {
-            *acc += c as f64;
+        for (acc, &c) in summed.iter_mut().zip(row.iter()) {
+            *acc += c as u64;
         }
         m += 1;
     }
 
     if m == 0 {
-        return (value, vec![f64::NAN; k], vec![f64::NAN; k]);
+        return (
+            value,
+            vec![f64::NAN; k],
+            vec![f64::NAN; k],
+            vec![f64::NAN; k],
+        );
     }
 
-    for acc in &mut centroid {
-        *acc /= m as f64;
-    }
+    let f_expected: Vec<f64> = summed.iter().map(|&s| s as f64 / m as f64).collect();
+    let f_relative: Vec<f64> = f_expected.iter().map(|&f| f / n as f64).collect();
+    let f_representative = match medoid_of(rows, k, n) {
+        Some(medoid) => medoid.iter().map(|&c| c as f64).collect(),
+        None => vec![f64::NAN; k],
+    };
 
-    // Medoid: the sample whose frequency vector is closest to the centroid by
-    // EMD. Unlike the centroid itself, it is an actual sample.
-    let mut medoid: &[u32] = &[];
-    let mut best = f64::INFINITY;
-    let mut scratch = vec![0.0f64; k];
-    for row in rows {
-        for (slot, &c) in scratch.iter_mut().zip(row.iter()) {
-            *slot = c as f64;
-        }
-        let distance = emd_1d(&scratch, &centroid);
-        if distance < best {
-            best = distance;
-            medoid = row;
-        }
-    }
-
-    let f_count: Vec<f64> = medoid.iter().map(|&c| c as f64).collect();
-    let f_relative: Vec<f64> = f_count.iter().map(|&f| f / n as f64).collect();
-
-    (value, f_count, f_relative)
+    (value, f_expected, f_representative, f_relative)
 }
 
 /// Calculate the distilled count distribution across all samples.
@@ -962,12 +1009,18 @@ fn calculate_frequency_dist(counts: &SampleCounts) -> FrequencyDist {
     }
 }
 
-/// Compute modality analysis from a `FrequencyDist`, returning the three
-/// result structs that map directly to the R-level tibbles.
+/// Compute the per-value count ranges and adjacent-pair orderings from a
+/// `FrequencyDist`, returning the two result structs that map directly to the
+/// R-level tibbles.
+///
+/// Shape conclusions are *not* computed here. They require a per-sample scan —
+/// these bounds describe a box around the result set, and the box has corners
+/// that are not admissible samples — and live in [`ModalityShapes`], built by
+/// [`ShapeAccumulator`] as samples stream past.
 pub(crate) fn compute_modality(
     freq_dist: &FrequencyDist,
     grid: &ValueGrid,
-) -> (ModalityCounts, ModalityPairs, ModalityConclusion) {
+) -> (ModalityCounts, ModalityPairs) {
     let n_vals = grid.len();
 
     if n_vals == 0 || freq_dist.value.is_empty() {
@@ -982,12 +1035,6 @@ pub(crate) fn compute_modality(
                 value_b: Vec::new(),
                 resolved: Vec::new(),
                 a_greater: Vec::new(),
-            },
-            ModalityConclusion {
-                can_be_unimodal: true,
-                can_be_bimodal: false,
-                j_shape_low: false,
-                j_shape_high: false,
             },
         );
     }
@@ -1018,17 +1065,6 @@ pub(crate) fn compute_modality(
 
     let values: Vec<f64> = grid.values().to_vec();
 
-    // --- modality flags -----------------------------------------------
-    // can_be_unimodal and can_be_bimodal are placeholders; they are always
-    // overridden by the exact per-sample scan in `samples_to_result_list`.
-    let can_be_unimodal = false;
-    let can_be_bimodal = false;
-
-    // j_shape_low:  second-lowest  can exceed the lowest   (hi_2 > lo_1)
-    let j_shape_low = n_vals >= 2 && count_hi[1] > count_lo[0];
-    // j_shape_high: second-highest can exceed the highest  (hi_{k-1} > lo_k)
-    let j_shape_high = n_vals >= 2 && count_hi[n_vals - 2] > count_lo[n_vals - 1];
-
     // --- pairwise adjacent orderings ----------------------------------
     let n_pairs = n_vals - 1;
     let mut value_a = Vec::with_capacity(n_pairs);
@@ -1057,12 +1093,6 @@ pub(crate) fn compute_modality(
             value_b,
             resolved,
             a_greater,
-        },
-        ModalityConclusion {
-            can_be_unimodal,
-            can_be_bimodal,
-            j_shape_low,
-            j_shape_high,
         },
     )
 }
@@ -1120,6 +1150,7 @@ where
             value,
             vec![f64::NAN; nrow_frequency],
             vec![f64::NAN; nrow_frequency],
+            vec![f64::NAN; nrow_frequency],
         ),
         frequency_dist: FrequencyDist {
             value: Vec::new(),
@@ -1137,18 +1168,21 @@ where
             resolved: Vec::new(),
             a_greater: Vec::new(),
         },
-        modality_conclusion: ModalityConclusion {
-            can_be_unimodal: false,
-            can_be_bimodal: false,
-            j_shape_low: false,
-            j_shape_high: false,
-        },
+        // Nothing was scanned, so nothing is ruled out: every `can_be` query on
+        // this returns `None`, not `false`.
+        modality_shapes: modality::empty_shapes(DEFAULT_MODE_PROMINENCE),
         results: ResultsTable::new(Vec::new(), SampleCounts::new(grid, n), Vec::new()),
     }
 }
 
-/// Calculate all statistics for the samples
-fn counts_to_result_list<U>(counts: SampleCounts) -> ResultListFromMeanSdN<U>
+/// Calculate all statistics for the samples.
+///
+/// `exhaustive` says whether `counts` is the complete set of samples matching
+/// the reported statistics. It is false for a truncated CLOSURE search and for
+/// SPRITE, which samples the solution space rather than enumerating it. Only
+/// [`ModalityShapes`] uses it, and only to decide whether an empty shape class
+/// is a proof of impossibility or merely an absence of evidence.
+fn counts_to_result_list<U>(counts: SampleCounts, exhaustive: bool) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
 {
@@ -1165,9 +1199,8 @@ where
     let samples_all = counts.nrow();
     let values_all = samples_all * n;
 
-    // Calculate horns for each sample; check per-sample modality in the same pass.
-    let mut any_unimodal = false;
-    let mut any_bimodal = false;
+    // Calculate horns for each sample; classify its shape in the same pass.
+    let mut shapes = ShapeAccumulator::new(group_size, n, DEFAULT_MODE_PROMINENCE);
 
     let mut horns_values = Vec::with_capacity(samples_all);
     let mut freqs = vec![0.0f64; group_size];
@@ -1176,14 +1209,9 @@ where
             *slot = c as f64;
         }
         horns_values.push(horns_from_counts(&freqs));
-
-        if !any_unimodal && is_unimodal(&freqs) {
-            any_unimodal = true;
-        }
-        if !any_bimodal && is_bimodal_mean_between(&freqs, 0) {
-            any_bimodal = true;
-        }
+        shapes.update(row);
     }
+    let modality_shapes = shapes.finish(exhaustive);
 
     // Calculate horns statistics
     let horns_mean = horns_values.iter().sum::<f64>() / samples_all as f64;
@@ -1218,17 +1246,15 @@ where
         .map(|(i, _)| i)
         .collect();
 
-    // Compute medoid frequency rows for all three groups.
-    // Each group is represented by its medoid — the actual sample whose
-    // frequency vector is closest (by EMD) to the group centroid — rather
-    // than the group mean, which can be a fictional average not corresponding
-    // to any real sample.
-    let (all_value, all_f_count, all_f_relative) = compute_frequency_rows(&grid, n, counts.rows());
+    // Frequency rows for all three groups. Each group reports both its mean
+    // profile and its medoid; see `FrequencyTable` for why both are needed.
+    let (all_value, all_f_exp, all_f_rep, all_f_rel) =
+        compute_frequency_rows(&grid, n, counts.rows());
 
-    let (min_value, min_f_count, min_f_relative) =
+    let (min_value, min_f_exp, min_f_rep, min_f_rel) =
         compute_frequency_rows(&grid, n, min_indices.iter().map(|&i| counts.row(i)));
 
-    let (max_value, max_f_count, max_f_relative) =
+    let (max_value, max_f_exp, max_f_rep, max_f_rel) =
         compute_frequency_rows(&grid, n, max_indices.iter().map(|&i| counts.row(i)));
 
     // Combine all frequency data into a single table
@@ -1236,23 +1262,23 @@ where
     combined_value.extend(min_value);
     combined_value.extend(max_value);
 
-    let mut combined_f_count = all_f_count;
-    combined_f_count.extend(min_f_count);
-    combined_f_count.extend(max_f_count);
+    let mut combined_f_expected = all_f_exp;
+    combined_f_expected.extend(min_f_exp);
+    combined_f_expected.extend(max_f_exp);
 
-    let mut combined_f_relative = all_f_relative;
-    combined_f_relative.extend(min_f_relative);
-    combined_f_relative.extend(max_f_relative);
+    let mut combined_f_representative = all_f_rep;
+    combined_f_representative.extend(min_f_rep);
+    combined_f_representative.extend(max_f_rep);
+
+    let mut combined_f_relative = all_f_rel;
+    combined_f_relative.extend(min_f_rel);
+    combined_f_relative.extend(max_f_rel);
 
     // Create ID column for results table
     let id: Vec<f64> = (1..=samples_all).map(|i| i as f64).collect();
 
     let frequency_dist = calculate_frequency_dist(&counts);
-    let (modality_counts, modality_pairs, mut modality_conclusion) =
-        compute_modality(&frequency_dist, &grid);
-    // Override the two "can_be" flags with exact per-sample answers from the loop above.
-    modality_conclusion.can_be_unimodal = any_unimodal;
-    modality_conclusion.can_be_bimodal = any_bimodal;
+    let (modality_counts, modality_pairs) = compute_modality(&frequency_dist, &grid);
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
@@ -1273,13 +1299,14 @@ where
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(group_size),
             combined_value,
-            combined_f_count,
+            combined_f_expected,
+            combined_f_representative,
             combined_f_relative,
         ),
         frequency_dist,
         modality_counts,
         modality_pairs,
-        modality_conclusion,
+        modality_shapes,
         results: ResultsTable::new(id, counts, horns_values),
     }
 }
@@ -1432,7 +1459,8 @@ fn create_stats_writers(
     let frequency_schema = Arc::new(Schema::new(vec![
         Field::new("samples", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
-        Field::new("f_count", DataType::Float64, false),
+        Field::new("f_expected", DataType::Float64, false),
+        Field::new("f_representative", DataType::Float64, false),
         Field::new("f_relative", DataType::Float64, false),
     ]));
     let frequency_file = File::create(format!("{}frequency.parquet", base_path))?;
@@ -1808,7 +1836,10 @@ where
         n_usize,
         results,
     );
-    let closure_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts);
+    // `stop_after` truncates the enumeration, so the result set is then only
+    // part of the solution space and an unseen shape is not an impossible one.
+    let closure_results: ResultListFromMeanSdN<U> =
+        counts_to_result_list(counts, stop_after.is_none());
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -1884,7 +1915,10 @@ pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFro
                 results.frequency.samples_group().to_vec(),
             )),
             Arc::new(Float64Array::from(results.frequency.value().to_vec())),
-            Arc::new(Float64Array::from(results.frequency.f_count().to_vec())),
+            Arc::new(Float64Array::from(results.frequency.f_expected().to_vec())),
+            Arc::new(Float64Array::from(
+                results.frequency.f_representative().to_vec(),
+            )),
             Arc::new(Float64Array::from(results.frequency.f_relative().to_vec())),
         ],
     );
@@ -1897,6 +1931,7 @@ pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFro
         &results.frequency_dist,
         &format!("{}frequency_dist.parquet", base_path),
     );
+    let _ = write_modality_to_parquet(base_path, results);
 }
 
 /// Running frequency statistics for the streaming paths.
@@ -1917,6 +1952,10 @@ pub(crate) struct StreamingFrequencyState {
     max_count: usize,
     /// Flat 2D array for frequency_dist: indexed by [v_idx * (n+1) + count]
     freq_dist: Vec<u32>,
+    /// Per-sample shape classification. Streaming sees every sample exactly
+    /// once, which is all the shape analysis needs, so it reports the same
+    /// classes and the same conditional bounds as memory mode.
+    shapes: ShapeAccumulator,
     k: usize,
     n: usize,
 }
@@ -1933,6 +1972,7 @@ impl StreamingFrequencyState {
             min_count: 0,
             max_count: 0,
             freq_dist: vec![0u32; k * (n + 1)],
+            shapes: ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE),
             k,
             n,
         }
@@ -1940,6 +1980,7 @@ impl StreamingFrequencyState {
 
     /// Fold one sample's counts into the running statistics.
     pub(crate) fn update(&mut self, counts: &[u32], horns: f64) {
+        self.shapes.update(counts);
         let stride = self.n + 1;
         for (v_idx, &cnt) in counts.iter().enumerate() {
             self.all_freq[v_idx] += cnt as i64;
@@ -1999,6 +2040,144 @@ fn write_frequency_dist_to_parquet(
     Ok(())
 }
 
+/// Write one Parquet file from a schema and its columns.
+fn write_table(
+    path: &str,
+    schema: Arc<Schema>,
+    columns: Vec<arrow::array::ArrayRef>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None)?;
+    writer.write(&RecordBatch::try_new(schema, columns)?)?;
+    writer.close()?;
+    Ok(())
+}
+
+/// Write the four modality tables.
+///
+/// These used to be computed and then dropped on the floor: no writer existed
+/// for them, so the whole shape analysis was reachable only from Rust. The
+/// tables are:
+///
+/// - `modality_counts`: per-value count range across the whole result set.
+/// - `modality_pairs`: whether the ordering of each adjacent value pair is the
+///   same in every sample.
+/// - `modality_shapes`: **per-shape-class** count range — the conditional
+///   bounds. One row per (class, value); `n_samples` is constant within a
+///   class.
+/// - `modality_summary`: one row. How many samples of each class, whether the
+///   search was exhaustive, and the unimodality-deficit spread.
+///
+/// `modality_shapes` is the table that supports a claim of the form "if the
+/// data had this shape, then the count of this value was in this range", which
+/// is the only shape claim a single atypical sample cannot defeat.
+fn write_modality_to_parquet<U>(
+    base_path: &str,
+    results: &ResultListFromMeanSdN<U>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let counts = &results.modality_counts;
+    write_table(
+        &format!("{}modality_counts.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, false),
+            Field::new("count_lo", DataType::Int32, false),
+            Field::new("count_hi", DataType::Int32, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(counts.value.clone())),
+            Arc::new(Int32Array::from(counts.count_lo.clone())),
+            Arc::new(Int32Array::from(counts.count_hi.clone())),
+        ],
+    )?;
+
+    let pairs = &results.modality_pairs;
+    write_table(
+        &format!("{}modality_pairs.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("value_a", DataType::Float64, false),
+            Field::new("value_b", DataType::Float64, false),
+            Field::new("resolved", DataType::Boolean, false),
+            Field::new("a_greater", DataType::Boolean, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(pairs.value_a.clone())),
+            Arc::new(Float64Array::from(pairs.value_b.clone())),
+            Arc::new(BooleanArray::from(pairs.resolved.clone())),
+            Arc::new(BooleanArray::from(pairs.a_greater.clone())),
+        ],
+    )?;
+
+    // Long format: one row per (class, value). Classes with no members
+    // contribute no rows, which is how "impossible under this shape" reads.
+    let shapes = &results.modality_shapes;
+    let grid_values = &results.modality_counts.value;
+    let mut s_class = Vec::new();
+    let mut s_n = Vec::new();
+    let mut s_value = Vec::new();
+    let mut s_lo = Vec::new();
+    let mut s_hi = Vec::new();
+    for bounds in &shapes.bounds {
+        for (i, &lo) in bounds.count_lo.iter().enumerate() {
+            s_class.push(bounds.class.as_str());
+            s_n.push(bounds.n_samples);
+            s_value.push(grid_values.get(i).copied().unwrap_or(f64::NAN));
+            s_lo.push(lo);
+            s_hi.push(bounds.count_hi[i]);
+        }
+    }
+    write_table(
+        &format!("{}modality_shapes.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("class", DataType::Utf8, false),
+            Field::new("n_samples", DataType::UInt64, false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("count_lo", DataType::Int32, false),
+            Field::new("count_hi", DataType::Int32, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(s_class)),
+            Arc::new(UInt64Array::from(s_n)),
+            Arc::new(Float64Array::from(s_value)),
+            Arc::new(Int32Array::from(s_lo)),
+            Arc::new(Int32Array::from(s_hi)),
+        ],
+    )?;
+
+    // One row: per-class totals plus the scan's own provenance. `exhaustive` is
+    // what tells a reader whether a zero count is a proof or just an absence.
+    let mut fields = vec![
+        Field::new("exhaustive", DataType::Boolean, false),
+        Field::new("n_scanned", DataType::UInt64, false),
+        Field::new("min_prominence", DataType::Float64, false),
+        Field::new("deficit_min", DataType::UInt32, false),
+        Field::new("deficit_mean", DataType::Float64, false),
+        Field::new("deficit_max", DataType::UInt32, false),
+    ];
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(BooleanArray::from(vec![shapes.exhaustive])),
+        Arc::new(UInt64Array::from(vec![shapes.n_scanned])),
+        Arc::new(Float64Array::from(vec![shapes.min_prominence])),
+        Arc::new(UInt32Array::from(vec![shapes.deficit_min])),
+        Arc::new(Float64Array::from(vec![shapes.deficit_mean])),
+        Arc::new(UInt32Array::from(vec![shapes.deficit_max])),
+    ];
+    for class in ShapeClass::all() {
+        fields.push(Field::new(
+            format!("n_{}", class.as_str()),
+            DataType::UInt64,
+            false,
+        ));
+        columns.push(Arc::new(UInt64Array::from(vec![shapes.n_of(class)])));
+    }
+    write_table(
+        &format!("{}modality_summary.parquet", base_path),
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?;
+
+    Ok(())
+}
+
 /// Write the statistics files for a streaming run.
 ///
 /// Rebuilds the same tables memory mode produces from the running state, then
@@ -2009,6 +2188,7 @@ pub(crate) fn write_streaming_statistics(
     n_usize: usize,
     grid: &ValueGrid,
     final_freq_state: Arc<Mutex<StreamingFrequencyState>>,
+    exhaustive: bool,
 ) {
     let samples_all = all_horns.len();
     if samples_all == 0 {
@@ -2038,15 +2218,18 @@ pub(crate) fn write_streaming_statistics(
     let horns_median = median(&horns_sorted);
     let horns_mad = mad(all_horns, horns_median);
 
-    let state = final_freq_state.lock().unwrap();
+    let mut state = final_freq_state.lock().unwrap();
     let k = grid.len();
 
-    // One block of frequency rows per sample category. Unlike memory mode,
-    // which reports the group medoid, a single pass can only report the group
-    // mean — `f_count` is the average count per sample in the group.
+    // One block of frequency rows per sample category. A single pass can build
+    // `f_expected` exactly, but picking a medoid needs the whole group at once,
+    // so `f_representative` is NaN here. Both columns therefore mean exactly
+    // what they mean in memory mode; the one streaming cannot supply is
+    // visibly absent rather than quietly redefined.
     let mut value = Vec::with_capacity(k * SampleCategory::COUNT);
-    let mut f_count = Vec::with_capacity(k * SampleCategory::COUNT);
+    let mut f_expected = Vec::with_capacity(k * SampleCategory::COUNT);
     let mut f_relative = Vec::with_capacity(k * SampleCategory::COUNT);
+    let f_representative = vec![f64::NAN; k * SampleCategory::COUNT];
 
     let groups: [(&[i64], usize); SampleCategory::COUNT] = [
         (&state.all_freq, samples_all),
@@ -2060,7 +2243,7 @@ pub(crate) fn write_streaming_statistics(
         for v_idx in 0..k {
             let count = freqs.get(v_idx).copied().unwrap_or(0) as f64;
             value.push(grid.values()[v_idx]);
-            f_count.push(count / group_samples);
+            f_expected.push(count / group_samples);
             f_relative.push(count / group_values);
         }
     }
@@ -2080,15 +2263,21 @@ pub(crate) fn write_streaming_statistics(
             }
         }
     }
+    // Take the accumulator out so it can be finished; the state is discarded
+    // immediately afterwards.
+    let shapes = std::mem::replace(
+        &mut state.shapes,
+        ShapeAccumulator::new(0, 0, DEFAULT_MODE_PROMINENCE),
+    );
     drop(state);
+    let modality_shapes = shapes.finish(exhaustive);
 
     let frequency_dist = FrequencyDist {
         value: dist_value,
         count: dist_count,
         n_samples: dist_n_samples,
     };
-    let (modality_counts, modality_pairs, modality_conclusion) =
-        compute_modality(&frequency_dist, grid);
+    let (modality_counts, modality_pairs) = compute_modality(&frequency_dist, grid);
 
     let results: ResultListFromMeanSdN<i32> = ResultListFromMeanSdN {
         metrics_main: MetricsMain {
@@ -2106,11 +2295,17 @@ pub(crate) fn write_streaming_statistics(
             max: horns_max,
             range: horns_max - horns_min,
         },
-        frequency: FrequencyTable::new(FrequencySamplesColumn::new(k), value, f_count, f_relative),
+        frequency: FrequencyTable::new(
+            FrequencySamplesColumn::new(k),
+            value,
+            f_expected,
+            f_representative,
+            f_relative,
+        ),
         frequency_dist,
         modality_counts,
         modality_pairs,
-        modality_conclusion,
+        modality_shapes,
         results: ResultsTable::new(
             Vec::new(),
             SampleCounts::new(grid.clone(), n_usize),
@@ -2123,8 +2318,9 @@ pub(crate) fn write_streaming_statistics(
 
 /// Generate all valid combinations (streaming mode) with summary statistics
 ///
-/// This function computes all valid combinations and streams them directly to Parquet files
-/// without keeping them in memory. Statistics are computed incrementally.
+/// This function computes all valid combinations and streams them directly to
+/// Parquet files without keeping them in memory. Statistics are computed
+/// incrementally.
 ///
 /// Use this when:
 /// - Result sets are very large (> 1GB)
@@ -2135,7 +2331,8 @@ pub(crate) fn write_streaming_statistics(
 ///
 /// # Parameters
 /// - `items`: Number of items averaged (must be 1 for CLOSURE)
-/// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+/// - `stop_after`: Optional limit on number of samples to find. If None, finds
+///   all samples.
 #[allow(clippy::too_many_arguments)]
 pub fn closure_parallel_streaming<T, U>(
     mean: T,
@@ -2318,7 +2515,15 @@ where
                 .unwrap_or_else(|_| (Vec::new(), freq_state));
 
             // Write statistics files
-            write_streaming_statistics(&base_path, &all_horns, n_usize, &grid, final_freq_state);
+            write_streaming_statistics(
+                &base_path,
+                &all_horns,
+                n_usize,
+                &grid,
+                final_freq_state,
+                // A truncated search saw only part of the space.
+                stop_after.is_none(),
+            );
 
             return Ok(StreamingResult {
                 total_combinations: total_written,
@@ -2456,7 +2661,14 @@ where
     }
 
     // Write statistics files
-    write_streaming_statistics(&base_path, &all_horns, n_usize, &grid, final_freq_state);
+    write_streaming_statistics(
+        &base_path,
+        &all_horns,
+        n_usize,
+        &grid,
+        final_freq_state,
+        stop_after.is_none(),
+    );
 
     Ok(StreamingResult {
         total_combinations: total_written,
@@ -2680,6 +2892,99 @@ mod tests {
             .build()
             .unwrap();
         reader.map(|b| b.unwrap().num_rows()).sum()
+    }
+
+    /// The medoid straight from the definition: minimise summed EMD to every
+    /// other member, breaking ties lexicographically.
+    fn medoid_naive(rows: &[Vec<u32>]) -> Option<Vec<u32>> {
+        rows.iter()
+            .map(|x| {
+                let cost: u64 = rows.iter().map(|y| emd_1d(x, y)).sum();
+                (cost, x.clone())
+            })
+            .min()
+            .map(|(_, row)| row)
+    }
+
+    #[test]
+    fn the_fast_medoid_matches_the_definition() {
+        // `medoid_of` avoids the quadratic pairwise loop by decomposing the
+        // summed EMD per grid position. Check the shortcut against the thing it
+        // is a shortcut for, on real result sets.
+        for (mean, sd, n) in [(3.0, 1.13, 60), (3.5, 1.0, 52), (2.2, 1.3, 40)] {
+            let results =
+                closure_parallel(mean, sd, n, 1i32, 5i32, 0.005, 0.005, 1, None, None).unwrap();
+            let rows: Vec<Vec<u32>> = results.results.counts.rows().map(|r| r.to_vec()).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let fast = medoid_of(rows.iter().map(|r| r.as_slice()), 5, n as usize);
+            assert_eq!(
+                fast,
+                medoid_naive(&rows),
+                "fast medoid differs from the definition at mean={mean} sd={sd} n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_medoid_does_not_depend_on_enumeration_order() {
+        // Ties are broken lexicographically rather than by whichever candidate
+        // the search happened to reach first, so a reshuffled input gives the
+        // same answer. Enumeration order is not reproducible under `stop_after`
+        // or for SPRITE, so this is what keeps the reported sample stable.
+        let rows: Vec<Vec<u32>> = vec![
+            vec![2, 0, 0, 0, 2],
+            vec![0, 2, 0, 2, 0],
+            vec![2, 0, 0, 0, 2],
+            vec![0, 0, 4, 0, 0],
+            vec![1, 1, 0, 1, 1],
+        ];
+        let forward = medoid_of(rows.iter().map(|r| r.as_slice()), 5, 4);
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        let backward = medoid_of(reversed.iter().map(|r| r.as_slice()), 5, 4);
+        assert_eq!(forward, backward);
+        assert_eq!(forward, medoid_naive(&rows));
+    }
+
+    #[test]
+    fn modality_tables_reach_disk_with_conditional_bounds() {
+        let dir = std::env::temp_dir().join("closure_modality_parquet");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = format!("{}/", dir.display());
+
+        let results =
+            closure_parallel(3.5, 1.5, 100, 1i32, 5i32, 0.01, 0.01, 1, None, None).unwrap();
+        write_statistics_files(&base, &results);
+
+        assert_eq!(
+            parquet_columns(&format!("{base}frequency.parquet")),
+            vec![
+                "samples",
+                "value",
+                "f_expected",
+                "f_representative",
+                "f_relative"
+            ]
+        );
+        assert_eq!(
+            parquet_columns(&format!("{base}modality_shapes.parquet")),
+            vec!["class", "n_samples", "value", "count_lo", "count_hi"]
+        );
+        // One row per (populated class, value); three of the six classes are
+        // empty for this target, so 3 * 5 rows.
+        assert_eq!(parquet_rows(&format!("{base}modality_shapes.parquet")), 15);
+        assert_eq!(parquet_rows(&format!("{base}modality_counts.parquet")), 5);
+        assert_eq!(parquet_rows(&format!("{base}modality_pairs.parquet")), 4);
+        assert_eq!(parquet_rows(&format!("{base}modality_summary.parquet")), 1);
+
+        let summary = parquet_columns(&format!("{base}modality_summary.parquet"));
+        assert!(summary.contains(&"exhaustive".to_string()));
+        assert!(summary.contains(&"n_one_mode_interior".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3011,7 +3316,8 @@ mod tests {
         assert_eq!(results.frequency.len(), expected_rows);
         assert_eq!(results.frequency.samples_group().len(), expected_rows);
         assert_eq!(results.frequency.value().len(), expected_rows);
-        assert_eq!(results.frequency.f_count().len(), expected_rows);
+        assert_eq!(results.frequency.f_expected().len(), expected_rows);
+        assert_eq!(results.frequency.f_representative().len(), expected_rows);
         assert_eq!(results.frequency.f_relative().len(), expected_rows);
 
         // Check that samples column has correct values

@@ -434,8 +434,10 @@ where
         counts.push_row(&row);
     }
 
-    // Calculate all statistics using the shared function from lib.rs
-    let sprite_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts);
+    // Calculate all statistics using the shared function from lib.rs SPRITE
+    // searches the solution space at random rather than enumerating it, so a
+    // shape it never generated has not been ruled out.
+    let sprite_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts, false);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -613,7 +615,15 @@ where
     }
 
     // Write statistics files
-    write_streaming_statistics(&base_path, &all_horns, n_usize, &grid, final_freq_state);
+    // SPRITE never enumerates the space exhaustively.
+    write_streaming_statistics(
+        &base_path,
+        &all_horns,
+        n_usize,
+        &grid,
+        final_freq_state,
+        false,
+    );
 
     Ok(StreamingResult {
         total_combinations: total_written,
