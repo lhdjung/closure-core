@@ -3,9 +3,9 @@
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::utils::{is_near, round_f64};
 use crate::{
-    create_results_writer, create_stats_writers, results_to_record_batch, samples_to_result_list,
-    FloatType, IntegerType, ParameterError, ParquetConfig, ResultListFromMeanSdN, StreamingConfig,
-    StreamingFrequencyState, StreamingResult,
+    counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
+    ResultListFromMeanSdN, SampleCounts, SampleFormat, StreamingConfig, StreamingFrequencyState,
+    StreamingResult,
 };
 use core::f64;
 use num::NumCast;
@@ -16,8 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Float64Array, Int32Array, StringArray};
-use arrow::record_batch::RecordBatch;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::channel;
 use std::thread;
@@ -276,6 +274,12 @@ pub struct Sprite {
     pub restrictions_minimum: RestrictionsOption,
 }
 
+impl<U: IntegerType> crate::SampleFormat<U> for Sprite {
+    const TECHNIQUE: &'static str = "sprite";
+    /// SPRITE emits values already scaled to hundredths of a scale point.
+    const SAMPLE_SCALE_FACTOR: i32 = 1;
+}
+
 impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
     fn run(
         &mut self,
@@ -405,148 +409,44 @@ where
     let n_distributions = stop_after.unwrap_or(usize::MAX);
     let results_scaled = find_distributions_all_internal(&params, n_distributions);
 
-    // Convert scaled values to the 100x scale for compatibility with CLOSURE statistics
-    // SPRITE internally uses scale_factor (e.g., 10000 for precision 4), but statistics
-    // expect values in the 100x scale (multiply original values by 100)
+    // Tabulate onto the shared value grid. SPRITE searches on its own
+    // `scale_factor` lattice; the grid is the same lattice expressed in
+    // hundredths of a scale point, which is the unit SPRITE reports in.
+    //
+    // Counting straight onto the grid also drops the old round-trip through
+    // integer-binned values: horns and the frequency tables are now computed at
+    // the grid's real resolution, which for a multi-item scale is finer than a
+    // whole scale point.
+    let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
     let scale_factor_f64 = params.scale_factor as f64;
-    let results_100x: Vec<Vec<U>> = results_scaled
-        .iter()
-        .map(|dist| {
-            dist.iter()
-                .map(|&val| {
-                    // Convert to original value, then to 100x scale
-                    let original_f64 = U::to_i64(&val).unwrap() as f64 / scale_factor_f64;
-                    let value_100x = (original_f64 * 100.0).round() as i64;
-                    NumCast::from(value_100x).unwrap()
-                })
-                .collect()
-        })
-        .collect();
+    let n_usize = U::to_usize(&n).unwrap();
 
-    // Convert 100x results back to original scale for frequency table calculation
-    // The 100x scale is used for statistics calculations, but the frequency table
-    // should be based on the original scale values
-    let results_original_scale: Vec<Vec<U>> = results_100x
-        .iter()
-        .map(|dist| {
-            dist.iter()
-                .map(|&val| {
-                    // Convert from 100x scale back to original scale, rounding to nearest integer
-                    let value_100x = U::to_i64(&val).unwrap() as f64;
-                    let original_rounded = (value_100x / 100.0).round() as i64;
-                    NumCast::from(original_rounded).unwrap()
-                })
-                .collect()
-        })
-        .collect();
+    let mut counts = SampleCounts::with_capacity(grid.clone(), n_usize, results_scaled.len());
+    for dist in &results_scaled {
+        let mut row = vec![0u32; grid.len()];
+        for &val in dist {
+            let hundredths =
+                ((U::to_i64(&val).unwrap() as f64 / scale_factor_f64) * 100.0).round() as i32;
+            if let Some(idx) = grid.index_of_hundredths(hundredths) {
+                row[idx] += 1;
+            }
+        }
+        counts.push_row(&row);
+    }
 
     // Calculate all statistics using the shared function from lib.rs
-    // Use original scale values for the frequency table and horns calculations
-    let mut sprite_results = samples_to_result_list(results_original_scale, scale_min, scale_max);
-
-    // Replace the sample data in the results table with the 100x version
-    // This ensures that output data is in the 100x scale (standard for SPRITE/CLOSURE)
-    // while the frequency table and horns are calculated from the binned original scale
-    sprite_results.results.sample = results_100x;
+    let sprite_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
-        write_sprite_parquet(&sprite_results, &config, params.scale_factor)?;
+        <Sprite as SampleFormat<U>>::write_result_list(
+            &crate::normalize_base_path(&config.file_path),
+            &sprite_results,
+            &config,
+        );
     }
 
     Ok(sprite_results)
-}
-
-/// Write SPRITE results to Parquet files
-fn write_sprite_parquet<U>(
-    results: &ResultListFromMeanSdN<U>,
-    config: &ParquetConfig,
-    _scale_factor: u32,
-) -> Result<(), ParameterError>
-where
-    U: IntegerType,
-{
-    use std::sync::Arc;
-
-    // Ensure base_path ends with / for consistent file naming
-    let base_path = if config.file_path.ends_with('/') {
-        config.file_path.clone()
-    } else {
-        format!("{}/", config.file_path)
-    };
-
-    // Write results table
-    let results_path = format!("{}results.parquet", base_path);
-    if let Ok(mut writer) = create_results_writer(&results_path) {
-        let batch_size = config.batch_size;
-        let total_samples = results.results.sample.len();
-
-        for start in (0..total_samples).step_by(batch_size) {
-            let end = (start + batch_size).min(total_samples);
-
-            if let Ok(record_batch) = results_to_record_batch(&results.results, start, end) {
-                let _ = writer.write(&record_batch);
-            }
-        }
-        let _ = writer.close();
-    }
-
-    // Write statistics tables
-    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
-        create_stats_writers(&base_path)
-    {
-        // Write metrics_main
-        let mm_batch = RecordBatch::try_new(
-            mm_schema,
-            vec![
-                Arc::new(Float64Array::from(vec![results.metrics_main.samples_all])),
-                Arc::new(Float64Array::from(vec![results.metrics_main.values_all])),
-            ],
-        );
-        if let Ok(batch) = mm_batch {
-            let _ = mm_writer.write(&batch);
-        }
-        let _ = mm_writer.close();
-
-        // Write metrics_horns
-        let mh_batch = RecordBatch::try_new(
-            mh_schema,
-            vec![
-                Arc::new(Float64Array::from(vec![results.metrics_horns.mean])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.uniform])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.sd])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.cv])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.mad])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.min])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.median])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.max])),
-                Arc::new(Float64Array::from(vec![results.metrics_horns.range])),
-            ],
-        );
-        if let Ok(batch) = mh_batch {
-            let _ = mh_writer.write(&batch);
-        }
-        let _ = mh_writer.close();
-
-        // Write frequency table
-        let freq_batch = RecordBatch::try_new(
-            freq_schema,
-            vec![
-                Arc::new(StringArray::from(
-                    results.frequency.samples_group().to_vec(),
-                )),
-                Arc::new(Int32Array::from(results.frequency.value().to_vec())),
-                Arc::new(Float64Array::from(results.frequency.f_count().to_vec())),
-                Arc::new(Float64Array::from(results.frequency.f_relative().to_vec())),
-            ],
-        );
-        if let Ok(batch) = freq_batch {
-            let _ = freq_writer.write(&batch);
-        }
-        let _ = freq_writer.close();
-    }
-
-    Ok(())
 }
 
 /// SPRITE streaming API: Generate distributions and stream to Parquet files
@@ -595,10 +495,7 @@ where
     T: FloatType,
     U: IntegerType + 'static,
 {
-    use crate::{
-        create_horns_writer, create_samples_writer, horns_to_record_batch, samples_to_record_batch,
-        write_streaming_statistics,
-    };
+    use crate::write_streaming_statistics;
     use std::collections::HashMap;
 
     // Build and validate parameters
@@ -619,7 +516,7 @@ where
     let n_usize = U::to_usize(&params.n).unwrap();
 
     // Setup channels for streaming results
-    let (tx_results, rx_results) = channel::<Vec<(Vec<U>, f64)>>();
+    let (tx_results, rx_results) = channel::<Vec<(Vec<u32>, f64)>>();
     let (tx_stats, rx_stats) = channel::<(Vec<f64>, HashMap<i32, i64>)>();
 
     // Add a flag to track writer thread status
@@ -630,24 +527,14 @@ where
     // Counter for total distributions found
     let total_counter = Arc::new(AtomicUsize::new(0));
 
-    let freq_dist_scale_min = U::to_i32(&scale_min).unwrap();
-    let freq_dist_scale_max = U::to_i32(&scale_max).unwrap();
-    let freq_dist_n_scale_vals = (freq_dist_scale_max - freq_dist_scale_min + 1) as usize;
+    // The value grid every result in this run is indexed on.
+    let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
 
     // Shared state for tracking min/max horns frequencies
-    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
-        current_min_horns: f64::INFINITY,
-        current_max_horns: f64::NEG_INFINITY,
-        all_freq: HashMap::new(),
-        min_freq: HashMap::new(),
-        max_freq: HashMap::new(),
-        min_count: 0,
-        max_count: 0,
-        freq_dist: vec![0u32; freq_dist_n_scale_vals * (n_usize + 1)],
-        freq_dist_n_scale_vals,
-        freq_dist_n: n_usize,
-        freq_dist_scale_min,
-    }));
+    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState::new(
+        grid.len(),
+        n_usize,
+    )));
     let freq_state_for_thread = freq_state.clone();
 
     // Handle file paths
@@ -668,122 +555,18 @@ where
         }
     }
 
-    // Spawn dedicated writer thread
-    let samples_path = format!("{}sample.parquet", base_path);
-    let horns_path = format!("{}horns.parquet", base_path);
-
-    let writer_handle = thread::spawn(move || {
-        let mut samples_writer = match create_samples_writer(&samples_path, n_usize) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!(
-                    "ERROR: Failed to create samples writer for file '{}': {}",
-                    samples_path, e
-                );
-                writer_failed_for_thread.store(1, Ordering::Relaxed);
-                return 0;
-            }
-        };
-
-        let mut horns_writer = match create_horns_writer(&horns_path) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!(
-                    "ERROR: Failed to create horns writer for file '{}': {}",
-                    horns_path, e
-                );
-                writer_failed_for_thread.store(1, Ordering::Relaxed);
-                return 0;
-            }
-        };
-
-        let mut samples_buffer: Vec<Vec<U>> = Vec::with_capacity(config.batch_size * 2);
-        let mut horns_buffer: Vec<f64> = Vec::with_capacity(config.batch_size * 2);
-
-        let mut total_written = 0;
-        let mut last_progress_report = 0;
-
-        loop {
-            match rx_results.recv() {
-                Ok(batch) => {
-                    for (sample, horns) in batch {
-                        samples_buffer.push(sample);
-                        horns_buffer.push(horns);
-                    }
-
-                    if samples_buffer.len() >= config.batch_size {
-                        match samples_to_record_batch(&samples_buffer) {
-                            Ok(record_batch) => {
-                                if let Err(e) = samples_writer.write(&record_batch) {
-                                    eprintln!("ERROR: Failed to write samples batch: {}", e);
-                                    return total_written;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("ERROR: Failed to create samples batch: {}", e);
-                                return total_written;
-                            }
-                        }
-
-                        match horns_to_record_batch(&horns_buffer) {
-                            Ok(record_batch) => {
-                                if let Err(e) = horns_writer.write(&record_batch) {
-                                    eprintln!("ERROR: Failed to write horns batch: {}", e);
-                                    return total_written;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("ERROR: Failed to create horns batch: {}", e);
-                                return total_written;
-                            }
-                        }
-
-                        total_written += samples_buffer.len();
-
-                        if config.show_progress && total_written - last_progress_report >= 1000 {
-                            eprintln!("Progress: {} distributions written...", total_written);
-                            last_progress_report = total_written;
-                        }
-
-                        samples_buffer.clear();
-                        horns_buffer.clear();
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-
-        // Write remaining results
-        if !samples_buffer.is_empty() {
-            if let Ok(record_batch) = samples_to_record_batch(&samples_buffer) {
-                if let Err(e) = samples_writer.write(&record_batch) {
-                    eprintln!("ERROR: Failed to write final samples batch: {}", e);
-                } else if let Ok(record_batch) = horns_to_record_batch(&horns_buffer) {
-                    if let Err(e) = horns_writer.write(&record_batch) {
-                        eprintln!("ERROR: Failed to write final horns batch: {}", e);
-                    } else {
-                        total_written += samples_buffer.len();
-                    }
-                }
-            }
-        }
-
-        if let Err(e) = samples_writer.close() {
-            eprintln!("ERROR: Failed to close samples file: {}", e);
-        }
-        if let Err(e) = horns_writer.close() {
-            eprintln!("ERROR: Failed to close horns file: {}", e);
-        }
-
-        if config.show_progress {
-            eprintln!(
-                "Streaming complete: {} total distributions written",
-                total_written
-            );
-        }
-
-        total_written
-    });
+    // Spawn the shared writer thread. It owns the output format; this path
+    // only feeds it (counts, horns) pairs.
+    let writer_handle = <Sprite as SampleFormat<U>>::spawn_streaming_writer(
+        base_path.clone(),
+        grid.clone(),
+        n_usize,
+        config.batch_size,
+        config.format,
+        config.show_progress.then_some((1000, "distributions")),
+        rx_results,
+        writer_failed_for_thread,
+    );
 
     // Spawn statistics collector thread
     let freq_state_for_stats = freq_state.clone();
@@ -800,6 +583,7 @@ where
     // Find distributions using streaming approach
     find_distributions_all_streaming(
         &params,
+        &grid,
         stop_after,
         tx_results,
         tx_stats,
@@ -815,9 +599,6 @@ where
         0
     });
 
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-
     let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
         eprintln!("ERROR: Statistics thread panicked unexpectedly");
         (Vec::new(), freq_state)
@@ -832,14 +613,7 @@ where
     }
 
     // Write statistics files
-    write_streaming_statistics(
-        &base_path,
-        &all_horns,
-        n_usize,
-        scale_min_i32,
-        scale_max_i32,
-        final_freq_state,
-    );
+    write_streaming_statistics(&base_path, &all_horns, n_usize, &grid, final_freq_state);
 
     Ok(StreamingResult {
         total_combinations: total_written,
@@ -851,8 +625,9 @@ where
 #[allow(clippy::too_many_arguments)]
 fn find_distributions_all_streaming<T, U>(
     params: &SpriteParams<T, U>,
+    grid: &crate::ValueGrid,
     stop_after: Option<usize>,
-    tx_results: std::sync::mpsc::Sender<Vec<(Vec<U>, f64)>>,
+    tx_results: std::sync::mpsc::Sender<Vec<(Vec<u32>, f64)>>,
     tx_stats: std::sync::mpsc::Sender<(Vec<f64>, HashMap<i32, i64>)>,
     total_counter: &Arc<AtomicUsize>,
     freq_state: &Arc<Mutex<StreamingFrequencyState>>,
@@ -862,7 +637,7 @@ fn find_distributions_all_streaming<T, U>(
     T: FloatType,
     U: IntegerType + 'static,
 {
-    use crate::calculate_horns;
+    use crate::horns_from_counts;
 
     let should_stop = Arc::new(AtomicBool::new(false));
     let unique_distributions = Arc::new(Mutex::new(HashSet::<Vec<i64>>::new()));
@@ -872,22 +647,6 @@ fn find_distributions_all_streaming<T, U>(
 
     let batch_size = 100;
     let max_iterations = 100_000_000;
-
-    let scale_min_i32 = params
-        .possible_values_scaled
-        .first()
-        .map(|v| {
-            (U::to_i64(v).unwrap() as f64 / (params.scale_factor as f64 / 100.0)).round() as i32
-        })
-        .unwrap_or(0);
-    let scale_max_i32 = params
-        .possible_values_scaled
-        .last()
-        .map(|v| {
-            (U::to_i64(v).unwrap() as f64 / (params.scale_factor as f64 / 100.0)).round() as i32
-        })
-        .unwrap_or(100);
-    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
         if should_stop.load(Ordering::Relaxed) || writer_failed.load(Ordering::Relaxed) == 1 {
@@ -931,63 +690,26 @@ fn find_distributions_all_streaming<T, U>(
                     if unique.insert(hashable_values) {
                         drop(unique);
 
-                        // Calculate horns for this distribution
+                        // Tabulate onto the shared grid. The counts vector is
+                        // both the frequency vector horns needs and the row
+                        // that goes to disk, so it is built once.
                         let scale_f = params.scale_factor as f64;
-                        let mut freqs = vec![0.0; nrow_frequency];
-                        let mut sample_freq: HashMap<i32, i64> = HashMap::new();
-
+                        let mut counts = vec![0u32; grid.len()];
                         for &value in &distribution {
-                            let val_f64 = U::to_i64(&value).unwrap() as f64 / scale_f;
-                            let idx = ((val_f64 * 100.0).round() as i32 - scale_min_i32) as usize;
-                            if idx < freqs.len() {
-                                freqs[idx] += 1.0;
-                            }
-                            *sample_freq
-                                .entry((val_f64 * 100.0).round() as i32)
-                                .or_insert(0) += 1;
-                        }
-
-                        let horns = calculate_horns(&freqs, scale_min_i32, scale_max_i32);
-
-                        // Update frequency state
-                        {
-                            let mut state = freq_state.lock().unwrap();
-
-                            for (&val, &count) in &sample_freq {
-                                *state.all_freq.entry(val).or_insert(0) += count;
-                            }
-
-                            if (horns - state.current_min_horns).abs() < 1e-10 {
-                                for (&val, &count) in &sample_freq {
-                                    *state.min_freq.entry(val).or_insert(0) += count;
-                                }
-                                state.min_count += 1;
-                            } else if horns < state.current_min_horns {
-                                state.current_min_horns = horns;
-                                state.min_freq.clear();
-                                for (&val, &count) in &sample_freq {
-                                    state.min_freq.insert(val, count);
-                                }
-                                state.min_count = 1;
-                            }
-
-                            if (horns - state.current_max_horns).abs() < 1e-10 {
-                                for (&val, &count) in &sample_freq {
-                                    *state.max_freq.entry(val).or_insert(0) += count;
-                                }
-                                state.max_count += 1;
-                            } else if horns > state.current_max_horns {
-                                state.current_max_horns = horns;
-                                state.max_freq.clear();
-                                for (&val, &count) in &sample_freq {
-                                    state.max_freq.insert(val, count);
-                                }
-                                state.max_count = 1;
+                            let hundredths = ((U::to_i64(&value).unwrap() as f64 / scale_f) * 100.0)
+                                .round() as i32;
+                            if let Some(idx) = grid.index_of_hundredths(hundredths) {
+                                counts[idx] += 1;
                             }
                         }
+
+                        let freqs: Vec<f64> = counts.iter().map(|&c| c as f64).collect();
+                        let horns = horns_from_counts(&freqs);
+
+                        freq_state.lock().unwrap().update(&counts, horns);
 
                         // Send to writer
-                        if tx_results.send(vec![(distribution, horns)]).is_ok() {
+                        if tx_results.send(vec![(counts, horns)]).is_ok() {
                             let _ = tx_stats.send((vec![horns], HashMap::new()));
                             total_counter.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1694,6 +1416,7 @@ fn sd_from_running(total_sum: i64, total_sum_sq: i64, n: usize, scale_factor: u3
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::OutputFormat;
 
     /// Helper to convert scaled integers to floats
     fn unscale_distribution(scaled_values: &[i32], scale_factor: u32) -> Vec<f64> {
@@ -1723,7 +1446,7 @@ pub mod tests {
 
         // Convert first result to floats and check mean
         // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
-        let first_dist = unscale_distribution(&results.results.sample[0], 100);
+        let first_dist = unscale_distribution(&results.results.sample(0), 100);
         let computed_mean = mean(&first_dist);
         assert_eq!(round_f64(computed_mean, 1), 2.2);
     }
@@ -1748,7 +1471,8 @@ pub mod tests {
 
         // Check all distributions
         // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
-        for dist_scaled in &results.results.sample {
+        for i in 0..results.results.len() {
+            let dist_scaled = &results.results.sample(i);
             let dist = unscale_distribution(dist_scaled, 100);
             let computed_sd = std_dev(&dist).unwrap();
             assert_eq!(round_f64(computed_sd, 1), 1.3);
@@ -1791,19 +1515,17 @@ pub mod tests {
         )
         .unwrap();
 
-        println!(
-            "Number of target results: {:?}\n",
-            results.results.sample.len()
-        );
+        println!("Number of target results: {:?}\n", results.results.len());
         println!("First result (scaled):\n");
-        println!("{:?}", &results.results.sample[0][..10]); // Print first 10 values
+        println!("{:?}", &results.results.sample(0)[..10]); // Print first 10 values
 
         // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
         let scale_factor = 100;
 
         // Go through the SPRITE results and check if they conform to the
         // input mean and SD. If any result sample doesn't, throw an error.
-        for dist_scaled in &results.results.sample {
+        for i in 0..results.results.len() {
+            let dist_scaled = &results.results.sample(i);
             let dist = unscale_distribution(dist_scaled, scale_factor);
             let computed_mean = mean(&dist);
             let computed_sd = std_dev(&dist).unwrap();
@@ -1821,10 +1543,13 @@ pub mod tests {
         use std::fs::File;
 
         // Test streaming mode with separate files
+        // `Both` so this test covers the counts layout and the legacy
+        // per-position one in the same run.
         let config = StreamingConfig {
             file_path: "test_sprite_streaming/".to_string(),
             batch_size: 100,
             show_progress: false,
+            format: OutputFormat::Both,
         };
 
         let _ = std::fs::create_dir("test_sprite_streaming");
@@ -1847,8 +1572,7 @@ pub mod tests {
 
         let m_prec = precision_from_rounding_error(rounding_error_mean);
         let sd_prec = precision_from_rounding_error(rounding_error_sd);
-        let precision = std::cmp::max(m_prec, sd_prec);
-        let scale_factor = 10_u32.pow(precision as u32);
+        let _precision = std::cmp::max(m_prec, sd_prec);
 
         let result = sprite_parallel_streaming::<f64, i32>(
             expected_mean,
@@ -1869,9 +1593,22 @@ pub mod tests {
         assert!(result.total_combinations > 0);
         assert_eq!(result.file_path, "test_sprite_streaming/");
 
-        // Check that files were created
-        assert!(std::path::Path::new("test_sprite_streaming/sample.parquet").exists());
-        assert!(std::path::Path::new("test_sprite_streaming/horns.parquet").exists());
+        // Check that files were created, in both layouts
+        for name in &[
+            "counts",
+            "scale_values",
+            "format",
+            "sample",
+            "horns",
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+        ] {
+            assert!(
+                std::path::Path::new(&format!("test_sprite_streaming/{name}.parquet")).exists(),
+                "{name}.parquet was not written"
+            );
+        }
 
         // Read and validate the samples from the parquet file
         let file = File::open("test_sprite_streaming/sample.parquet")
@@ -1916,11 +1653,10 @@ pub mod tests {
                     scaled_values.len()
                 );
 
-                // Unscale the values before computing statistics
-                let sample_values: Vec<f64> = scaled_values
-                    .iter()
-                    .map(|&v| v as f64 / scale_factor as f64)
-                    .collect();
+                // SPRITE reports values in hundredths of a scale point, in
+                // both layouts.
+                let sample_values: Vec<f64> =
+                    scaled_values.iter().map(|&v| v as f64 / 100.0).collect();
 
                 // Calculate mean and SD for this sample
                 let computed_mean = mean(&sample_values);
@@ -1958,18 +1694,7 @@ pub mod tests {
         );
 
         // Clean up test files
-        let file_names = [
-            "sample",
-            "horns",
-            "metrics_main",
-            "metrics_horns",
-            "frequency",
-        ];
-        for name in file_names {
-            let _ = std::fs::remove_file(format!("test_sprite_streaming/{name}.parquet"));
-        }
-
-        let _ = std::fs::remove_dir("test_sprite_streaming");
+        let _ = std::fs::remove_dir_all("test_sprite_streaming");
     }
 
     #[test]
@@ -1978,6 +1703,7 @@ pub mod tests {
         let config = ParquetConfig {
             file_path: "test_sprite_parquet/".to_string(),
             batch_size: 100,
+            format: OutputFormat::default(),
         };
 
         let _ = std::fs::create_dir("test_sprite_parquet");
@@ -1999,20 +1725,25 @@ pub mod tests {
         .unwrap();
 
         // Check that results were returned
-        assert!(!results.results.sample.is_empty());
+        assert!(!results.results.is_empty());
 
         // Check that files were created
-        assert!(std::path::Path::new("test_sprite_parquet/results.parquet").exists());
-        assert!(std::path::Path::new("test_sprite_parquet/metrics_main.parquet").exists());
-        assert!(std::path::Path::new("test_sprite_parquet/metrics_horns.parquet").exists());
-        assert!(std::path::Path::new("test_sprite_parquet/frequency.parquet").exists());
+        for name in &[
+            "counts",
+            "scale_values",
+            "format",
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+        ] {
+            assert!(
+                std::path::Path::new(&format!("test_sprite_parquet/{name}.parquet")).exists(),
+                "{name}.parquet was not written"
+            );
+        }
 
         // Clean up test files
-        let _ = std::fs::remove_file("test_sprite_parquet/results.parquet");
-        let _ = std::fs::remove_file("test_sprite_parquet/metrics_main.parquet");
-        let _ = std::fs::remove_file("test_sprite_parquet/metrics_horns.parquet");
-        let _ = std::fs::remove_file("test_sprite_parquet/frequency.parquet");
-        let _ = std::fs::remove_dir("test_sprite_parquet");
+        let _ = std::fs::remove_dir_all("test_sprite_parquet");
     }
 
     /// Regression test for the LP stopping criterion formula.
@@ -2050,10 +1781,11 @@ pub mod tests {
         )
         .unwrap();
 
-        let n_found = results.results.sample.len();
+        let n_found = results.results.len();
 
         // All returned distributions must have correct mean and SD.
-        for dist_scaled in &results.results.sample {
+        for i in 0..results.results.len() {
+            let dist_scaled = &results.results.sample(i);
             let dist = unscale_distribution(dist_scaled, 100);
             assert_eq!(round_f64(mean(&dist), 1), 3.0);
             assert_eq!(round_f64(std_dev(&dist).unwrap(), 1), 1.0);

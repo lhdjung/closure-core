@@ -17,7 +17,7 @@ fn main() {
     )
     .unwrap();
 
-    println!("Generated {} distributions", result.results.sample.len());
+    println!("Generated {} distributions", result.results.len());
     // Note: stop_after is a suggestion, actual count may vary slightly
-    assert!(!result.results.sample.is_empty());
+    assert!(!result.results.is_empty());
 }

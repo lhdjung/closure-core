@@ -78,15 +78,20 @@ fn write_closure_csv(
     writer.write_record(&header)?;
 
     // Write combinations with progress updates
-    let chunk_size = if result.results.sample.len() >= 100 {
-        result.results.sample.len() / 100 // Update every 1%
+    let total = result.results.len();
+    let chunk_size = if total >= 100 {
+        total / 100 // Update every 1%
     } else {
         1 // Update for every combination if fewer than 100
     };
 
-    for (i, combination) in result.results.sample.iter().enumerate() {
+    // Expand one sample at a time: results are stored as frequency tables, so
+    // the full matrix never has to exist in memory.
+    for i in 0..total {
         writer.write_record(
-            &combination
+            &result
+                .results
+                .sample(i)
                 .iter()
                 .map(|x| x.to_string())
                 .collect::<Vec<String>>(),
@@ -99,10 +104,7 @@ fn write_closure_csv(
 
     bar.finish_with_message("Done!");
 
-    println!(
-        "Number of valid combinations: {}",
-        result.results.sample.len()
-    );
+    println!("Number of valid combinations: {}", total);
     println!("Wrote result file: {}", cwd.clone() + "/" + output_file);
 
     Ok(())

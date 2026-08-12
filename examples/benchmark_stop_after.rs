@@ -13,7 +13,7 @@ fn main() {
         closure_parallel::<f64, i32>(3.5, 0.5, 52, 1, 5, 0.05, 0.05, 1, None, Some(1)).unwrap();
     let duration_1 = start.elapsed();
     println!("  Duration: {:?}", duration_1);
-    println!("  Samples found: {}", result.results.sample.len());
+    println!("  Samples found: {}", result.results.len());
     println!();
 
     // Benchmark with stop_after = 10
@@ -23,7 +23,7 @@ fn main() {
         closure_parallel::<f64, i32>(3.5, 0.5, 52, 1, 5, 0.05, 0.05, 1, None, Some(10)).unwrap();
     let duration_10 = start.elapsed();
     println!("  Duration: {:?}", duration_10);
-    println!("  Samples found: {}", result.results.sample.len());
+    println!("  Samples found: {}", result.results.len());
     println!();
 
     // Benchmark with stop_after = 100
@@ -33,7 +33,7 @@ fn main() {
         closure_parallel::<f64, i32>(3.5, 0.5, 52, 1, 5, 0.05, 0.05, 1, None, Some(100)).unwrap();
     let duration_100 = start.elapsed();
     println!("  Duration: {:?}", duration_100);
-    println!("  Samples found: {}", result.results.sample.len());
+    println!("  Samples found: {}", result.results.len());
     println!();
 
     // Benchmark with stop_after = 1000 (uses parallel path)
@@ -43,7 +43,7 @@ fn main() {
         closure_parallel::<f64, i32>(3.5, 0.5, 52, 1, 5, 0.05, 0.05, 1, None, Some(1000)).unwrap();
     let duration_1000 = start.elapsed();
     println!("  Duration: {:?}", duration_1000);
-    println!("  Samples found: {}", result.results.sample.len());
+    println!("  Samples found: {}", result.results.len());
     println!();
 
     // Benchmark without limit (full search, parallel)
@@ -53,7 +53,7 @@ fn main() {
         closure_parallel::<f64, i32>(3.5, 0.5, 52, 1, 5, 0.05, 0.05, 1, None, None).unwrap();
     let duration_full = start.elapsed();
     println!("  Duration: {:?}", duration_full);
-    println!("  Samples found: {}", result.results.sample.len());
+    println!("  Samples found: {}", result.results.len());
     println!();
 
     println!("Summary:");

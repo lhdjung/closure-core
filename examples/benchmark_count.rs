@@ -45,7 +45,7 @@ fn main() {
         .unwrap();
         let t_parallel = start.elapsed();
 
-        let enumerated = results.results.sample.len() as u64;
+        let enumerated = results.results.len() as u64;
         assert_eq!(count, enumerated, "Mismatch on {}", c.label);
 
         let speedup = t_parallel.as_secs_f64() / t_count.as_secs_f64();

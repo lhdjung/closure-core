@@ -293,7 +293,7 @@ mod tests {
             mean, sd, n, scale_min, scale_max, re_mean, re_sd, 1, None, None,
         )
         .unwrap();
-        let expected = results.results.sample.len() as u64;
+        let expected = results.results.len() as u64;
 
         let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd);
         assert_eq!(
@@ -318,7 +318,7 @@ mod tests {
             mean, sd, n, scale_min, scale_max, re_mean, re_sd, 1, None, None,
         )
         .unwrap();
-        let expected = results.results.sample.len() as u64;
+        let expected = results.results.len() as u64;
 
         let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd);
         assert_eq!(
@@ -353,7 +353,7 @@ mod tests {
         let results =
             closure_parallel::<f64, i32>(mean, sd, n, smin, smax, re_m, re_s, 1, None, None)
                 .unwrap();
-        let enumerated = results.results.sample.len() as u64;
+        let enumerated = results.results.len() as u64;
 
         assert_eq!(
             counted, enumerated,

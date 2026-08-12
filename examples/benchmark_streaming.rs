@@ -2,7 +2,7 @@
 mod common;
 use common::CASES;
 
-use closure_core::{closure_parallel, closure_parallel_streaming, StreamingConfig};
+use closure_core::{closure_parallel, closure_parallel_streaming, OutputFormat, StreamingConfig};
 use std::time::Instant;
 
 fn main() {
@@ -36,12 +36,13 @@ fn main() {
         )
         .unwrap();
         let t_parallel = start.elapsed();
-        let count = results.results.sample.len();
+        let count = results.results.len();
 
         let config = StreamingConfig {
             file_path: out_path.clone(),
             batch_size: 1000,
             show_progress: false,
+            format: OutputFormat::default(),
         };
         let start = Instant::now();
         closure_parallel_streaming::<f64, i32>(
