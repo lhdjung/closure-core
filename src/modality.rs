@@ -39,17 +39,22 @@
 //! [`DEFAULT_MODE_PROMINENCE`] of the sample above the higher of the two
 //! valleys separating it from any taller peak. The threshold is a fraction of
 //! `n`, so it does not silently change meaning with the length of the scale.
-//! The tallest bar of a sample is exempt: it is a mode at every threshold, so
-//! [`ShapeClass::Flat`] keeps meaning "every count is equal" even on a grid too
-//! wide for any single bar to clear the threshold outright.
+//! The tallest runs of a sample have no taller peak to be measured against, so
+//! they are measured against each other: tied tallest runs separated by a
+//! qualifying valley are distinct modes, and ones separated only by
+//! sub-threshold dips merge into one broad mode. A unique tallest run is
+//! therefore a mode at every threshold, which keeps a textbook-unimodal
+//! histogram out of [`ShapeClass::Flat`] even on a grid too wide for any single
+//! bar to clear the threshold outright.
 //!
 //! # Why one threshold is not enough
 //!
 //! No value of that threshold is validated, and the crate's strongest output —
 //! an empty shape class, i.e. a proof that the raw data did not have that shape
-//! — would otherwise rest entirely on it. Worse, it would rest on it in the
-//! wrong direction: raising the threshold merges modes, so a *lower* threshold
-//! manufactures proofs of impossibility. Every sample is therefore classified at
+//! — would otherwise rest entirely on it, and in both directions: lowering the
+//! threshold splits modes and manufactures proofs that the data could not have
+//! been unimodal, raising it merges modes and manufactures proofs that the data
+//! could not have been multimodal. Every sample is therefore classified at
 //! each threshold in [`DEFAULT_PROMINENCE_LADDER`], and
 //! [`ModalityShapes::can_be`] answers `Some(false)` only when the class is empty
 //! across all of them. [`ModalityShapes::min_prominence_admitting`] reports the
@@ -109,7 +114,9 @@ pub const DEFAULT_PROMINENCE_LADDER: [f64; 3] = [0.02, 0.05, 0.10];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumCountMacro, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum ShapeClass {
-    /// Every grid position holds the same count. No unique mode.
+    /// No distinguishable mode at the threshold: every count is the same, or
+    /// the tied tallest runs and the sub-threshold dips between them span the
+    /// entire scale. See [`modes`].
     Flat,
     /// One mode, away from both ends of the scale — the "bell" case.
     OneModeInterior,
@@ -188,44 +195,104 @@ fn runs_of(counts: &[u32]) -> Vec<Run> {
 ///
 /// A mode is a maximal run of equal counts that is strictly higher than the runs
 /// on either side of it (a missing neighbour counts as lower, so a peak may sit
-/// at either end of the scale), and that either
+/// at either end of the scale), and that stands out from the rest of the sample:
 ///
-/// - has no strictly taller run anywhere in the vector — a *global* maximum,
-///   which is a mode at every threshold; or
-/// - has topographic prominence of at least `min_prominence_counts`
-///   observations.
+/// - A run *below* the tallest needs topographic prominence of at least
+///   `min_prominence_counts` observations: its height minus the higher of its
+///   two key cols, where a key col is the lowest point between the run and the
+///   nearest strictly taller run on that side (a side with no taller run
+///   contributes a col of 0).
+/// - Runs *at* the tallest height have no taller peak to be measured against,
+///   so they are measured against each other: consecutive tied tallest runs
+///   merge into one broad mode when the valley between them dips less than
+///   `min_prominence_counts` below the summit, and stay distinct modes when it
+///   dips at least that far. A unique tallest run is thus a mode at every
+///   threshold — which keeps a textbook-unimodal histogram on a wide grid,
+///   whose tallest bar is only about `n / k`, from being reported as having no
+///   mode. Wide grids arise for real: a multi-item SPRITE grid is
+///   `(scale_max - scale_min) * items + 1` positions across.
 ///
-/// Prominence is the run's height minus the higher of its two key cols, where a
-/// key col is the lowest point between the run and the nearest strictly taller
-/// run on that side. Only a run that has a taller run somewhere is subject to
-/// the threshold, so a non-empty sample always has at least one mode.
+/// Merging (rather than exempting each tied tallest run from the threshold) is
+/// what stops a one-count wobble around a tied maximum, like
+/// `(30, 29, 30, 29, 30)`, from reading as multimodal at every threshold.
 ///
-/// That exemption is what keeps [`ShapeClass::Flat`] meaning "every count is
-/// equal". Without it, a vector spread over more than `1 / min_prominence` grid
-/// positions can have *no* bar tall enough to clear the bar in absolute terms —
-/// its tallest is only `n / k` — and would then be reported as having no mode at
-/// all, which in turn makes every [`ModalityShapes::can_be`] query answer
-/// `Some(false)` simultaneously. Wide grids arise for real: a multi-item SPRITE
-/// grid is `(scale_max - scale_min) * items + 1` positions across.
+/// A sample therefore has no mode in exactly two cases, and both classify as
+/// [`ShapeClass::Flat`]: every count is equal, or the tied tallest runs and
+/// every dip between them merge into a single region spanning the entire scale
+/// — flat at this resolution.
 ///
-/// Each mode is reported by the first position of its run. A vector whose counts
-/// are all equal has no unique mode and yields an empty result.
+/// Each mode is reported by the first position of its (first) run.
 pub fn modes(counts: &[u32], min_prominence_counts: u32) -> Vec<usize> {
-    modes_from_runs(&runs_of(counts), min_prominence_counts)
+    mode_extents(&runs_of(counts), min_prominence_counts)
+        .into_iter()
+        .map(|(start, _)| start)
+        .collect()
 }
 
-/// [`modes`], on a run decomposition computed once by the caller.
+/// The modes of a sample as grid-position extents `(start, end)`, inclusive,
+/// ascending — the engine behind [`modes`], on a run decomposition computed
+/// once by the caller.
 ///
 /// Classifying one sample at several thresholds shares the decomposition rather
-/// than rebuilding it per threshold.
-fn modes_from_runs(runs: &[Run], min_prominence_counts: u32) -> Vec<usize> {
-    // A single run means every count is equal: flat, no unique mode.
+/// than rebuilding it per threshold. Extents matter because merged tied tallest
+/// runs form one broad mode; [`classify`] needs to know whether that mode
+/// touches a scale boundary.
+fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)> {
+    // A single run means every count is equal: flat, no mode.
     if runs.len() < 2 {
         return Vec::new();
     }
+    let summit = runs
+        .iter()
+        .map(|r| r.height)
+        .max()
+        .expect("runs is non-empty");
 
-    let mut out = Vec::new();
+    // Group the summit runs: consecutive tied tallest runs merge when the
+    // valley between them dips less than the threshold below the summit — at
+    // this resolution the dip is texture, not a separation. Merging is
+    // transitive by construction and keeps the result mirror-symmetric, which
+    // designating one tied run as "the" maximum would not.
+    let mut groups: Vec<(usize, usize)> = Vec::new(); // (first, last) run index
     for (i, run) in runs.iter().enumerate() {
+        if run.height < summit {
+            continue;
+        }
+        let merges = groups.last().is_some_and(|&(_, last)| {
+            // Two summit runs cannot be adjacent (adjacent runs differ in
+            // height), so there is at least one run between them.
+            let valley = runs[last + 1..i]
+                .iter()
+                .map(|r| r.height)
+                .min()
+                .expect("summit runs are separated by at least one run");
+            summit - valley < min_prominence_counts
+        });
+        match groups.last_mut() {
+            Some(group) if merges => group.1 = i,
+            _ => groups.push((i, i)),
+        }
+    }
+
+    // A single group reaching from the first run to the last means every dip
+    // in the vector is below the threshold: the sample is flat at this
+    // resolution and has no distinguishable mode, exactly like a constant
+    // vector. No lower run can qualify either — any local maximum sits between
+    // two merged summit runs, so its key cols are at least the sub-threshold
+    // valley floor and its prominence falls short of the threshold.
+    if groups == [(0, runs.len() - 1)] {
+        return Vec::new();
+    }
+
+    let mut out: Vec<(usize, usize)> = groups
+        .iter()
+        .map(|&(first, last)| (runs[first].start, runs[last].end))
+        .collect();
+
+    for (i, run) in runs.iter().enumerate() {
+        if run.height == summit {
+            continue; // handled by the grouping above
+        }
         let higher_left = i > 0 && runs[i - 1].height > run.height;
         let higher_right = i + 1 < runs.len() && runs[i + 1].height > run.height;
         if higher_left || higher_right {
@@ -233,9 +300,8 @@ fn modes_from_runs(runs: &[Run], min_prominence_counts: u32) -> Vec<usize> {
         }
 
         // Key col on each side: the lowest run between here and the nearest
-        // strictly taller run. `None` when this side has no taller run, which
-        // is different from a col of zero — it means there is no escape route
-        // to higher ground at all on that side.
+        // strictly taller run. The summit is strictly taller than this run, so
+        // at least one side has one; a side without one contributes 0.
         let left_col = runs[..i]
             .iter()
             .rposition(|r| r.height > run.height)
@@ -258,19 +324,12 @@ fn modes_from_runs(runs: &[Run], min_prominence_counts: u32) -> Vec<usize> {
                     .unwrap_or(run.height)
             });
 
-        match (left_col, right_col) {
-            // Nothing taller in either direction: this run is a global maximum
-            // of the sample. It is a mode whatever the threshold, so that a
-            // non-empty sample always has one and `Flat` keeps its meaning.
-            (None, None) => out.push(run.start),
-            _ => {
-                let col = left_col.unwrap_or(0).max(right_col.unwrap_or(0));
-                if run.height - col >= min_prominence_counts {
-                    out.push(run.start);
-                }
-            }
+        let col = left_col.unwrap_or(0).max(right_col.unwrap_or(0));
+        if run.height - col >= min_prominence_counts {
+            out.push((run.start, run.end));
         }
     }
+    out.sort_unstable();
     out
 }
 
@@ -284,25 +343,23 @@ pub fn classify(counts: &[u32], min_prominence_counts: u32) -> ShapeClass {
 
 /// [`classify`], on a run decomposition computed once by the caller.
 fn classify_from_runs(runs: &[Run], k: usize, min_prominence_counts: u32) -> ShapeClass {
-    let peaks = modes_from_runs(runs, min_prominence_counts);
-    match peaks.len() {
-        // No qualifying peak. Since a global maximum always qualifies, this
-        // happens only when every count is equal or the sample is empty.
-        0 => ShapeClass::Flat,
-        1 => {
-            let run = runs
-                .iter()
-                .find(|r| r.start == peaks[0])
-                .expect("a mode is always the start of a run");
-            if run.start == 0 {
+    let peaks = mode_extents(runs, min_prominence_counts);
+    match peaks[..] {
+        // No distinguishable mode: every count is equal, or nothing but
+        // sub-threshold texture across the whole scale. See [`modes`].
+        [] => ShapeClass::Flat,
+        // A lone mode spanning both edges would have classified as `Flat`
+        // above, so the edge tests below are mutually exclusive.
+        [(start, end)] => {
+            if start == 0 {
                 ShapeClass::OneModeLowEdge
-            } else if run.end == k - 1 {
+            } else if end == k - 1 {
                 ShapeClass::OneModeHighEdge
             } else {
                 ShapeClass::OneModeInterior
             }
         }
-        2 => ShapeClass::TwoModes,
+        [_, _] => ShapeClass::TwoModes,
         _ => ShapeClass::ThreeOrMoreModes,
     }
 }
@@ -485,9 +542,10 @@ impl ModalityShapes {
     ///
     /// Mode detection needs a prominence threshold and no single value of it is
     /// validated. Answering from one threshold would make the crate's strongest
-    /// output — a proof of impossibility — contingent on that constant, and
-    /// contingent in the wrong direction: raising the threshold merges modes, so
-    /// a *lower* threshold manufactures `Some(false)`. Requiring the class to be
+    /// output — a proof of impossibility — contingent on that constant, in both
+    /// directions: lowering the threshold splits modes and manufactures
+    /// `Some(false)` for unimodal shapes, raising it merges modes and
+    /// manufactures `Some(false)` for multimodal ones. Requiring the class to be
     /// empty across the whole band of [`DEFAULT_PROMINENCE_LADDER`] makes the
     /// answer conservative in its free parameter. Use
     /// [`Self::min_prominence_admitting`] to see the margin, and
@@ -559,8 +617,6 @@ impl ModalityShapes {
 /// it needs one sample at a time and never the whole result set.
 pub struct ShapeAccumulator {
     k: usize,
-    /// Prominence threshold in observations, derived once from `n`.
-    min_prominence_counts: u32,
     min_prominence: f64,
     /// Every threshold in the envelope, ascending, as (fraction, observations).
     /// Always contains `min_prominence`; see [`DEFAULT_PROMINENCE_LADDER`].
@@ -588,7 +644,6 @@ impl ShapeAccumulator {
         // At least one observation, so a threshold of 0 does not admit ties as
         // separate modes.
         let to_counts = |p: f64| ((p * n as f64).ceil() as u32).max(1);
-        let min_prominence_counts = to_counts(min_prominence);
 
         let mut fractions: Vec<f64> = DEFAULT_PROMINENCE_LADDER.to_vec();
         // The configured threshold is always a rung, so `can_be` can never
@@ -606,7 +661,6 @@ impl ShapeAccumulator {
 
         Self {
             k,
-            min_prominence_counts,
             min_prominence,
             ladder_counts: vec![vec![0u64; n_classes]; ladder.len()],
             ladder,
@@ -631,12 +685,16 @@ impl ShapeAccumulator {
         debug_assert_eq!(counts.len(), self.k);
         // One run decomposition serves every threshold in the envelope.
         let runs = runs_of(counts);
+        let mut primary_class = None;
         for (rung, &(_, threshold)) in self.ladder.iter().enumerate() {
             let class = classify_from_runs(&runs, counts.len(), threshold);
             self.ladder_counts[rung][class as usize] += 1;
+            if rung == self.primary {
+                primary_class = Some(class);
+            }
         }
 
-        let class = classify_from_runs(&runs, counts.len(), self.min_prominence_counts);
+        let class = primary_class.expect("the primary threshold is always a rung");
         let slot = &mut self.per_class[class as usize];
 
         if slot.n_samples == 0 {
@@ -798,7 +856,7 @@ mod tests {
         // Treating "no bar clears the threshold" as flat would put this in
         // `Flat`, which is not unimodal, and an exhaustive scan over samples
         // like it would then answer `Some(false)` to *every* `can_be` query at
-        // once — proving the data had no shape at all. The tallest run is
+        // once — proving the data had no shape at all. A unique tallest run is
         // therefore always a mode.
         let mut hump = vec![10u32; 41];
         hump[20] = 11;
@@ -821,20 +879,83 @@ mod tests {
     }
 
     #[test]
-    fn flat_means_every_count_is_equal_and_nothing_else() {
-        // A shallow comb: no bar is prominent, but the counts are not equal, so
-        // this is not `Flat`. Whatever it is called, the class must not be the
-        // one whose emptiness licenses "the data had no mode".
-        let comb: Vec<u32> = (0..41).map(|i| if i % 2 == 0 { 3 } else { 2 }).collect();
-        let n: u32 = comb.iter().sum();
+    fn tied_maxima_do_not_bypass_the_threshold() {
+        // The module doc's motivating example with its unique maximum removed:
+        // a one-count wobble around a tied maximum. Exempting every tallest run
+        // from the threshold would make this `ThreeOrMoreModes` at *any*
+        // threshold — a multimodality witness, and a threshold-immune proof
+        // that the data could not have been unimodal, both manufactured by a
+        // ±1-count wobble that no rung of the prominence band could veto.
+        let wobble = [30u32, 29, 30, 29, 30];
+        let n: u32 = wobble.iter().sum();
         let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
-        assert!(thresh > 3, "the premise: no bar reaches the threshold");
-        assert_ne!(classify(&comb, thresh), ShapeClass::Flat);
+        assert_eq!(modes(&wobble, thresh), Vec::<usize>::new());
+        assert_eq!(classify(&wobble, thresh), ShapeClass::Flat);
 
-        // The only vectors that are flat are the constant ones.
+        // At a resolution finer than the dips the same vector has three modes:
+        // `Flat` is a statement at a threshold, not an absolute.
+        assert_eq!(classify(&wobble, 1), ShapeClass::ThreeOrMoreModes);
+
+        // Through the accumulator it witnesses nothing anywhere in the band.
+        let mut acc = ShapeAccumulator::new(5, n as usize, DEFAULT_MODE_PROMINENCE);
+        acc.update(&wobble);
+        let shapes = acc.finish(true);
+        assert_eq!(shapes.can_be_multimodal(), Some(false));
+        assert_eq!(shapes.can_be_unimodal(), Some(false));
+    }
+
+    #[test]
+    fn tied_maxima_with_a_qualifying_valley_are_separate_modes() {
+        // A genuine U: the valley dips far below the tied rims, so merging
+        // must not kick in and the sample stays bimodal.
+        let u = [40u32, 10, 5, 10, 40];
+        let n: u32 = u.iter().sum();
+        let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
+        assert_eq!(modes(&u, thresh), vec![0, 4]);
+        assert_eq!(classify(&u, thresh), ShapeClass::TwoModes);
+    }
+
+    #[test]
+    fn merged_tied_maxima_are_one_broad_mode_and_mirror_cleanly() {
+        // Tied maxima at positions 0 and 2 with a one-count dip between them:
+        // one broad mode spanning 0..=2, which touches the low edge.
+        let low = [30u32, 29, 30, 20, 10];
+        let n: u32 = low.iter().sum();
+        let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
+        assert_eq!(modes(&low, thresh), vec![0]);
+        assert_eq!(classify(&low, thresh), ShapeClass::OneModeLowEdge);
+
+        // Its mirror image must classify as the mirrored class — a rule that
+        // designated one tied run as "the" maximum would break this.
+        let mut high = low;
+        high.reverse();
+        assert_eq!(classify(&high, thresh), ShapeClass::OneModeHighEdge);
+
+        // Interior ties merge to one interior mode.
+        let mid = [10u32, 30, 29, 30, 10];
+        let n: u32 = mid.iter().sum();
+        let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
+        assert_eq!(classify(&mid, thresh), ShapeClass::OneModeInterior);
+    }
+
+    #[test]
+    fn flat_is_no_distinguishable_mode_at_the_threshold() {
+        // Constant vectors are flat at every threshold.
         assert_eq!(classify(&[7, 7, 7, 7, 7], 1), ShapeClass::Flat);
         assert_eq!(classify(&[7, 7, 7, 7, 7], 1000), ShapeClass::Flat);
         assert_eq!(classify(&[], 1), ShapeClass::Flat);
+
+        // A shallow comb: 21 tied maxima, every dip one count deep. At a 5%
+        // threshold the dips are texture, the whole scale is one summit, and
+        // the sample is flat at this resolution — in particular it is not a
+        // multimodality witness. At a threshold the dips clear, the modes are
+        // real and the same vector reads as multimodal.
+        let comb: Vec<u32> = (0..41).map(|i| if i % 2 == 0 { 3 } else { 2 }).collect();
+        let n: u32 = comb.iter().sum();
+        let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
+        assert!(thresh > 1, "the premise: the dips sit below the threshold");
+        assert_eq!(classify(&comb, thresh), ShapeClass::Flat);
+        assert_eq!(classify(&comb, 1), ShapeClass::ThreeOrMoreModes);
     }
 
     #[test]

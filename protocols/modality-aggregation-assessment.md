@@ -749,8 +749,10 @@ scale.
 **A single threshold is not enough to carry a `Some(false)`, so `can_be`
 quantifies over a band.** An empty shape class is the strongest thing the crate
 says; resting it on one unvalidated constant would make the proof contingent on
-that constant, and contingent in the wrong direction — raising the threshold
-merges modes, so a *lower* threshold manufactures proofs of impossibility. Every
+that constant, in both directions — lowering the threshold splits modes and
+manufactures proofs that the data could not have been unimodal; raising it
+merges modes and manufactures proofs that it could not have been multimodal.
+Every
 sample is now classified at each threshold in
 `DEFAULT_PROMINENCE_LADDER = [0.02, 0.05, 0.10]` as well as at the configured
 one, and `can_be` answers `Some(false)` only when the class is empty across all
@@ -769,18 +771,33 @@ with a fifth of its mass at the bottom of the scale reported as a candidate bell
 is the classifier breaking, not the claim weakening. Both facts are pinned in
 `tests/shape_sweep.rs`.
 
-**The tallest bar of a sample is always a mode**, whatever the threshold. Without
-that exemption a vector spread over more than `1 / min_prominence` grid positions
-can have no bar tall enough to clear the threshold in absolute terms — its
-tallest is only `n / k` — and would be reported as having no mode at all. That
-put it in `Flat`, which is not unimodal, so an exhaustive scan over such samples
-answered `Some(false)` to *every* `can_be` query at once: a proof that the data
-had no shape whatsoever. It was reachable: a multi-item SPRITE grid is
-`(scale_max - scale_min) * items + 1` positions across, so six items on a 1–5
-scale already crosses the line. The regression test is a textbook-unimodal
+**The tallest runs of a sample are measured against each other, not exempted.**
+The problem this solves: a vector spread over more than `1 / min_prominence`
+grid positions can have no bar tall enough to clear the threshold in absolute
+terms — its tallest is only `n / k` — and would be reported as having no mode at
+all. That put it in `Flat`, which is not unimodal, so an exhaustive scan over
+such samples answered `Some(false)` to *every* `can_be` query at once: a proof
+that the data had no shape whatsoever. It was reachable: a multi-item SPRITE
+grid is `(scale_max - scale_min) * items + 1` positions across, so six items on
+a 1–5 scale already crosses the line. The regression test is a textbook-unimodal
 histogram on a 41-position grid — 10 everywhere, 11 at the centre — whose
-`unimodality_deficit` is 0 while the old rule called it flat. `Flat` now means
-"every count is equal" and nothing else, as its documentation always claimed.
+`unimodality_deficit` is 0 while the old rule called it flat.
+
+The first fix — exempting every tallest bar from the threshold outright —
+overshot. Under it a *tied* maximum's one-count wobble, `(30, 29, 30, 29, 30)`,
+read as `ThreeOrMoreModes` at every threshold: a multimodality witness, and a
+threshold-immune `Some(false)` against unimodality, both manufactured by ±1
+count that no rung of the prominence band could veto — the exact artefact class
+the band exists to prevent, reintroduced beneath it. The rule now: a unique
+tallest run is a mode at every threshold, which keeps the 41-position hump out
+of `Flat`; tied tallest runs merge into one broad mode where the valleys between
+them dip less than the threshold, and stay separate modes where a valley
+qualifies, which keeps `(40, 10, 5, 10, 40)` bimodal. Merging rather than
+designating one tie as "the" maximum keeps mirror images in mirrored classes. A
+merged summit spanning the entire scale is no distinguishable mode at all, so
+`Flat` now means "no distinguishable mode at this threshold": every count equal,
+or nothing but rim-to-rim sub-threshold texture. Pinned in
+`src/modality.rs::tests` (`tied_maxima_*`, `flat_is_no_distinguishable_mode_*`).
 
 ### The two numbers this document had wrong
 
