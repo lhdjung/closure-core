@@ -64,7 +64,7 @@ fn main() {
 
         println!(
             "{:<15} {:>10} {:>9.3} ms {:>9.3} ms {:>+9.1}%",
-            c.label,
+            c.label(),
             count,
             t_parallel.as_secs_f64() * 1000.0,
             t_streaming.as_secs_f64() * 1000.0,

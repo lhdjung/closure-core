@@ -46,13 +46,13 @@ fn main() {
         let t_parallel = start.elapsed();
 
         let enumerated = results.results.len() as u64;
-        assert_eq!(count, enumerated, "Mismatch on {}", c.label);
+        assert_eq!(count, enumerated, "Mismatch on {}", c.label());
 
         let speedup = t_parallel.as_secs_f64() / t_count.as_secs_f64();
 
         println!(
             "{:<15} {:>10} {:>9.3} ms {:>9.3} ms {:>7.0}x",
-            c.label,
+            c.label(),
             count,
             t_count.as_secs_f64() * 1000.0,
             t_parallel.as_secs_f64() * 1000.0,
