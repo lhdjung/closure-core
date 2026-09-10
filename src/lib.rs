@@ -8,9 +8,68 @@
 //! The main APIs users need are `closure_parallel()` for in-memory results and
 //! `closure_parallel_streaming()` for memory-efficient file output.
 //!
+//! # Results are frequency tables
+//!
+//! Both techniques store a reconstructed sample as one count per scale value
+//! rather than one integer per observation. Every sample they produce is
+//! sorted, so the two representations carry exactly the same information —
+//! see [`sample_counts`] for why, and [`ResultsTable::sample`] to get a sample
+//! back as a vector of values.
+//!
+//! The payoff is in memory: a result set of `m` samples costs `m * k` counts
+//! instead of `m` heap-allocated vectors of `n` values. For a 235k-sample run
+//! over a 1-7 scale with `n = 60` that is about 6.6 MB against roughly 62 MB.
+//! On disk the gain is much smaller — around 1.3x — because Parquet's
+//! dictionary and run-length encoding already compressed most of the
+//! redundancy out of the per-position layout.
+//!
+//! # Output layout
+//!
+//! One directory per run, written identically by CLOSURE and SPRITE:
+//!
+//! | File | Contents |
+//! |---|---|
+//! | `counts.parquet` | one row per sample: a count column per scale value, then `horns`. A sample's id is its row number. |
+//! | `scale_values.parquet` | which scale value each count column stands for |
+//! | `format.parquet` | format name, version, technique, `n`, `k`, `items`, scale bounds |
+//! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics |
+//! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
+//! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
+//! | `modality_summary` | one row: samples per shape class, whether the search was exhaustive, unimodality-deficit spread |
+//! | `modality_prominence` | samples per shape class at each threshold in the prominence envelope |
+//!
+//! # Reading the shape output
+//!
+//! [`modality::ModalityShapes`] answers what the raw data could have looked
+//! like. Three points decide how much its answers are worth:
+//!
+//! - A shape class with **zero** members means the raw data did not have that
+//!   shape — but only if the search was exhaustive. A truncated run
+//!   (`stop_after`) and SPRITE both see part of the space, so
+//!   [`modality::ModalityShapes::can_be`] returns `None` for them rather than
+//!   claiming a proof. It is also only a proof relative to a threshold for what
+//!   counts as a mode, so `can_be` requires the class to be empty across a band
+//!   of thresholds rather than at one; `modality_prominence` shows the band.
+//! - A class with **many** members means very little on its own. Since one
+//!   admissible dataset is enough for an author to point at, the useful output
+//!   is the class's *conditional bounds*: what every dataset of that shape would
+//!   also have to look like. Those are in `modality_shapes`.
+//! - Class **proportions** weight admissible datasets equally, the same
+//!   weighting `metrics_horns` already uses. That is a sensitivity analysis, not
+//!   a posterior probability.
+//!
+//! Set [`OutputFormat::Samples`] or [`OutputFormat::Both`] on the config to
+//! also write the older per-position layout (`sample.parquet` /
+//! `results.parquet`), which cross-validation against the Python
+//! implementation still uses.
+//!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray};
+use crate::modality::{ModalityShapes, ShapeAccumulator, ShapeClass, DEFAULT_MODE_PROMINENCE};
+use arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray,
+    UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use num::{Float, FromPrimitive, Integer, NumCast, ToPrimitive};
@@ -19,6 +78,7 @@ use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
@@ -38,11 +98,17 @@ impl<T> IntegerType for T where T: Integer + NumCast + ToPrimitive + Copy + Send
 use thiserror::Error;
 
 mod count;
-mod utils;
+pub mod modality;
+pub mod sample_counts;
 mod sprite;
 mod sprite_types;
+mod utils;
 
 pub use count::closure_count;
+pub use sample_counts::{
+    count_data_type, counts_record_batch, counts_schema, create_counts_writer, OutputFormat,
+    SampleCounts, SampleFormat, ValueGrid, OUTPUT_FORMAT_VERSION,
+};
 
 #[derive(Debug, Error)]
 pub enum ParameterError {
@@ -59,13 +125,21 @@ pub use sprite::{sprite_parallel, sprite_parallel_streaming, Sprite};
 pub use sprite_types::{RestrictionsMinimum, RestrictionsOption};
 
 /// Unified trait for sample reconstruction techniques (CLOSURE, SPRITE, etc.)
+///
+/// Requiring [`SampleFormat`] is what keeps the techniques' results
+/// interchangeable: a technique chooses how it searches, never how its results
+/// are shaped or written.
 #[allow(clippy::too_many_arguments)]
-pub trait Technique<T: FloatType, U: IntegerType + 'static> {
+pub trait Technique<T: FloatType, U: IntegerType + 'static>: SampleFormat<U> {
     fn run(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
@@ -73,9 +147,13 @@ pub trait Technique<T: FloatType, U: IntegerType + 'static> {
 
     fn run_streaming(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
@@ -85,36 +163,64 @@ pub trait Technique<T: FloatType, U: IntegerType + 'static> {
 /// CLOSURE technique: complete listing of original samples of underlying raw evidence
 pub struct Closure;
 
+impl<U: IntegerType> SampleFormat<U> for Closure {
+    const TECHNIQUE: &'static str = "closure";
+    /// CLOSURE emits whole scale points.
+    const SAMPLE_SCALE_FACTOR: i32 = 100;
+}
+
 impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
     fn run(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
     ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
         closure_parallel(
-            mean, sd, n, scale_min, scale_max,
-            rounding_error_mean, rounding_error_sd,
-            items, parquet_config, stop_after,
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
+            items,
+            parquet_config,
+            stop_after,
         )
     }
 
     fn run_streaming(
         &mut self,
-        mean: T, sd: T, n: U,
-        scale_min: U, scale_max: U,
-        rounding_error_mean: T, rounding_error_sd: T,
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
     ) -> Result<StreamingResult, ParameterError> {
         closure_parallel_streaming(
-            mean, sd, n, scale_min, scale_max,
-            rounding_error_mean, rounding_error_sd,
-            items, config, stop_after,
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
+            items,
+            config,
+            stop_after,
         )
     }
 }
@@ -124,6 +230,19 @@ impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
 pub struct ParquetConfig {
     pub file_path: String,
     pub batch_size: usize,
+    /// Which sample layout to write. Defaults to the counts layout.
+    pub format: OutputFormat,
+}
+
+impl ParquetConfig {
+    /// Write the counts layout to `file_path` in batches of `batch_size` rows.
+    pub fn new(file_path: impl Into<String>, batch_size: usize) -> Self {
+        Self {
+            file_path: file_path.into(),
+            batch_size,
+            format: OutputFormat::default(),
+        }
+    }
 }
 
 /// Configuration for streaming mode
@@ -132,6 +251,20 @@ pub struct StreamingConfig {
     pub file_path: String,
     pub batch_size: usize,
     pub show_progress: bool,
+    /// Which sample layout to write. Defaults to the counts layout.
+    pub format: OutputFormat,
+}
+
+impl StreamingConfig {
+    /// Stream the counts layout to `file_path` in batches of `batch_size` rows.
+    pub fn new(file_path: impl Into<String>, batch_size: usize, show_progress: bool) -> Self {
+        Self {
+            file_path: file_path.into(),
+            batch_size,
+            show_progress,
+            format: OutputFormat::default(),
+        }
+    }
 }
 
 /// Result of streaming operation
@@ -146,9 +279,10 @@ pub struct StreamingResult {
 ///
 /// **Important**: While strum makes iteration robust, these three variants have specific
 /// semantic meaning in the CLOSURE algorithm:
-/// - `All`: Frequencies across all samples
-/// - `HornsMin`: Frequencies for samples with minimum horns index
-/// - `HornsMax`: Frequencies for samples with maximum horns index
+/// - `All`: Medoid of all samples (the sample closest by EMD to the grand
+///   centroid). Formerly the grand mean; now an actual sample.
+/// - `HornsMin`: Medoid of samples with the minimum horns index.
+/// - `HornsMax`: Medoid of samples with the maximum horns index.
 ///
 /// Adding new variants requires corresponding changes to the frequency calculation logic
 /// in `samples_to_result_list()` and `write_streaming_statistics()` to define what
@@ -221,7 +355,6 @@ impl FrequencySamplesColumn {
         result
     }
 
-
     /// Get the total length of the samples column
     pub fn len(&self) -> usize {
         self.repetitions * SampleCategory::COUNT
@@ -263,14 +396,35 @@ impl FrequencySamplesColumn {
 /// Combined frequency data for a set of samples
 /// Each row represents frequency data for a specific value in a specific sample group
 ///
+/// Two different summaries of the same group sit side by side, because they
+/// answer different questions and neither substitutes for the other:
+///
+/// - `f_expected` is the mean count of the value across the group. It is a
+///   central tendency over admissible datasets, not itself a dataset — it need
+///   not be integral and generally does not satisfy the reported mean and SD.
+/// - `f_representative` is the count in one *actual* member of the group, the
+///   medoid (see [`medoid_of`]). It is a real reconstruction, but only one of
+///   many, and the group can be very widely spread around it. Read it alongside
+///   `modality_counts`, which gives the per-value range across the whole set.
+///
+/// `f_representative` is `NaN` in streaming mode, which cannot pick a medoid in
+/// a single pass. That is deliberate: the column means the same thing in every
+/// output file or is visibly absent, rather than quietly switching definition.
+///
 /// Invariant: All fields must have the same length to ensure valid data frame structure
 #[derive(Clone, Debug)]
 pub struct FrequencyTable {
     /// Sample categories: "all", "horns_min", "horns_max" each repeated for all scale values
     samples_group: FrequencySamplesColumn,
-    value: Vec<i32>,
-    f_average: Vec<f64>,
-    f_absolute: Vec<f64>,
+    /// Scale value of each row. Held as a float because a multi-item SPRITE
+    /// grid has fractional values; at `items == 1` these are whole numbers.
+    value: Vec<f64>,
+    /// Mean count of the value across the group. Sums to `n` over a group.
+    f_expected: Vec<f64>,
+    /// Count of the value in the group's medoid. `NaN` when no medoid was
+    /// computed, which is the case for every streaming run.
+    f_representative: Vec<f64>,
+    /// `f_expected / n`: the expected proportion of responses at this value.
     f_relative: Vec<f64>,
 }
 
@@ -278,21 +432,21 @@ impl FrequencyTable {
     /// Create a new FrequencyTable, validating that all fields have the same length
     ///
     /// # Panics
-    /// Panics if the lengths of value, f_average, f_absolute, or f_relative don't match
-    /// the length of samples_group
+    /// Panics if the lengths of value, f_expected, f_representative, or
+    /// f_relative don't match the length of samples_group
     pub fn new(
         samples_group: FrequencySamplesColumn,
-        value: Vec<i32>,
-        f_average: Vec<f64>,
-        f_absolute: Vec<f64>,
+        value: Vec<f64>,
+        f_expected: Vec<f64>,
+        f_representative: Vec<f64>,
         f_relative: Vec<f64>,
     ) -> Self {
         let expected_len = samples_group.len();
 
         let name_len_tuples = [
             ("value", value.len()),
-            ("f_average", f_average.len()),
-            ("f_absolute", f_absolute.len()),
+            ("f_expected", f_expected.len()),
+            ("f_representative", f_representative.len()),
             ("f_relative", f_relative.len()),
         ];
 
@@ -308,8 +462,8 @@ impl FrequencyTable {
         Self {
             samples_group,
             value,
-            f_average,
-            f_absolute,
+            f_expected,
+            f_representative,
             f_relative,
         }
     }
@@ -330,18 +484,18 @@ impl FrequencyTable {
     }
 
     /// Get a reference to the value column
-    pub fn value(&self) -> &[i32] {
+    pub fn value(&self) -> &[f64] {
         &self.value
     }
 
-    /// Get a reference to the f_average column
-    pub fn f_average(&self) -> &[f64] {
-        &self.f_average
+    /// Get a reference to the f_expected column
+    pub fn f_expected(&self) -> &[f64] {
+        &self.f_expected
     }
 
-    /// Get a reference to the f_absolute column
-    pub fn f_absolute(&self) -> &[f64] {
-        &self.f_absolute
+    /// Get a reference to the f_representative column
+    pub fn f_representative(&self) -> &[f64] {
+        &self.f_representative
     }
 
     /// Get a reference to the f_relative column
@@ -349,6 +503,54 @@ impl FrequencyTable {
         &self.f_relative
     }
 }
+
+/// Distilled per-scale-value count distribution for efficient overlay rendering.
+/// One row per (value, count) pair that actually occurred across all samples.
+/// Precomputed to avoid expensive per-sample expansion on the R side.
+#[derive(Clone, Debug)]
+pub struct FrequencyDist {
+    pub value: Vec<f64>,     // scale value (e.g. 1, 2, 3, 4, 5)
+    pub count: Vec<i32>,     // raw integer count in a single sample (0..n)
+    pub n_samples: Vec<u32>, // how many samples had this count at this scale value
+}
+
+/// Per-value count ranges derived from all samples.
+///
+/// One row per scale value: `count_lo` is the minimum count of that value
+/// across all samples, `count_hi` is the maximum.
+#[derive(Clone, Debug)]
+pub struct ModalityCounts {
+    /// Scale values
+    pub value: Vec<f64>,
+    /// Minimum count of each scale value across all samples
+    pub count_lo: Vec<i32>,
+    /// Maximum count of each scale value across all samples
+    pub count_hi: Vec<i32>,
+}
+
+/// Pairwise frequency-ordering resolution for adjacent scale values.
+///
+/// One row per consecutive pair $(v_i, v_{i+1})$: `resolved` is true when
+/// the ordering between the two values is the same in every sample, and
+/// `a_greater` is true when `value_a` always has the higher count.
+#[derive(Clone, Debug)]
+pub struct ModalityPairs {
+    /// Lower scale value of each adjacent pair
+    pub value_a: Vec<f64>,
+    /// Higher scale value of each adjacent pair
+    pub value_b: Vec<f64>,
+    /// True if the ordering between value_a and value_b is the same in every sample
+    pub resolved: Vec<bool>,
+    /// When resolved is true: true if value_a always has a higher count than value_b
+    pub a_greater: Vec<bool>,
+}
+
+// Shape conclusions live in `crate::modality` as `ModalityShapes`, which
+// records per-class sample counts and per-class count bounds instead of a fixed
+// set of booleans. `j_shape_low` / `j_shape_high` are now
+// `ModalityShapes::can_be_j_shape_low` / `_high`, derived from the same
+// per-sample scan as every other class rather than from the `count_lo`/
+// `count_hi` box, whose corners are not generally admissible samples.
 
 /// Main metrics about the CLOSURE results
 #[derive(Clone, Debug)]
@@ -371,12 +573,70 @@ pub struct MetricsHorns {
     pub range: f64,
 }
 
-/// Results table combining samples and their horns values
+/// Results table combining reconstructed samples and their horns values.
+///
+/// Samples are stored as frequency tables — one count per scale value rather
+/// than one integer per observation. That is lossless: every sample a technique
+/// in this crate produces is sorted, so its count vector determines it
+/// completely. Call [`ResultsTable::sample`] to get one back as a vector of
+/// values.
 #[derive(Clone, Debug)]
 pub struct ResultsTable<U> {
     pub id: Vec<f64>,
-    pub sample: Vec<Vec<U>>,
+    pub counts: SampleCounts,
     pub horns: Vec<f64>,
+    _marker: PhantomData<U>,
+}
+
+impl<U: IntegerType> ResultsTable<U> {
+    /// Assemble a results table.
+    ///
+    /// # Panics
+    /// Panics if `id`, `counts` and `horns` don't describe the same number of
+    /// samples.
+    pub fn new(id: Vec<f64>, counts: SampleCounts, horns: Vec<f64>) -> Self {
+        assert_eq!(
+            id.len(),
+            counts.nrow(),
+            "can't create a ResultsTable: `id` length ({}) doesn't match the number of samples ({})",
+            id.len(),
+            counts.nrow()
+        );
+        assert_eq!(
+            horns.len(),
+            counts.nrow(),
+            "can't create a ResultsTable: `horns` length ({}) doesn't match the number of samples ({})",
+            horns.len(),
+            counts.nrow()
+        );
+        Self {
+            id,
+            counts,
+            horns,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Number of samples.
+    pub fn len(&self) -> usize {
+        self.counts.nrow()
+    }
+
+    /// Whether there are no samples.
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    /// Reconstruct sample `i` as a sorted vector of values.
+    pub fn sample(&self, i: usize) -> Vec<U> {
+        self.counts.sample_at(i)
+    }
+
+    /// Reconstruct every sample. Allocates the full expanded matrix, so prefer
+    /// [`ResultsTable::sample`] when one sample at a time will do.
+    pub fn samples(&self) -> Vec<Vec<U>> {
+        self.counts.samples()
+    }
 }
 
 /// Complete CLOSURE results with all statistics
@@ -385,17 +645,36 @@ pub struct ResultListFromMeanSdN<U> {
     pub metrics_main: MetricsMain,
     pub metrics_horns: MetricsHorns,
     pub frequency: FrequencyTable,
+    pub frequency_dist: FrequencyDist,
+    pub modality_counts: ModalityCounts,
+    pub modality_pairs: ModalityPairs,
+    /// Per-shape-class sample counts and conditional per-value count bounds.
+    pub modality_shapes: ModalityShapes,
     pub results: ResultsTable<U>,
 }
 
-impl<U: Integer + ToPrimitive + Copy> ResultListFromMeanSdN<U> {
+impl<U: IntegerType> ResultListFromMeanSdN<U> {
     /// Create an empty result list for cases with no valid distributions
     ///
     /// Returns a `ResultListFromMeanSdN` with all metrics set to `NaN` or zero
     /// (depending on the metric), and with empty result vectors.
     /// Used when CLOSURE or SPRITE fail to find any distributions.
+    ///
+    /// Assumes a single-item scale. For a multi-item SPRITE grid, use
+    /// [`ResultListFromMeanSdN::empty_on_grid`].
     pub fn empty(scale_min: U, scale_max: U) -> Self {
-        empty_result_list(scale_min, scale_max)
+        let grid = ValueGrid::new(
+            U::to_i32(&scale_min).unwrap(),
+            U::to_i32(&scale_max).unwrap(),
+            1,
+            100,
+        );
+        empty_result_list(grid, 0)
+    }
+
+    /// Create an empty result list over an explicit value grid.
+    pub fn empty_on_grid(grid: ValueGrid, n: usize) -> Self {
+        empty_result_list(grid, n)
     }
 }
 
@@ -457,7 +736,6 @@ fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
     }
 }
 
-
 /// Count initial combinations with replacement
 ///
 /// Computes the number of sorted combinations of length `depth` from
@@ -511,45 +789,315 @@ fn calculate_horns(freqs: &[f64], scale_min: i32, scale_max: i32) -> f64 {
     numerator / denominator
 }
 
-/// Calculate horns index for a uniform distribution
-fn calculate_horns_uniform(scale_min: i32, scale_max: i32) -> f64 {
-    let n_values = (scale_max - scale_min + 1) as usize;
-    let uniform_freqs = vec![1.0; n_values];
-    calculate_horns(&uniform_freqs, scale_min, scale_max)
+/// Calculate horns index for a uniform distribution over `k` grid values
+fn horns_uniform(k: usize) -> f64 {
+    horns_from_counts(&vec![1.0; k])
 }
 
-/// Calculate frequency data for a specific set of samples
-fn calculate_frequency_rows<U>(
-    samples: &[Vec<U>],
-    scale_min: U,
-    scale_max: U,
-) -> (Vec<i32>, Vec<f64>, Vec<f64>, Vec<f64>)
+/// Horns index of a frequency vector laid out on a [`ValueGrid`].
+///
+/// Horns normalises by the maximum variance the scale allows, so it is
+/// invariant under any affine relabelling of the value axis. That means the
+/// grid *positions* give the same answer as the grid values do — which is what
+/// makes the index directly comparable between a CLOSURE run on 1..7 and a
+/// five-item SPRITE run on the same scale, whose grid is 31 values wide.
+pub(crate) fn horns_from_counts(freqs: &[f64]) -> f64 {
+    if freqs.len() < 2 {
+        return 0.0;
+    }
+    calculate_horns(freqs, 0, freqs.len() as i32 - 1)
+}
+
+/// Earth Mover's Distance between two count vectors over the same grid.
+///
+/// For 1D distributions this equals the L1 distance between cumulative sums,
+/// which respects the ordinal structure of the scale: a unit of mass moved one
+/// step along the scale costs 1, correctly treating adjacent values as closer
+/// than distant ones (unlike L1 or L2 on the raw vectors).
+///
+/// This is the definition [`medoid_of`] minimises. That function computes the
+/// same quantity by a decomposition that avoids the quadratic pairwise loop, so
+/// this direct form is kept as the reference the tests check it against.
+#[cfg(test)]
+fn emd_1d(f1: &[u32], f2: &[u32]) -> u64 {
+    let mut cum1 = 0i64;
+    let mut cum2 = 0i64;
+    let mut total = 0u64;
+    for (&a, &b) in f1.iter().zip(f2.iter()) {
+        cum1 += a as i64;
+        cum2 += b as i64;
+        total += (cum1 - cum2).unsigned_abs();
+    }
+    total
+}
+
+/// The medoid of a group: the sample minimising the summed EMD to every other
+/// sample in the group.
+///
+/// This is the real medoid, not the sample nearest the group mean. The two
+/// differ — in CDF space the first is a median and the second is anchored on a
+/// mean — and the medoid is the robust one, which is the entire reason for
+/// preferring an actual sample over a centroid in the first place.
+///
+/// Ties are broken by taking the lexicographically smallest count vector, so
+/// the answer does not depend on enumeration order. That matters because
+/// enumeration order is not reproducible under `stop_after` or for SPRITE.
+///
+/// # Complexity
+///
+/// Naively this is `O(m² k)`. Since 1D EMD is the L1 distance between
+/// cumulative counts, the total cost of a candidate `x` decomposes per grid
+/// position into `Σ_y |F_x(j) − F_y(j)|`, and every `F(j)` is an integer in
+/// `0..=n`. So one pass builds a histogram of cumulative counts per position
+/// and a second pass answers each candidate from its prefix sums: `O(m k + k
+/// n)` overall.
+fn medoid_of<'a, I>(rows: I, k: usize, n: usize) -> Option<Vec<u32>>
 where
-    U: Integer + ToPrimitive + Copy,
+    I: Iterator<Item = &'a [u32]> + Clone,
 {
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    if k == 0 {
+        return None;
+    }
+    // Cumulative counts at the last position are always n, so they contribute
+    // nothing to any distance and are skipped.
+    let cuts = k - 1;
+    let stride = n + 1;
 
-    let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    // hist[j * stride + c] = how many samples have cumulative count c at cut j.
+    let mut hist = vec![0u64; cuts * stride];
+    let mut m = 0u64;
+    for row in rows.clone() {
+        let mut cum = 0usize;
+        for (j, &c) in row[..cuts].iter().enumerate() {
+            cum += c as usize;
+            hist[j * stride + cum.min(n)] += 1;
+        }
+        m += 1;
+    }
+    if m == 0 {
+        return None;
+    }
 
-    let mut f_absolute = vec![0.0; nrow_frequency];
-    let n_samples = samples.len() as f64;
-
-    // Count frequencies
-    for sample in samples {
-        for &value in sample {
-            let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
-            f_absolute[idx] += 1.0;
+    // Per cut, prefix counts and prefix weighted sums over cumulative values.
+    let mut pre_count = vec![0u64; cuts * (stride + 1)];
+    let mut pre_weight = vec![0u64; cuts * (stride + 1)];
+    for j in 0..cuts {
+        for c in 0..stride {
+            let h = hist[j * stride + c];
+            pre_count[j * (stride + 1) + c + 1] = pre_count[j * (stride + 1) + c] + h;
+            pre_weight[j * (stride + 1) + c + 1] = pre_weight[j * (stride + 1) + c] + h * c as u64;
         }
     }
 
-    // Calculate derived values
-    let total_values: f64 = f_absolute.iter().sum();
-    let value: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
-    let f_average: Vec<f64> = f_absolute.iter().map(|&f| f / n_samples).collect();
-    let f_relative: Vec<f64> = f_absolute.iter().map(|&f| f / total_values).collect();
+    let mut best: Option<(u64, Vec<u32>)> = None;
+    for row in rows {
+        let mut cost = 0u64;
+        let mut cum = 0usize;
+        for (j, &c) in row[..cuts].iter().enumerate() {
+            cum += c as usize;
+            let v = cum.min(n);
+            let base = j * (stride + 1);
+            // Samples at or below v, and their summed cumulative counts.
+            let lo_n = pre_count[base + v + 1];
+            let lo_w = pre_weight[base + v + 1];
+            let all_n = pre_count[base + stride];
+            let all_w = pre_weight[base + stride];
+            // Σ|v − c| split at v: those below contribute v·n − Σc, those above Σc − v·n.
+            cost += (v as u64 * lo_n - lo_w) + ((all_w - lo_w) - v as u64 * (all_n - lo_n));
+        }
+        let better = match &best {
+            None => true,
+            Some((best_cost, best_row)) => {
+                cost < *best_cost || (cost == *best_cost && row < best_row.as_slice())
+            }
+        };
+        if better {
+            best = Some((cost, row.to_vec()));
+        }
+    }
+    best.map(|(_, row)| row)
+}
 
-    (value, f_average, f_absolute, f_relative)
+/// Return the frequency-table rows for one group of samples.
+///
+/// Yields `(value, f_expected, f_representative, f_relative)`, where
+/// `f_expected` is the mean count per sample, `f_representative` is the count in
+/// the group medoid, and `f_relative` is `f_expected / n`. See
+/// [`FrequencyTable`] for why both summaries are reported.
+fn compute_frequency_rows<'a, I>(
+    grid: &ValueGrid,
+    n: usize,
+    rows: I,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)
+where
+    I: Iterator<Item = &'a [u32]> + Clone,
+{
+    let k = grid.len();
+    let value = grid.values().to_vec();
+
+    // Summed counts and group size in one pass.
+    let mut summed = vec![0u64; k];
+    let mut m = 0usize;
+    for row in rows.clone() {
+        for (acc, &c) in summed.iter_mut().zip(row.iter()) {
+            *acc += c as u64;
+        }
+        m += 1;
+    }
+
+    if m == 0 {
+        return (
+            value,
+            vec![f64::NAN; k],
+            vec![f64::NAN; k],
+            vec![f64::NAN; k],
+        );
+    }
+
+    let f_expected: Vec<f64> = summed.iter().map(|&s| s as f64 / m as f64).collect();
+    let f_relative: Vec<f64> = f_expected.iter().map(|&f| f / n as f64).collect();
+    let f_representative = match medoid_of(rows, k, n) {
+        Some(medoid) => medoid.iter().map(|&c| c as f64).collect(),
+        None => vec![f64::NAN; k],
+    };
+
+    (value, f_expected, f_representative, f_relative)
+}
+
+/// Calculate the distilled count distribution across all samples.
+/// For each (scale value, raw count) pair that occurred in any sample,
+/// records how many samples produced that count at that scale value.
+fn calculate_frequency_dist(counts: &SampleCounts) -> FrequencyDist {
+    if counts.is_empty() {
+        return FrequencyDist {
+            value: Vec::new(),
+            count: Vec::new(),
+            n_samples: Vec::new(),
+        };
+    }
+
+    let grid = counts.grid();
+    let k = grid.len();
+    let n = counts.n();
+
+    // Flat 2D array: dist[v_idx * (n+1) + count] = number of samples with that count.
+    // Direct index arithmetic replaces HashMap hashing entirely.
+    let mut dist = vec![0u32; k * (n + 1)];
+
+    for row in counts.rows() {
+        for (v_idx, &cnt) in row.iter().enumerate() {
+            dist[v_idx * (n + 1) + cnt as usize] += 1;
+        }
+    }
+
+    // Collect non-zero entries; iteration order is already (value asc, count asc)
+    let mut value = Vec::new();
+    let mut count = Vec::new();
+    let mut n_samples = Vec::new();
+    for v_idx in 0..k {
+        for cnt in 0..=n {
+            let n_samp = dist[v_idx * (n + 1) + cnt];
+            if n_samp > 0 {
+                value.push(grid.values()[v_idx]);
+                count.push(cnt as i32);
+                n_samples.push(n_samp);
+            }
+        }
+    }
+
+    FrequencyDist {
+        value,
+        count,
+        n_samples,
+    }
+}
+
+/// Compute the per-value count ranges and adjacent-pair orderings from a
+/// `FrequencyDist`, returning the two result structs that map directly to the
+/// R-level tibbles.
+///
+/// Shape conclusions are *not* computed here. They require a per-sample scan —
+/// these bounds describe a box around the result set, and the box has corners
+/// that are not admissible samples — and live in [`ModalityShapes`], built by
+/// [`ShapeAccumulator`] as samples stream past.
+pub(crate) fn compute_modality(
+    freq_dist: &FrequencyDist,
+    grid: &ValueGrid,
+) -> (ModalityCounts, ModalityPairs) {
+    let n_vals = grid.len();
+
+    if n_vals == 0 || freq_dist.value.is_empty() {
+        return (
+            ModalityCounts {
+                value: Vec::new(),
+                count_lo: Vec::new(),
+                count_hi: Vec::new(),
+            },
+            ModalityPairs {
+                value_a: Vec::new(),
+                value_b: Vec::new(),
+                resolved: Vec::new(),
+                a_greater: Vec::new(),
+            },
+        );
+    }
+
+    // --- per-value count ranges ---------------------------------------
+    let mut count_lo = vec![i32::MAX; n_vals];
+    let mut count_hi = vec![i32::MIN; n_vals];
+
+    for (&val, &cnt) in freq_dist.value.iter().zip(freq_dist.count.iter()) {
+        let Some(idx) = grid.index_of_value(val) else {
+            continue;
+        };
+        if cnt < count_lo[idx] {
+            count_lo[idx] = cnt;
+        }
+        if cnt > count_hi[idx] {
+            count_hi[idx] = cnt;
+        }
+    }
+
+    // Guard: if a value somehow has no rows, default its range to [0, 0]
+    for i in 0..n_vals {
+        if count_lo[i] == i32::MAX {
+            count_lo[i] = 0;
+            count_hi[i] = 0;
+        }
+    }
+
+    let values: Vec<f64> = grid.values().to_vec();
+
+    // --- pairwise adjacent orderings ----------------------------------
+    let n_pairs = n_vals - 1;
+    let mut value_a = Vec::with_capacity(n_pairs);
+    let mut value_b = Vec::with_capacity(n_pairs);
+    let mut resolved = Vec::with_capacity(n_pairs);
+    let mut a_greater = Vec::with_capacity(n_pairs);
+
+    for i in 0..n_pairs {
+        // a_always_greater: lo_a > hi_b — value_a always has more counts than value_b
+        let a_always_greater = count_lo[i] > count_hi[i + 1];
+        let b_always_greater = count_lo[i + 1] > count_hi[i];
+        value_a.push(values[i]);
+        value_b.push(values[i + 1]);
+        resolved.push(a_always_greater || b_always_greater);
+        a_greater.push(a_always_greater);
+    }
+
+    (
+        ModalityCounts {
+            value: values,
+            count_lo,
+            count_hi,
+        },
+        ModalityPairs {
+            value_a,
+            value_b,
+            resolved,
+            a_greater,
+        },
+    )
 }
 
 /// Calculate median of a sorted vector
@@ -570,22 +1118,18 @@ fn mad(values: &[f64], median_val: f64) -> f64 {
 }
 
 /// Used by `ResultListFromMeanSdN::empty()`
-pub(crate) fn empty_result_list<U>(scale_min: U, scale_max: U) -> ResultListFromMeanSdN<U>
+pub(crate) fn empty_result_list<U>(grid: ValueGrid, n: usize) -> ResultListFromMeanSdN<U>
 where
-    U: Integer + ToPrimitive + Copy,
+    U: IntegerType,
 {
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-    
-    let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let group_size = grid.len();
     let nrow_frequency = group_size * SampleCategory::COUNT;
 
     // Build a vector of scale values repeated as many times as there are categories of samples.
     // Currently, this means 3 times (for "all", "horns_min", and "horns_max").
-    let scale_values: Vec<i32> = (scale_min_i32..=scale_max_i32).collect();
     let mut value = Vec::with_capacity(nrow_frequency);
     for _ in 0..SampleCategory::COUNT {
-        value.extend_from_slice(&scale_values);
+        value.extend_from_slice(grid.values());
     }
 
     ResultListFromMeanSdN {
@@ -608,50 +1152,69 @@ where
             FrequencySamplesColumn::new(group_size),
             value,
             vec![f64::NAN; nrow_frequency],
-            vec![0.0; nrow_frequency],
+            vec![f64::NAN; nrow_frequency],
             vec![f64::NAN; nrow_frequency],
         ),
-        results: ResultsTable {
-            id: Vec::new(),
-            sample: Vec::new(),
-            horns: Vec::new(),
+        frequency_dist: FrequencyDist {
+            value: Vec::new(),
+            count: Vec::new(),
+            n_samples: Vec::new(),
         },
+        modality_counts: ModalityCounts {
+            value: Vec::new(),
+            count_lo: Vec::new(),
+            count_hi: Vec::new(),
+        },
+        modality_pairs: ModalityPairs {
+            value_a: Vec::new(),
+            value_b: Vec::new(),
+            resolved: Vec::new(),
+            a_greater: Vec::new(),
+        },
+        // Nothing was scanned, so nothing is ruled out: every `can_be` query on
+        // this returns `None`, not `false`.
+        modality_shapes: modality::empty_shapes(DEFAULT_MODE_PROMINENCE),
+        results: ResultsTable::new(Vec::new(), SampleCounts::new(grid, n), Vec::new()),
     }
 }
 
-/// Calculate all statistics for the samples
-fn samples_to_result_list<U>(
-    samples: Vec<Vec<U>>,
-    scale_min: U,
-    scale_max: U,
-) -> ResultListFromMeanSdN<U>
+/// Calculate all statistics for the samples.
+///
+/// `exhaustive` says whether `counts` is the complete set of samples matching
+/// the reported statistics. It is false for a truncated CLOSURE search and for
+/// SPRITE, which samples the solution space rather than enumerating it. Only
+/// [`ModalityShapes`] uses it, and only to decide whether an empty shape class
+/// is a proof of impossibility or merely an absence of evidence.
+fn counts_to_result_list<U>(counts: SampleCounts, exhaustive: bool) -> ResultListFromMeanSdN<U>
 where
-    U: Integer + ToPrimitive + Copy,
+    U: IntegerType,
 {
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-
-    let group_size = (scale_max_i32 - scale_min_i32 + 1) as usize;
+    let grid = counts.grid().clone();
+    let group_size = grid.len();
 
     // Handle empty samples case
-    if samples.is_empty() {
-        return empty_result_list(scale_min, scale_max);
+    if counts.is_empty() {
+        let n = counts.n();
+        return empty_result_list(grid, n);
     }
 
-    let n = samples[0].len();
-    let samples_all = samples.len();
+    let n = counts.n();
+    let samples_all = counts.nrow();
     let values_all = samples_all * n;
 
-    // Calculate horns for each sample
+    // Calculate horns for each sample; classify its shape in the same pass.
+    let mut shapes = ShapeAccumulator::new(group_size, n, DEFAULT_MODE_PROMINENCE);
+
     let mut horns_values = Vec::with_capacity(samples_all);
-    for sample in &samples {
-        let mut freqs = vec![0.0; group_size];
-        for &value in sample {
-            let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
-            freqs[idx] += 1.0;
+    let mut freqs = vec![0.0f64; group_size];
+    for row in counts.rows() {
+        for (slot, &c) in freqs.iter_mut().zip(row.iter()) {
+            *slot = c as f64;
         }
-        horns_values.push(calculate_horns(&freqs, scale_min_i32, scale_max_i32));
+        horns_values.push(horns_from_counts(&freqs));
+        shapes.update(row);
     }
+    let modality_shapes = shapes.finish(exhaustive);
 
     // Calculate horns statistics
     let horns_mean = horns_values.iter().sum::<f64>() / samples_all as f64;
@@ -686,50 +1249,39 @@ where
         .map(|(i, _)| i)
         .collect();
 
-    let min_samples: Vec<Vec<U>> = min_indices.iter().map(|&i| samples[i].clone()).collect();
-    let max_samples: Vec<Vec<U>> = max_indices.iter().map(|&i| samples[i].clone()).collect();
+    // Frequency rows for all three groups. Each group reports both its mean
+    // profile and its medoid; see `FrequencyTable` for why both are needed.
+    let (all_value, all_f_exp, all_f_rep, all_f_rel) =
+        compute_frequency_rows(&grid, n, counts.rows());
 
-    // Calculate frequency data for all three groups
-    let (
-        all_value,
-        all_f_average,
-        all_f_absolute,
-        all_f_relative,
-    ) = calculate_frequency_rows(&samples, scale_min, scale_max);
+    let (min_value, min_f_exp, min_f_rep, min_f_rel) =
+        compute_frequency_rows(&grid, n, min_indices.iter().map(|&i| counts.row(i)));
 
-    let (
-        min_value,
-        min_f_average,
-        min_f_absolute,
-        min_f_relative,
-    ) = calculate_frequency_rows(&min_samples, scale_min, scale_max);
-
-    let (
-        max_value,
-        max_f_average,
-        max_f_absolute,
-        max_f_relative,
-    ) = calculate_frequency_rows(&max_samples, scale_min, scale_max);
+    let (max_value, max_f_exp, max_f_rep, max_f_rel) =
+        compute_frequency_rows(&grid, n, max_indices.iter().map(|&i| counts.row(i)));
 
     // Combine all frequency data into a single table
     let mut combined_value = all_value;
     combined_value.extend(min_value);
     combined_value.extend(max_value);
 
-    let mut combined_f_average = all_f_average;
-    combined_f_average.extend(min_f_average);
-    combined_f_average.extend(max_f_average);
+    let mut combined_f_expected = all_f_exp;
+    combined_f_expected.extend(min_f_exp);
+    combined_f_expected.extend(max_f_exp);
 
-    let mut combined_f_absolute = all_f_absolute;
-    combined_f_absolute.extend(min_f_absolute);
-    combined_f_absolute.extend(max_f_absolute);
+    let mut combined_f_representative = all_f_rep;
+    combined_f_representative.extend(min_f_rep);
+    combined_f_representative.extend(max_f_rep);
 
-    let mut combined_f_relative = all_f_relative;
-    combined_f_relative.extend(min_f_relative);
-    combined_f_relative.extend(max_f_relative);
+    let mut combined_f_relative = all_f_rel;
+    combined_f_relative.extend(min_f_rel);
+    combined_f_relative.extend(max_f_rel);
 
     // Create ID column for results table
     let id: Vec<f64> = (1..=samples_all).map(|i| i as f64).collect();
+
+    let frequency_dist = calculate_frequency_dist(&counts);
+    let (modality_counts, modality_pairs) = compute_modality(&frequency_dist, &grid);
 
     ResultListFromMeanSdN {
         metrics_main: MetricsMain {
@@ -738,7 +1290,7 @@ where
         },
         metrics_horns: MetricsHorns {
             mean: horns_mean,
-            uniform: calculate_horns_uniform(scale_min_i32, scale_max_i32),
+            uniform: horns_uniform(group_size),
             sd: horns_sd,
             cv: horns_sd / horns_mean,
             mad: horns_mad,
@@ -750,15 +1302,15 @@ where
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(group_size),
             combined_value,
-            combined_f_average,
-            combined_f_absolute,
+            combined_f_expected,
+            combined_f_representative,
             combined_f_relative,
         ),
-        results: ResultsTable {
-            id,
-            sample: samples,
-            horns: horns_values,
-        },
+        frequency_dist,
+        modality_counts,
+        modality_pairs,
+        modality_shapes,
+        results: ResultsTable::new(id, counts, horns_values),
     }
 }
 
@@ -909,9 +1461,9 @@ fn create_stats_writers(
     // Frequency writer with samples column first
     let frequency_schema = Arc::new(Schema::new(vec![
         Field::new("samples", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-        Field::new("f_average", DataType::Float64, false),
-        Field::new("f_absolute", DataType::Float64, false),
+        Field::new("value", DataType::Float64, false),
+        Field::new("f_expected", DataType::Float64, false),
+        Field::new("f_representative", DataType::Float64, false),
         Field::new("f_relative", DataType::Float64, false),
     ]));
     let frequency_file = File::create(format!("{}frequency.parquet", base_path))?;
@@ -935,7 +1487,7 @@ fn results_to_record_batch<U>(
     end_idx: usize,
 ) -> Result<RecordBatch, Box<dyn std::error::Error>>
 where
-    U: Integer + ToPrimitive + Copy,
+    U: IntegerType,
 {
     // Create arrays for each column
     let mut arrays: Vec<ArrayRef> = Vec::new();
@@ -944,12 +1496,13 @@ where
     let id_data: Vec<f64> = results.id[start_idx..end_idx].to_vec();
     arrays.push(Arc::new(Float64Array::from(id_data)));
 
-    // Add samples column as a list using the standard ListBuilder
+    // Add samples column as a list using the standard ListBuilder.
+    // Samples are expanded from their counts one at a time, so the legacy
+    // layout never needs the whole matrix in memory at once.
     let mut list_builder = ListBuilder::new(Int32Builder::new());
 
-    for sample in &results.sample[start_idx..end_idx] {
-        // Append all values for this sample
-        for &val in sample {
+    for i in start_idx..end_idx {
+        for &val in &results.sample(i) {
             list_builder.values().append_value(U::to_i32(&val).unwrap());
         }
         // Mark the end of this list
@@ -1088,7 +1641,9 @@ fn generate_combinations_recursive<T, U>(
 {
     if remaining == 0 {
         let depth = combo.len();
-        let sum: T = combo.iter().fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
+        let sum: T = combo
+            .iter()
+            .fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
         let mean = sum / T::from(depth).unwrap();
         let m2: T = combo.iter().fold(T::zero(), |acc, &v| {
             let diff = T::from(v).unwrap() - mean;
@@ -1173,8 +1728,9 @@ where
     let depth = 2;
     let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
-    // Process combinations in parallel with optional early termination
-    let results: Vec<Vec<U>> = if let Some(limit) = stop_after {
+    // Process combinations in parallel with optional early termination.
+    // Every branch returns count vectors, one per valid sample.
+    let results: Vec<Vec<u32>> = if let Some(limit) = stop_after {
         // Fast path for small limits: use sequential processing to avoid parallel overhead
         if limit <= 100 {
             let mut found = Vec::with_capacity(limit);
@@ -1185,7 +1741,7 @@ where
 
                 let remaining = limit - found.len();
                 let branch_results = closure_branch(
-                    combo,
+                    &combo,
                     running_sum,
                     running_m2,
                     n_usize,
@@ -1228,7 +1784,7 @@ where
                     };
 
                     let branch_results = closure_branch(
-                        combo.clone(),
+                        combo,
                         *running_sum,
                         *running_m2,
                         n_usize,
@@ -1258,7 +1814,7 @@ where
             .par_iter()
             .flat_map(|(combo, running_sum, running_m2)| {
                 closure_branch(
-                    combo.clone(),
+                    combo,
                     *running_sum,
                     *running_m2,
                     n_usize,
@@ -1278,310 +1834,532 @@ where
     };
 
     // Calculate all statistics
-    let closure_results = samples_to_result_list(
+    let counts = SampleCounts::from_rows(
+        <Closure as SampleFormat<U>>::value_grid(scale_min, scale_max, items),
+        n_usize,
         results,
-        scale_min,
-        scale_max
     );
+    // `stop_after` truncates the enumeration, so the result set is then only
+    // part of the solution space and an unseen shape is not an impossible one.
+    let closure_results: ResultListFromMeanSdN<U> =
+        counts_to_result_list(counts, stop_after.is_none());
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
-        // Ensure base_path ends with / for consistent file naming
-        let base_path = if config.file_path.ends_with('/') {
-            config.file_path.clone()
-        } else {
-            format!("{}/", config.file_path)
-        };
-
-        // Write results table
-        let results_path = format!("{}results.parquet", base_path);
-        if let Ok(mut writer) = create_results_writer(&results_path) {
-            let batch_size = config.batch_size;
-            let total_samples = closure_results.results.sample.len();
-
-            for start in (0..total_samples).step_by(batch_size) {
-                let end = (start + batch_size).min(total_samples);
-
-                if let Ok(record_batch) =
-                    results_to_record_batch(&closure_results.results, start, end)
-                {
-                    let _ = writer.write(&record_batch);
-                }
-            }
-            let _ = writer.close();
-        }
-
-        // Write statistics tables
-        if let Ok((
-            mut mm_writer,
-            mut mh_writer,
-            mut freq_writer,
-            mm_schema,
-            mh_schema,
-            freq_schema,
-        )) = create_stats_writers(&base_path)
-        {
-            // Write metrics_main
-            let mm_batch = RecordBatch::try_new(
-                mm_schema,
-                vec![
-                    Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_main.samples_all,
-                    ])),
-                    Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_main.values_all,
-                    ])),
-                ],
-            );
-            if let Ok(batch) = mm_batch {
-                let _ = mm_writer.write(&batch);
-            }
-            let _ = mm_writer.close();
-
-            // Write metrics_horns
-            let mh_batch = RecordBatch::try_new(
-                mh_schema,
-                vec![
-                    Arc::new(Float64Array::from(vec![closure_results.metrics_horns.mean])),
-                    Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_horns.uniform,
-                    ])),
-                    Arc::new(Float64Array::from(vec![closure_results.metrics_horns.sd])),
-                    Arc::new(Float64Array::from(vec![closure_results.metrics_horns.cv])),
-                    Arc::new(Float64Array::from(vec![closure_results.metrics_horns.mad])),
-                    Arc::new(Float64Array::from(vec![closure_results.metrics_horns.min])),
-                    Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_horns.median,
-                    ])),
-                    Arc::new(Float64Array::from(vec![closure_results.metrics_horns.max])),
-                    Arc::new(Float64Array::from(vec![
-                        closure_results.metrics_horns.range,
-                    ])),
-                ],
-            );
-            if let Ok(batch) = mh_batch {
-                let _ = mh_writer.write(&batch);
-            }
-            let _ = mh_writer.close();
-
-            // Write frequency table
-            let freq_batch = RecordBatch::try_new(
-                freq_schema,
-                vec![
-                    Arc::new(StringArray::from(closure_results.frequency.samples_group().to_vec())),
-                    Arc::new(Int32Array::from(closure_results.frequency.value().to_vec())),
-                    Arc::new(Float64Array::from(
-                        closure_results.frequency.f_average().to_vec(),
-                    )),
-                    Arc::new(Float64Array::from(
-                        closure_results.frequency.f_absolute().to_vec(),
-                    )),
-                    Arc::new(Float64Array::from(
-                        closure_results.frequency.f_relative().to_vec(),
-                    )),
-                ],
-            );
-            if let Ok(batch) = freq_batch {
-                let _ = freq_writer.write(&batch);
-            }
-            let _ = freq_writer.close();
-        }
+        <Closure as SampleFormat<U>>::write_result_list(
+            &normalize_base_path(&config.file_path),
+            &closure_results,
+            &config,
+        );
     }
 
     Ok(closure_results)
 }
 
-/// Structure to hold streaming frequency state
+/// Append a trailing separator so `{base_path}name.parquet` lands inside the
+/// directory the caller named.
+fn normalize_base_path(file_path: &str) -> String {
+    if file_path.ends_with('/') {
+        file_path.to_string()
+    } else {
+        format!("{}/", file_path)
+    }
+}
+
+/// Write the four statistics tables that accompany every result set.
+///
+/// Shared by both techniques and both modes, so a `metrics_horns.parquet` means
+/// the same thing wherever it came from.
+pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFromMeanSdN<U>) {
+    let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
+        create_stats_writers(base_path)
+    else {
+        return;
+    };
+
+    // Write metrics_main
+    let mm_batch = RecordBatch::try_new(
+        mm_schema,
+        vec![
+            Arc::new(Float64Array::from(vec![results.metrics_main.samples_all])),
+            Arc::new(Float64Array::from(vec![results.metrics_main.values_all])),
+        ],
+    );
+    if let Ok(batch) = mm_batch {
+        let _ = mm_writer.write(&batch);
+    }
+    let _ = mm_writer.close();
+
+    // Write metrics_horns
+    let mh_batch = RecordBatch::try_new(
+        mh_schema,
+        vec![
+            Arc::new(Float64Array::from(vec![results.metrics_horns.mean])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.uniform])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.sd])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.cv])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.mad])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.min])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.median])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.max])),
+            Arc::new(Float64Array::from(vec![results.metrics_horns.range])),
+        ],
+    );
+    if let Ok(batch) = mh_batch {
+        let _ = mh_writer.write(&batch);
+    }
+    let _ = mh_writer.close();
+
+    // Write frequency table
+    let freq_batch = RecordBatch::try_new(
+        freq_schema,
+        vec![
+            Arc::new(StringArray::from(
+                results.frequency.samples_group().to_vec(),
+            )),
+            Arc::new(Float64Array::from(results.frequency.value().to_vec())),
+            Arc::new(Float64Array::from(results.frequency.f_expected().to_vec())),
+            Arc::new(Float64Array::from(
+                results.frequency.f_representative().to_vec(),
+            )),
+            Arc::new(Float64Array::from(results.frequency.f_relative().to_vec())),
+        ],
+    );
+    if let Ok(batch) = freq_batch {
+        let _ = freq_writer.write(&batch);
+    }
+    let _ = freq_writer.close();
+
+    let _ = write_frequency_dist_to_parquet(
+        &results.frequency_dist,
+        &format!("{}frequency_dist.parquet", base_path),
+    );
+    let _ = write_modality_to_parquet(base_path, results);
+}
+
+/// Running frequency statistics for the streaming paths.
+///
+/// Everything here is indexed by grid position, so a sample's count vector —
+/// the same one being written to disk — is the only per-sample structure a
+/// streaming path needs to build.
 pub(crate) struct StreamingFrequencyState {
     current_min_horns: f64,
     current_max_horns: f64,
-    all_freq: HashMap<i32, i64>,
-    min_freq: HashMap<i32, i64>,
-    max_freq: HashMap<i32, i64>,
+    /// Summed counts per grid position across all samples.
+    all_freq: Vec<i64>,
+    /// Summed counts per grid position across the minimum-horns samples.
+    min_freq: Vec<i64>,
+    /// Summed counts per grid position across the maximum-horns samples.
+    max_freq: Vec<i64>,
     min_count: usize,
     max_count: usize,
+    /// Flat 2D array for frequency_dist: indexed by [v_idx * (n+1) + count]
+    freq_dist: Vec<u32>,
+    /// Per-sample shape classification. Streaming sees every sample exactly
+    /// once, which is all the shape analysis needs, so it reports the same
+    /// classes and the same conditional bounds as memory mode.
+    shapes: ShapeAccumulator,
+    k: usize,
+    n: usize,
 }
 
-/// Helper function to write statistics files for streaming mode
+impl StreamingFrequencyState {
+    /// Start tracking a run over `k` grid values with samples of size `n`.
+    pub(crate) fn new(k: usize, n: usize) -> Self {
+        Self {
+            current_min_horns: f64::INFINITY,
+            current_max_horns: f64::NEG_INFINITY,
+            all_freq: vec![0; k],
+            min_freq: vec![0; k],
+            max_freq: vec![0; k],
+            min_count: 0,
+            max_count: 0,
+            freq_dist: vec![0u32; k * (n + 1)],
+            shapes: ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE),
+            k,
+            n,
+        }
+    }
+
+    /// Fold one sample's counts into the running statistics.
+    pub(crate) fn update(&mut self, counts: &[u32], horns: f64) {
+        self.shapes.update(counts);
+        let stride = self.n + 1;
+        for (v_idx, &cnt) in counts.iter().enumerate() {
+            self.all_freq[v_idx] += cnt as i64;
+            self.freq_dist[v_idx * stride + cnt as usize] += 1;
+        }
+
+        // Horns extremes. Ties accumulate into the group; a new extreme
+        // replaces it.
+        if (horns - self.current_min_horns).abs() < 1e-10 {
+            for (acc, &cnt) in self.min_freq.iter_mut().zip(counts.iter()) {
+                *acc += cnt as i64;
+            }
+            self.min_count += 1;
+        } else if horns < self.current_min_horns {
+            self.current_min_horns = horns;
+            self.min_freq.clear();
+            self.min_freq.extend(counts.iter().map(|&c| c as i64));
+            self.min_count = 1;
+        }
+
+        if (horns - self.current_max_horns).abs() < 1e-10 {
+            for (acc, &cnt) in self.max_freq.iter_mut().zip(counts.iter()) {
+                *acc += cnt as i64;
+            }
+            self.max_count += 1;
+        } else if horns > self.current_max_horns {
+            self.current_max_horns = horns;
+            self.max_freq.clear();
+            self.max_freq.extend(counts.iter().map(|&c| c as i64));
+            self.max_count = 1;
+        }
+    }
+}
+
+/// Write a FrequencyDist to a flat Parquet file at `path`.
+fn write_frequency_dist_to_parquet(
+    dist: &FrequencyDist,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("value", DataType::Float64, false),
+        Field::new("count", DataType::Int32, false),
+        Field::new("n_samples", DataType::UInt32, false),
+    ]));
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None)?;
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(dist.value.clone())),
+            Arc::new(Int32Array::from(dist.count.clone())),
+            Arc::new(UInt32Array::from(dist.n_samples.clone())),
+        ],
+    )?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+/// Write one Parquet file from a schema and its columns.
+fn write_table(
+    path: &str,
+    schema: Arc<Schema>,
+    columns: Vec<arrow::array::ArrayRef>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None)?;
+    writer.write(&RecordBatch::try_new(schema, columns)?)?;
+    writer.close()?;
+    Ok(())
+}
+
+/// Write the four modality tables.
+///
+/// These used to be computed and then dropped on the floor: no writer existed
+/// for them, so the whole shape analysis was reachable only from Rust. The
+/// tables are:
+///
+/// - `modality_counts`: per-value count range across the whole result set.
+/// - `modality_pairs`: whether the ordering of each adjacent value pair is the
+///   same in every sample.
+/// - `modality_shapes`: **per-shape-class** count range — the conditional
+///   bounds. One row per (class, value); `n_samples` is constant within a
+///   class.
+/// - `modality_summary`: one row. How many samples of each class, whether the
+///   search was exhaustive, and the unimodality-deficit spread.
+///
+/// `modality_shapes` is the table that supports a claim of the form "if the
+/// data had this shape, then the count of this value was in this range", which
+/// is the only shape claim a single atypical sample cannot defeat.
+fn write_modality_to_parquet<U>(
+    base_path: &str,
+    results: &ResultListFromMeanSdN<U>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let counts = &results.modality_counts;
+    write_table(
+        &format!("{}modality_counts.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, false),
+            Field::new("count_lo", DataType::Int32, false),
+            Field::new("count_hi", DataType::Int32, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(counts.value.clone())),
+            Arc::new(Int32Array::from(counts.count_lo.clone())),
+            Arc::new(Int32Array::from(counts.count_hi.clone())),
+        ],
+    )?;
+
+    let pairs = &results.modality_pairs;
+    write_table(
+        &format!("{}modality_pairs.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("value_a", DataType::Float64, false),
+            Field::new("value_b", DataType::Float64, false),
+            Field::new("resolved", DataType::Boolean, false),
+            Field::new("a_greater", DataType::Boolean, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(pairs.value_a.clone())),
+            Arc::new(Float64Array::from(pairs.value_b.clone())),
+            Arc::new(BooleanArray::from(pairs.resolved.clone())),
+            Arc::new(BooleanArray::from(pairs.a_greater.clone())),
+        ],
+    )?;
+
+    // Long format: one row per (class, value). Classes with no members
+    // contribute no rows, which is how "impossible under this shape" reads.
+    let shapes = &results.modality_shapes;
+    let grid_values = &results.modality_counts.value;
+    let mut s_class = Vec::new();
+    let mut s_n = Vec::new();
+    let mut s_value = Vec::new();
+    let mut s_lo = Vec::new();
+    let mut s_hi = Vec::new();
+    for bounds in &shapes.bounds {
+        for (i, &lo) in bounds.count_lo.iter().enumerate() {
+            s_class.push(bounds.class.as_str());
+            s_n.push(bounds.n_samples);
+            s_value.push(grid_values.get(i).copied().unwrap_or(f64::NAN));
+            s_lo.push(lo);
+            s_hi.push(bounds.count_hi[i]);
+        }
+    }
+    write_table(
+        &format!("{}modality_shapes.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("class", DataType::Utf8, false),
+            Field::new("n_samples", DataType::UInt64, false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("count_lo", DataType::Int32, false),
+            Field::new("count_hi", DataType::Int32, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(s_class)),
+            Arc::new(UInt64Array::from(s_n)),
+            Arc::new(Float64Array::from(s_value)),
+            Arc::new(Int32Array::from(s_lo)),
+            Arc::new(Int32Array::from(s_hi)),
+        ],
+    )?;
+
+    // One row: per-class totals plus the scan's own provenance. `exhaustive` is
+    // what tells a reader whether a zero count is a proof or just an absence.
+    let mut fields = vec![
+        Field::new("exhaustive", DataType::Boolean, false),
+        Field::new("n_scanned", DataType::UInt64, false),
+        Field::new("min_prominence", DataType::Float64, false),
+        Field::new("deficit_min", DataType::UInt32, false),
+        Field::new("deficit_mean", DataType::Float64, false),
+        Field::new("deficit_max", DataType::UInt32, false),
+    ];
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(BooleanArray::from(vec![shapes.exhaustive])),
+        Arc::new(UInt64Array::from(vec![shapes.n_scanned])),
+        Arc::new(Float64Array::from(vec![shapes.min_prominence])),
+        Arc::new(UInt32Array::from(vec![shapes.deficit_min])),
+        Arc::new(Float64Array::from(vec![shapes.deficit_mean])),
+        Arc::new(UInt32Array::from(vec![shapes.deficit_max])),
+    ];
+    for class in ShapeClass::all() {
+        fields.push(Field::new(
+            format!("n_{}", class.as_str()),
+            DataType::UInt64,
+            false,
+        ));
+        columns.push(Arc::new(UInt64Array::from(vec![shapes.n_of(class)])));
+    }
+    write_table(
+        &format!("{}modality_summary.parquet", base_path),
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?;
+
+    // The prominence envelope: per-class counts at every threshold in the band,
+    // one row per (threshold, class). A zero count in `modality_summary` is a
+    // proof of impossibility only as far as this table keeps it at zero, so the
+    // two are meant to be read together.
+    let mut p_prom = Vec::new();
+    let mut p_counts = Vec::new();
+    let mut p_primary = Vec::new();
+    let mut p_class = Vec::new();
+    let mut p_n = Vec::new();
+    for rung in &shapes.ladder {
+        for class in ShapeClass::all() {
+            p_prom.push(rung.min_prominence);
+            p_counts.push(rung.min_prominence_counts);
+            p_primary.push(rung.primary);
+            p_class.push(class.as_str());
+            p_n.push(rung.n_of(class));
+        }
+    }
+    write_table(
+        &format!("{}modality_prominence.parquet", base_path),
+        Arc::new(Schema::new(vec![
+            Field::new("min_prominence", DataType::Float64, false),
+            Field::new("min_prominence_counts", DataType::UInt32, false),
+            Field::new("primary", DataType::Boolean, false),
+            Field::new("class", DataType::Utf8, false),
+            Field::new("n_samples", DataType::UInt64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(p_prom)),
+            Arc::new(UInt32Array::from(p_counts)),
+            Arc::new(BooleanArray::from(p_primary)),
+            Arc::new(StringArray::from(p_class)),
+            Arc::new(UInt64Array::from(p_n)),
+        ],
+    )?;
+
+    Ok(())
+}
+
+/// Write the statistics files for a streaming run.
+///
+/// Rebuilds the same tables memory mode produces from the running state, then
+/// hands them to the shared writer, so both modes emit identical files.
 pub(crate) fn write_streaming_statistics(
     base_path: &str,
     all_horns: &[f64],
     n_usize: usize,
-    scale_min_i32: i32,
-    scale_max_i32: i32,
+    grid: &ValueGrid,
     final_freq_state: Arc<Mutex<StreamingFrequencyState>>,
+    exhaustive: bool,
 ) {
-    if let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
-        create_stats_writers(base_path)
-    {
-        // Calculate final statistics
-        let samples_all = all_horns.len();
-        if samples_all == 0 {
-            let _ = mm_writer.close();
-            let _ = mh_writer.close();
-            let _ = freq_writer.close();
-            return;
-        }
-
-        let values_all = samples_all * n_usize;
-
-        // Calculate horns statistics
-        let horns_mean = all_horns.iter().sum::<f64>() / samples_all as f64;
-        let horns_sd = {
-            let variance = all_horns
-                .iter()
-                .map(|&h| (h - horns_mean).powi(2))
-                .sum::<f64>()
-                / samples_all as f64;
-            variance.sqrt()
-        };
-
-        let mut horns_sorted = all_horns.to_vec();
-        horns_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let horns_min = horns_sorted[0];
-        let horns_max = horns_sorted[samples_all - 1];
-        let horns_median = median(&horns_sorted);
-        let horns_mad = mad(all_horns, horns_median);
-
-        // Write metrics_main
-        let mm_batch = RecordBatch::try_new(
-            mm_schema,
-            vec![
-                Arc::new(Float64Array::from(vec![samples_all as f64])),
-                Arc::new(Float64Array::from(vec![values_all as f64])),
-            ],
-        );
-        if let Ok(batch) = mm_batch {
-            let _ = mm_writer.write(&batch);
-        }
-        let _ = mm_writer.close();
-
-        // Write metrics_horns
-        let mh_batch = RecordBatch::try_new(
-            mh_schema,
-            vec![
-                Arc::new(Float64Array::from(vec![horns_mean])),
-                Arc::new(Float64Array::from(vec![calculate_horns_uniform(
-                    scale_min_i32,
-                    scale_max_i32,
-                )])),
-                Arc::new(Float64Array::from(vec![horns_sd])),
-                Arc::new(Float64Array::from(vec![horns_sd / horns_mean])),
-                Arc::new(Float64Array::from(vec![horns_mad])),
-                Arc::new(Float64Array::from(vec![horns_min])),
-                Arc::new(Float64Array::from(vec![horns_median])),
-                Arc::new(Float64Array::from(vec![horns_max])),
-                Arc::new(Float64Array::from(vec![horns_max - horns_min])),
-            ],
-        );
-        if let Ok(batch) = mh_batch {
-            let _ = mh_writer.write(&batch);
-        }
-        let _ = mh_writer.close();
-
-        // Extract frequency data from final state and construct FrequencyTable
-        let state = final_freq_state.lock().unwrap();
-        let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
-
-        // Build frequency vectors for "all" category
-        let mut all_value = Vec::with_capacity(nrow_frequency);
-        let mut all_f_absolute = Vec::with_capacity(nrow_frequency);
-        let mut all_f_average = Vec::with_capacity(nrow_frequency);
-        let mut all_f_relative = Vec::with_capacity(nrow_frequency);
-
-        let total_values = values_all as f64;
-        let n_samples = samples_all as f64;
-
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = *state.all_freq.get(&scale_value).unwrap_or(&0) as f64;
-            all_value.push(scale_value);
-            all_f_absolute.push(count);
-            all_f_average.push(count / n_samples);
-            all_f_relative.push(count / total_values);
-        }
-
-        // Build frequency vectors for "horns_min" category
-        let mut min_value = Vec::with_capacity(nrow_frequency);
-        let mut min_f_absolute = Vec::with_capacity(nrow_frequency);
-        let mut min_f_average = Vec::with_capacity(nrow_frequency);
-        let mut min_f_relative = Vec::with_capacity(nrow_frequency);
-
-        let min_n_samples = state.min_count as f64;
-        let min_total_values = (state.min_count * n_usize) as f64;
-
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = *state.min_freq.get(&scale_value).unwrap_or(&0) as f64;
-            min_value.push(scale_value);
-            min_f_absolute.push(count);
-            min_f_average.push(count / min_n_samples);
-            min_f_relative.push(count / min_total_values);
-        }
-
-        // Build frequency vectors for "horns_max" category
-        let mut max_value = Vec::with_capacity(nrow_frequency);
-        let mut max_f_absolute = Vec::with_capacity(nrow_frequency);
-        let mut max_f_average = Vec::with_capacity(nrow_frequency);
-        let mut max_f_relative = Vec::with_capacity(nrow_frequency);
-
-        let max_n_samples = state.max_count as f64;
-        let max_total_values = (state.max_count * n_usize) as f64;
-
-        for scale_value in scale_min_i32..=scale_max_i32 {
-            let count = *state.max_freq.get(&scale_value).unwrap_or(&0) as f64;
-            max_value.push(scale_value);
-            max_f_absolute.push(count);
-            max_f_average.push(count / max_n_samples);
-            max_f_relative.push(count / max_total_values);
-        }
-
-        // Combine all frequency data into proper FrequencyTable structure
-        let mut combined_value = all_value;
-        combined_value.extend(min_value);
-        combined_value.extend(max_value);
-
-        let mut combined_f_average = all_f_average;
-        combined_f_average.extend(min_f_average);
-        combined_f_average.extend(max_f_average);
-
-        let mut combined_f_absolute = all_f_absolute;
-        combined_f_absolute.extend(min_f_absolute);
-        combined_f_absolute.extend(max_f_absolute);
-
-        let mut combined_f_relative = all_f_relative;
-        combined_f_relative.extend(min_f_relative);
-        combined_f_relative.extend(max_f_relative);
-
-        // Create proper FrequencyTable with type-safe samples column
-        let frequency_table = FrequencyTable::new(
-            FrequencySamplesColumn::new(nrow_frequency),
-            combined_value,
-            combined_f_average,
-            combined_f_absolute,
-            combined_f_relative,
-        );
-
-        // Write frequency table as a single batch
-        let freq_batch = RecordBatch::try_new(
-            freq_schema,
-            vec![
-                Arc::new(StringArray::from(frequency_table.samples_group().to_vec())),
-                Arc::new(Int32Array::from(frequency_table.value().to_vec())),
-                Arc::new(Float64Array::from(frequency_table.f_average().to_vec())),
-                Arc::new(Float64Array::from(frequency_table.f_absolute().to_vec())),
-                Arc::new(Float64Array::from(frequency_table.f_relative().to_vec())),
-            ],
-        );
-        if let Ok(batch) = freq_batch {
-            let _ = freq_writer.write(&batch);
-        }
-        let _ = freq_writer.close();
+    let samples_all = all_horns.len();
+    if samples_all == 0 {
+        // Still create the files so a reader finds a complete, empty result set.
+        let results: ResultListFromMeanSdN<i32> = empty_result_list(grid.clone(), n_usize);
+        write_statistics_files(base_path, &results);
+        return;
     }
+
+    let values_all = samples_all * n_usize;
+
+    // Calculate horns statistics
+    let horns_mean = all_horns.iter().sum::<f64>() / samples_all as f64;
+    let horns_sd = {
+        let variance = all_horns
+            .iter()
+            .map(|&h| (h - horns_mean).powi(2))
+            .sum::<f64>()
+            / samples_all as f64;
+        variance.sqrt()
+    };
+
+    let mut horns_sorted = all_horns.to_vec();
+    horns_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let horns_min = horns_sorted[0];
+    let horns_max = horns_sorted[samples_all - 1];
+    let horns_median = median(&horns_sorted);
+    let horns_mad = mad(all_horns, horns_median);
+
+    let mut state = final_freq_state.lock().unwrap();
+    let k = grid.len();
+
+    // One block of frequency rows per sample category. A single pass can build
+    // `f_expected` exactly, but picking a medoid needs the whole group at once,
+    // so `f_representative` is NaN here. Both columns therefore mean exactly
+    // what they mean in memory mode; the one streaming cannot supply is
+    // visibly absent rather than quietly redefined.
+    let mut value = Vec::with_capacity(k * SampleCategory::COUNT);
+    let mut f_expected = Vec::with_capacity(k * SampleCategory::COUNT);
+    let mut f_relative = Vec::with_capacity(k * SampleCategory::COUNT);
+    let f_representative = vec![f64::NAN; k * SampleCategory::COUNT];
+
+    let groups: [(&[i64], usize); SampleCategory::COUNT] = [
+        (&state.all_freq, samples_all),
+        (&state.min_freq, state.min_count),
+        (&state.max_freq, state.max_count),
+    ];
+
+    for (freqs, group_size) in groups {
+        let group_samples = group_size as f64;
+        let group_values = (group_size * n_usize) as f64;
+        for v_idx in 0..k {
+            let count = freqs.get(v_idx).copied().unwrap_or(0) as f64;
+            value.push(grid.values()[v_idx]);
+            f_expected.push(count / group_samples);
+            f_relative.push(count / group_values);
+        }
+    }
+
+    // Build frequency_dist from the flat 2D array
+    let mut dist_value = Vec::new();
+    let mut dist_count = Vec::new();
+    let mut dist_n_samples = Vec::new();
+    let stride = state.n + 1;
+    for v_idx in 0..state.k {
+        for cnt in 0..=state.n {
+            let n_samp = state.freq_dist[v_idx * stride + cnt];
+            if n_samp > 0 {
+                dist_value.push(grid.values()[v_idx]);
+                dist_count.push(cnt as i32);
+                dist_n_samples.push(n_samp);
+            }
+        }
+    }
+    // Take the accumulator out so it can be finished; the state is discarded
+    // immediately afterwards.
+    let shapes = std::mem::replace(
+        &mut state.shapes,
+        ShapeAccumulator::new(0, 0, DEFAULT_MODE_PROMINENCE),
+    );
+    drop(state);
+    let modality_shapes = shapes.finish(exhaustive);
+
+    let frequency_dist = FrequencyDist {
+        value: dist_value,
+        count: dist_count,
+        n_samples: dist_n_samples,
+    };
+    let (modality_counts, modality_pairs) = compute_modality(&frequency_dist, grid);
+
+    let results: ResultListFromMeanSdN<i32> = ResultListFromMeanSdN {
+        metrics_main: MetricsMain {
+            samples_all: samples_all as f64,
+            values_all: values_all as f64,
+        },
+        metrics_horns: MetricsHorns {
+            mean: horns_mean,
+            uniform: horns_uniform(k),
+            sd: horns_sd,
+            cv: horns_sd / horns_mean,
+            mad: horns_mad,
+            min: horns_min,
+            median: horns_median,
+            max: horns_max,
+            range: horns_max - horns_min,
+        },
+        frequency: FrequencyTable::new(
+            FrequencySamplesColumn::new(k),
+            value,
+            f_expected,
+            f_representative,
+            f_relative,
+        ),
+        frequency_dist,
+        modality_counts,
+        modality_pairs,
+        modality_shapes,
+        results: ResultsTable::new(
+            Vec::new(),
+            SampleCounts::new(grid.clone(), n_usize),
+            Vec::new(),
+        ),
+    };
+
+    write_statistics_files(base_path, &results);
 }
 
 /// Generate all valid combinations (streaming mode) with summary statistics
 ///
-/// This function computes all valid combinations and streams them directly to Parquet files
-/// without keeping them in memory. Statistics are computed incrementally.
+/// This function computes all valid combinations and streams them directly to
+/// Parquet files without keeping them in memory. Statistics are computed
+/// incrementally.
 ///
 /// Use this when:
 /// - Result sets are very large (> 1GB)
@@ -1592,7 +2370,8 @@ pub(crate) fn write_streaming_statistics(
 ///
 /// # Parameters
 /// - `items`: Number of items averaged (must be 1 for CLOSURE)
-/// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+/// - `stop_after`: Optional limit on number of samples to find. If None, finds
+///   all samples.
 #[allow(clippy::too_many_arguments)]
 pub fn closure_parallel_streaming<T, U>(
     mean: T,
@@ -1636,7 +2415,7 @@ where
     );
 
     // Setup channels for streaming results
-    let (tx_results, rx_results) = channel::<Vec<(Vec<U>, f64)>>();
+    let (tx_results, rx_results) = channel::<Vec<(Vec<u32>, f64)>>();
     let (tx_stats, rx_stats) = channel::<(Vec<f64>, HashMap<i32, i64>)>();
 
     // Add a flag to track writer thread status
@@ -1657,16 +2436,12 @@ where
         depth,
     ) as usize;
 
+    // The value grid every result in this run is indexed on.
+    let grid = <Closure as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
+    let grid_len = grid.len();
+
     // Shared state for tracking min/max horns frequencies
-    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState {
-        current_min_horns: f64::INFINITY,
-        current_max_horns: f64::NEG_INFINITY,
-        all_freq: HashMap::new(),
-        min_freq: HashMap::new(),
-        max_freq: HashMap::new(),
-        min_count: 0,
-        max_count: 0,
-    }));
+    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState::new(grid_len, n_usize)));
     let freq_state_for_thread = freq_state.clone();
 
     // Handle file paths more carefully
@@ -1688,140 +2463,18 @@ where
         }
     }
 
-    // Spawn dedicated writer thread for two separate files
-    let samples_path = format!("{}sample.parquet", base_path);
-    let horns_path = format!("{}horns.parquet", base_path);
-
-    let n_usize_for_writer = n_usize; // Capture n_usize for the writer thread
-
-    let writer_handle = thread::spawn(move || {
-        // Create two separate writers
-        let mut samples_writer = match create_samples_writer(&samples_path, n_usize_for_writer) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!(
-                    "ERROR: Failed to create samples writer for file '{}': {}",
-                    samples_path, e
-                );
-                writer_failed_for_thread.store(1, Ordering::Relaxed);
-                return 0;
-            }
-        };
-
-        let mut horns_writer = match create_horns_writer(&horns_path) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!(
-                    "ERROR: Failed to create horns writer for file '{}': {}",
-                    horns_path, e
-                );
-                writer_failed_for_thread.store(1, Ordering::Relaxed);
-                return 0;
-            }
-        };
-
-        // Buffers for batching
-        let mut samples_buffer: Vec<Vec<U>> = Vec::with_capacity(config.batch_size * 2);
-        let mut horns_buffer: Vec<f64> = Vec::with_capacity(config.batch_size * 2);
-
-        let mut total_written = 0;
-        let mut last_progress_report = 0;
-
-        // Process incoming results
-        loop {
-            match rx_results.recv() {
-                Ok(batch) => {
-                    // Add to buffers, maintaining order
-                    for (sample, horns) in batch {
-                        samples_buffer.push(sample);
-                        horns_buffer.push(horns);
-                    }
-
-                    // Write when buffers reach threshold
-                    if samples_buffer.len() >= config.batch_size {
-                        // Write samples batch
-                        match samples_to_record_batch(&samples_buffer) {
-                            Ok(record_batch) => {
-                                if let Err(e) = samples_writer.write(&record_batch) {
-                                    eprintln!("ERROR: Failed to write samples batch: {}", e);
-                                    return total_written;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("ERROR: Failed to create samples batch: {}", e);
-                                return total_written;
-                            }
-                        }
-
-                        // Write horns batch
-                        match horns_to_record_batch(&horns_buffer) {
-                            Ok(record_batch) => {
-                                if let Err(e) = horns_writer.write(&record_batch) {
-                                    eprintln!("ERROR: Failed to write horns batch: {}", e);
-                                    return total_written;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("ERROR: Failed to create horns batch: {}", e);
-                                return total_written;
-                            }
-                        }
-
-                        total_written += samples_buffer.len();
-
-                        // Progress reporting
-                        if config.show_progress && total_written - last_progress_report >= 100_000 {
-                            eprintln!("Progress: {} combinations written...", total_written);
-                            last_progress_report = total_written;
-                        }
-
-                        samples_buffer.clear();
-                        horns_buffer.clear();
-                    }
-                }
-                Err(_) => {
-                    // Channel closed, write remaining data
-                    break;
-                }
-            }
-        }
-
-        // Write any remaining results
-        if !samples_buffer.is_empty() {
-            // Write final samples batch
-            if let Ok(record_batch) = samples_to_record_batch(&samples_buffer) {
-                if let Err(e) = samples_writer.write(&record_batch) {
-                    eprintln!("ERROR: Failed to write final samples batch: {}", e);
-                } else {
-                    // Write final horns batch
-                    if let Ok(record_batch) = horns_to_record_batch(&horns_buffer) {
-                        if let Err(e) = horns_writer.write(&record_batch) {
-                            eprintln!("ERROR: Failed to write final horns batch: {}", e);
-                        } else {
-                            total_written += samples_buffer.len();
-                        }
-                    }
-                }
-            }
-        }
-
-        // Close both writers
-        if let Err(e) = samples_writer.close() {
-            eprintln!("ERROR: Failed to close samples file: {}", e);
-        }
-        if let Err(e) = horns_writer.close() {
-            eprintln!("ERROR: Failed to close horns file: {}", e);
-        }
-
-        if config.show_progress {
-            eprintln!(
-                "Streaming complete: {} total combinations written",
-                total_written
-            );
-        }
-
-        total_written
-    });
+    // Spawn the shared writer thread. It owns the output format; this path
+    // only feeds it (counts, horns) pairs.
+    let writer_handle = <Closure as SampleFormat<U>>::spawn_streaming_writer(
+        base_path.clone(),
+        grid.clone(),
+        n_usize,
+        config.batch_size,
+        config.format,
+        config.show_progress.then_some((100_000, "combinations")),
+        rx_results,
+        writer_failed_for_thread,
+    );
 
     // Spawn statistics collector thread
     let freq_state_for_stats = freq_state.clone();
@@ -1839,14 +2492,11 @@ where
     let depth = 2;
     let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
 
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
-
     // Fast path for small stop_after limits: use sequential processing
     if let Some(limit) = stop_after {
         if limit <= 100 {
             // Sequential processing for small limits
-            let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+            let mut freqs: Vec<f64> = Vec::with_capacity(grid_len);
             let mut found_count = 0;
 
             for (combo, running_sum, running_m2) in combinations {
@@ -1856,7 +2506,7 @@ where
 
                 let remaining = limit - found_count;
                 let branch_results = closure_branch(
-                    combo,
+                    &combo,
                     running_sum,
                     running_m2,
                     n_usize,
@@ -1872,61 +2522,21 @@ where
                     Some(remaining), // Pass remaining count for early exit
                 );
 
-                for sample in branch_results.into_iter() {
+                for counts in branch_results.into_iter() {
                     if found_count >= limit {
                         break;
                     }
 
-                    let mut freqs = vec![0.0; nrow_frequency];
-                    let mut sample_freq: HashMap<i32, i64> = HashMap::new();
+                    // The counts vector already is the frequency vector, so
+                    // there is nothing to tabulate here.
+                    freqs.clear();
+                    freqs.extend(counts.iter().map(|&c| c as f64));
+                    let horns = horns_from_counts(&freqs);
 
-                    for &value in &sample {
-                        let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
-                        freqs[idx] += 1.0;
-                        *sample_freq.entry(U::to_i32(&value).unwrap()).or_insert(0) += 1;
-                    }
-
-                    let horns = calculate_horns(&freqs, scale_min_i32, scale_max_i32);
-
-                    // Update frequency state
-                    {
-                        let mut state = freq_state_for_thread.lock().unwrap();
-
-                        for (&val, &count) in &sample_freq {
-                            *state.all_freq.entry(val).or_insert(0) += count;
-                        }
-
-                        if (horns - state.current_min_horns).abs() < 1e-10 {
-                            for (&val, &count) in &sample_freq {
-                                *state.min_freq.entry(val).or_insert(0) += count;
-                            }
-                            state.min_count += 1;
-                        } else if horns < state.current_min_horns {
-                            state.current_min_horns = horns;
-                            state.min_freq.clear();
-                            for (&val, &count) in &sample_freq {
-                                state.min_freq.insert(val, count);
-                            }
-                            state.min_count = 1;
-                        }
-
-                        if (horns - state.current_max_horns).abs() < 1e-10 {
-                            for (&val, &count) in &sample_freq {
-                                *state.max_freq.entry(val).or_insert(0) += count;
-                            }
-                            state.max_count += 1;
-                        } else if horns > state.current_max_horns {
-                            state.current_max_horns = horns;
-                            state.max_freq.clear();
-                            for (&val, &count) in &sample_freq {
-                                state.max_freq.insert(val, count);
-                            }
-                            state.max_count = 1;
-                        }
-                    }
+                    freq_state_for_thread.lock().unwrap().update(&counts, horns);
 
                     // Send to writer and stats
-                    if tx_results.send(vec![(sample.clone(), horns)]).is_ok() {
+                    if tx_results.send(vec![(counts, horns)]).is_ok() {
                         let _ = tx_stats.send((vec![horns], HashMap::new()));
                     }
 
@@ -1948,9 +2558,10 @@ where
                 &base_path,
                 &all_horns,
                 n_usize,
-                scale_min_i32,
-                scale_max_i32,
+                &grid,
                 final_freq_state,
+                // A truncated search saw only part of the space.
+                stop_after.is_none(),
             );
 
             return Ok(StreamingResult {
@@ -1998,7 +2609,7 @@ where
             };
 
             let branch_results = closure_branch(
-                combo.clone(),
+                combo,
                 *running_sum,
                 *running_m2,
                 n_usize,
@@ -2022,67 +2633,19 @@ where
 
                 let mut results_with_horns = Vec::with_capacity(branch_results.len());
                 let mut horns_batch = Vec::with_capacity(branch_results.len());
-
-                let nrow_frequency = (scale_max_i32 - scale_min_i32 + 1) as usize;
+                let mut freqs: Vec<f64> = Vec::with_capacity(grid_len);
 
                 // Calculate horns for each sample and update frequency state
-                for sample in branch_results.into_iter() {
-                    let mut freqs = vec![0.0; nrow_frequency];
-                    let mut sample_freq: HashMap<i32, i64> = HashMap::new();
+                for counts in branch_results.into_iter() {
+                    // The counts vector already is the frequency vector.
+                    freqs.clear();
+                    freqs.extend(counts.iter().map(|&c| c as f64));
+                    let horns = horns_from_counts(&freqs);
 
-                    for &value in &sample {
-                        let idx = (U::to_i32(&value).unwrap() - scale_min_i32) as usize;
-                        freqs[idx] += 1.0;
-                        *sample_freq.entry(U::to_i32(&value).unwrap()).or_insert(0) += 1;
-                    }
-
-                    let horns = calculate_horns(&freqs, scale_min_i32, scale_max_i32);
-
-                    // Update frequency state with proper locking
-                    {
-                        let mut state = freq_state_for_thread.lock().unwrap();
-
-                        // Update all frequencies
-                        for (&val, &count) in &sample_freq {
-                            *state.all_freq.entry(val).or_insert(0) += count;
-                        }
-
-                        // Check if this is a new min or max
-                        if (horns - state.current_min_horns).abs() < 1e-10 {
-                            // Equal to current min
-                            for (&val, &count) in &sample_freq {
-                                *state.min_freq.entry(val).or_insert(0) += count;
-                            }
-                            state.min_count += 1;
-                        } else if horns < state.current_min_horns {
-                            // New minimum found
-                            state.current_min_horns = horns;
-                            state.min_freq.clear();
-                            for (&val, &count) in &sample_freq {
-                                state.min_freq.insert(val, count);
-                            }
-                            state.min_count = 1;
-                        }
-
-                        if (horns - state.current_max_horns).abs() < 1e-10 {
-                            // Equal to current max
-                            for (&val, &count) in &sample_freq {
-                                *state.max_freq.entry(val).or_insert(0) += count;
-                            }
-                            state.max_count += 1;
-                        } else if horns > state.current_max_horns {
-                            // New maximum found
-                            state.current_max_horns = horns;
-                            state.max_freq.clear();
-                            for (&val, &count) in &sample_freq {
-                                state.max_freq.insert(val, count);
-                            }
-                            state.max_count = 1;
-                        }
-                    }
+                    freq_state_for_thread.lock().unwrap().update(&counts, horns);
 
                     horns_batch.push(horns);
-                    results_with_horns.push((sample, horns));
+                    results_with_horns.push((counts, horns));
                 }
 
                 // Update counter and potentially truncate results if we exceed limit
@@ -2141,9 +2704,9 @@ where
         &base_path,
         &all_horns,
         n_usize,
-        scale_min_i32,
-        scale_max_i32,
+        &grid,
         final_freq_state,
+        stop_after.is_none(),
     );
 
     Ok(StreamingResult {
@@ -2160,30 +2723,35 @@ struct ClosureBranchCtx<T, U> {
     n: usize,
     target_sum_upper: T,
     target_sum_lower: T,
-    m2_upper_threshold: T,   // sd_upper² * (n-1)
-    m2_lower_threshold: T,   // sd_lower² * (n-1)
-    min_scale_sum_t: Vec<Vec<T>>,  // Borrowed from caller via clone-free ref would be ideal,
-    scale_max_sum_t: Vec<T>,       // but we just store refs below
+    m2_upper_threshold: T,        // sd_upper² * (n-1)
+    m2_lower_threshold: T,        // sd_lower² * (n-1)
+    min_scale_sum_t: Vec<Vec<T>>, // Borrowed from caller via clone-free ref would be ideal,
+    scale_max_sum_t: Vec<T>,      // but we just store refs below
     limit: usize,
     /// Float value for each scale index: value_as_t[i] = T::from(scale_min + i)
     value_as_t: Vec<T>,
-    /// Integer value for each scale index: value_as_u[i] = scale_min + i
-    value_as_u: Vec<U>,
     /// Reciprocal table: inv_len[k] = 1.0 / k for k=1..=n (inv_len[0] is unused)
     inv_len: Vec<T>,
+    /// Ties the context to the integer type the search was parameterised with.
+    _marker: PhantomData<U>,
 }
 
 // Collect all valid combinations from a starting point.
 //
-// Uses recursive backtracking with a single reusable Vec (push/pop) to avoid
-// heap-allocating a clone of the combination at every search tree node.
+// Combinations are carried as a count per scale value rather than as an
+// expanded list of values. The DFS only ever appends values in non-decreasing
+// order, so the two encode the same thing; counts just make that explicit and
+// shrink the clone at every emitted leaf from `n` values to `k`.
+//
+// Uses recursive backtracking with a single reusable counts array (increment on
+// entry, decrement on exit) to avoid heap-allocating at every search tree node.
 // SD checks use squared comparisons (M2 vs threshold) to avoid sqrt() per node.
 // All generic conversions (T::from, U::to_usize) are precomputed into lookup
 // tables so the hot loop uses only array indexing and floating-point arithmetic.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn closure_branch<T, U>(
-    start_combination: Vec<U>,
+    start_combination: &[U],
     running_sum_init: T,
     running_m2_init: T,
     n: usize, // Use usize for the length
@@ -2197,14 +2765,13 @@ fn closure_branch<T, U>(
     scale_max_plus_1: U,
     scale_min: U,              // Need this to calculate indices
     stop_after: Option<usize>, // Optional limit for early termination
-) -> Vec<Vec<U>>
+) -> Vec<Vec<u32>>
 where
     T: FloatType,
     U: IntegerType,
 {
     let mut results = Vec::new();
     let limit = stop_after.unwrap_or(usize::MAX);
-    let mut combo = start_combination;
 
     // Precompute squared SD thresholds to avoid sqrt() in the hot loop.
     let n_minus_1_float = T::from(n - 1).unwrap();
@@ -2217,13 +2784,11 @@ where
     };
     let m2_upper_threshold = sd_upper * sd_upper * n_minus_1_float;
 
-    // Precompute scale value lookup tables (eliminates T::from / U arithmetic per iteration)
+    // Precompute scale value lookup table (eliminates T::from / U arithmetic per iteration)
     let scale_range = min_scale_sum_t.len();
     let mut value_as_t = Vec::with_capacity(scale_range);
-    let mut value_as_u = Vec::with_capacity(scale_range);
     for v in range_u(scale_min, scale_max_plus_1) {
         value_as_t.push(T::from(v).unwrap());
-        value_as_u.push(v);
     }
 
     // Precompute reciprocal table: inv_len[k] = 1/k (eliminates division per node)
@@ -2233,8 +2798,13 @@ where
         inv_len.push(T::one() / T::from(k).unwrap());
     }
 
-    // Compute the starting min_value_idx from the last element of the start combination
-    let last_value = combo[combo.len() - 1];
+    // Tabulate the seed combination and take the starting min_value_idx from
+    // its last (i.e. largest) element.
+    let mut counts = vec![0u32; scale_range];
+    for &value in start_combination {
+        counts[U::to_usize(&(value - scale_min)).unwrap()] += 1;
+    }
+    let last_value = start_combination[start_combination.len() - 1];
     let min_value_idx = U::to_usize(&(last_value - scale_min)).unwrap();
 
     let ctx = ClosureBranchCtx {
@@ -2247,12 +2817,13 @@ where
         scale_max_sum_t: scale_max_sum_t.to_vec(),
         limit,
         value_as_t,
-        value_as_u,
         inv_len,
+        _marker: PhantomData::<U>,
     };
 
     closure_branch_recurse(
-        &mut combo,
+        &mut counts,
+        start_combination.len(),
         running_sum_init,
         running_m2_init,
         min_value_idx,
@@ -2265,28 +2836,29 @@ where
 
 /// Recursive backtracking core for closure_branch.
 ///
-/// Extends `combo` one element at a time (push on entry, pop on exit),
-/// reusing a single Vec allocation across the entire search tree.
+/// Extends the combination one element at a time by incrementing a count on
+/// entry and decrementing it on exit, reusing a single allocation across the
+/// entire search tree. `current_len` tracks how many values the counts stand
+/// for, which the count vector alone would only tell us by summing it.
 /// The inner loop iterates over precomputed usize indices, avoiding all
 /// generic trait conversions (T::from, U::to_usize) in the hot path.
 fn closure_branch_recurse<T, U>(
-    combo: &mut Vec<U>,
+    counts: &mut [u32],
+    current_len: usize,
     running_sum: T,
     running_m2: T,
-    min_value_idx: usize,  // index into ctx.value_as_t/value_as_u for the minimum next value
+    min_value_idx: usize, // index into ctx.value_as_t for the minimum next value
     ctx: &ClosureBranchCtx<T, U>,
-    results: &mut Vec<Vec<U>>,
+    results: &mut Vec<Vec<u32>>,
 ) where
     T: FloatType,
     U: IntegerType,
 {
-    let current_len = combo.len();
-
     // Terminal: combination is complete
     if current_len >= ctx.n {
         // Check SD lower bound: m2 >= sd_lower² * (n-1), no sqrt needed
         if running_m2 >= ctx.m2_lower_threshold {
-            results.push(combo.clone()); // Only clone when emitting a result
+            results.push(counts.to_vec()); // Only clone when emitting a result
         }
         return;
     }
@@ -2319,16 +2891,12 @@ fn closure_branch_recurse<T, U>(
 
         // SD upper bound pruning: m2 <= sd_upper² * (n-1), no sqrt needed
         if next_m2 <= ctx.m2_upper_threshold {
-            combo.push(ctx.value_as_u[vi]);
+            counts[vi] += 1;
             closure_branch_recurse(
-                combo,
-                next_sum,
-                next_m2,
-                vi, // next value must be >= this value
-                ctx,
-                results,
+                counts, next_n, next_sum, next_m2, vi, // next value must be >= this value
+                ctx, results,
             );
-            combo.pop();
+            counts[vi] -= 1;
 
             // Early exit if we've hit the limit
             if results.len() >= ctx.limit {
@@ -2341,6 +2909,326 @@ fn closure_branch_recurse<T, U>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    /// Column names of a Parquet file, in order.
+    fn parquet_columns(path: &str) -> Vec<String> {
+        let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    /// Total number of rows in a Parquet file.
+    fn parquet_rows(path: &str) -> usize {
+        let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        reader.map(|b| b.unwrap().num_rows()).sum()
+    }
+
+    /// The medoid straight from the definition: minimise summed EMD to every
+    /// other member, breaking ties lexicographically.
+    fn medoid_naive(rows: &[Vec<u32>]) -> Option<Vec<u32>> {
+        rows.iter()
+            .map(|x| {
+                let cost: u64 = rows.iter().map(|y| emd_1d(x, y)).sum();
+                (cost, x.clone())
+            })
+            .min()
+            .map(|(_, row)| row)
+    }
+
+    #[test]
+    fn the_fast_medoid_matches_the_definition() {
+        // `medoid_of` avoids the quadratic pairwise loop by decomposing the
+        // summed EMD per grid position. Check the shortcut against the thing it
+        // is a shortcut for, on real result sets.
+        for (mean, sd, n) in [(3.0, 1.13, 60), (3.5, 1.0, 52), (2.2, 1.3, 40)] {
+            let results =
+                closure_parallel(mean, sd, n, 1i32, 5i32, 0.005, 0.005, 1, None, None).unwrap();
+            let rows: Vec<Vec<u32>> = results.results.counts.rows().map(|r| r.to_vec()).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let fast = medoid_of(rows.iter().map(|r| r.as_slice()), 5, n as usize);
+            assert_eq!(
+                fast,
+                medoid_naive(&rows),
+                "fast medoid differs from the definition at mean={mean} sd={sd} n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_medoid_does_not_depend_on_enumeration_order() {
+        // Ties are broken lexicographically rather than by whichever candidate
+        // the search happened to reach first, so a reshuffled input gives the
+        // same answer. Enumeration order is not reproducible under `stop_after`
+        // or for SPRITE, so this is what keeps the reported sample stable.
+        let rows: Vec<Vec<u32>> = vec![
+            vec![2, 0, 0, 0, 2],
+            vec![0, 2, 0, 2, 0],
+            vec![2, 0, 0, 0, 2],
+            vec![0, 0, 4, 0, 0],
+            vec![1, 1, 0, 1, 1],
+        ];
+        let forward = medoid_of(rows.iter().map(|r| r.as_slice()), 5, 4);
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        let backward = medoid_of(reversed.iter().map(|r| r.as_slice()), 5, 4);
+        assert_eq!(forward, backward);
+        assert_eq!(forward, medoid_naive(&rows));
+    }
+
+    #[test]
+    fn modality_tables_reach_disk_with_conditional_bounds() {
+        let dir = std::env::temp_dir().join("closure_modality_parquet");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = format!("{}/", dir.display());
+
+        let results =
+            closure_parallel(3.5, 1.5, 100, 1i32, 5i32, 0.01, 0.01, 1, None, None).unwrap();
+        write_statistics_files(&base, &results);
+
+        assert_eq!(
+            parquet_columns(&format!("{base}frequency.parquet")),
+            vec![
+                "samples",
+                "value",
+                "f_expected",
+                "f_representative",
+                "f_relative"
+            ]
+        );
+        assert_eq!(
+            parquet_columns(&format!("{base}modality_shapes.parquet")),
+            vec!["class", "n_samples", "value", "count_lo", "count_hi"]
+        );
+        // One row per (populated class, value); three of the six classes are
+        // empty for this target, so 3 * 5 rows.
+        assert_eq!(parquet_rows(&format!("{base}modality_shapes.parquet")), 15);
+        assert_eq!(parquet_rows(&format!("{base}modality_counts.parquet")), 5);
+        assert_eq!(parquet_rows(&format!("{base}modality_pairs.parquet")), 4);
+        assert_eq!(parquet_rows(&format!("{base}modality_summary.parquet")), 1);
+
+        // The prominence envelope behind every `Some(false)`: one row per
+        // (threshold, class), so a reader can see how far the threshold would
+        // have to move before an empty class stopped being empty.
+        assert_eq!(
+            parquet_columns(&format!("{base}modality_prominence.parquet")),
+            vec![
+                "min_prominence",
+                "min_prominence_counts",
+                "primary",
+                "class",
+                "n_samples"
+            ]
+        );
+        assert_eq!(
+            parquet_rows(&format!("{base}modality_prominence.parquet")),
+            modality::DEFAULT_PROMINENCE_LADDER.len() * ShapeClass::all().count()
+        );
+
+        let summary = parquet_columns(&format!("{base}modality_summary.parquet"));
+        assert!(summary.contains(&"exhaustive".to_string()));
+        assert!(summary.contains(&"n_one_mode_interior".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn counts_are_a_lossless_encoding_of_closure_samples() {
+        let results =
+            closure_parallel::<f64, i32>(3.0, 1.0, 5, 1, 5, 0.05, 0.05, 1, None, None).unwrap();
+        assert!(!results.results.is_empty());
+
+        for i in 0..results.results.len() {
+            let sample = results.results.sample(i);
+            let counts = results.results.counts.row(i);
+
+            // Expanding counts gives a sorted sample of the right size.
+            assert_eq!(sample.len(), 5, "sample {i} has the wrong size");
+            assert!(
+                sample.windows(2).all(|w| w[0] <= w[1]),
+                "sample {i} is not sorted: {sample:?}"
+            );
+            assert_eq!(counts.iter().sum::<u32>(), 5);
+
+            // Re-tabulating the expanded sample returns the same counts, so the
+            // map between the two representations is a bijection.
+            let regrid = results.results.counts.grid().counts_of_sample(&sample);
+            assert_eq!(regrid, counts, "round trip changed sample {i}");
+
+            // And the sample still satisfies the search constraints.
+            let mean = sample.iter().sum::<i32>() as f64 / 5.0;
+            assert!((mean - 3.0).abs() <= 0.05, "sample {i} mean is {mean}");
+        }
+    }
+
+    #[test]
+    fn closure_and_sprite_write_the_same_layout() {
+        let closure_dir = "test_format_closure";
+        let sprite_dir = "test_format_sprite";
+        let _ = std::fs::create_dir(closure_dir);
+        let _ = std::fs::create_dir(sprite_dir);
+
+        closure_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            Some(ParquetConfig::new(format!("{closure_dir}/"), 100)),
+            Some(20),
+        )
+        .unwrap();
+
+        sprite_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            RestrictionsOption::Default,
+            Some(ParquetConfig::new(format!("{sprite_dir}/"), 100)),
+            Some(20),
+        )
+        .unwrap();
+
+        // Same files, and — because both techniques run on the same value grid
+        // — the same count columns in the same order.
+        for name in &[
+            "counts",
+            "scale_values",
+            "format",
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "frequency_dist",
+        ] {
+            let closure_cols = parquet_columns(&format!("{closure_dir}/{name}.parquet"));
+            let sprite_cols = parquet_columns(&format!("{sprite_dir}/{name}.parquet"));
+            assert_eq!(
+                closure_cols, sprite_cols,
+                "{name}.parquet differs between the two techniques"
+            );
+        }
+
+        let cols = parquet_columns(&format!("{closure_dir}/counts.parquet"));
+        assert_eq!(cols, vec!["v1", "v2", "v3", "v4", "v5", "horns"]);
+
+        let _ = std::fs::remove_dir_all(closure_dir);
+        let _ = std::fs::remove_dir_all(sprite_dir);
+    }
+
+    #[test]
+    fn sprite_tabulates_a_multi_item_grid() {
+        // A five-item 1-5 scale: 21 grid values spaced 0.2 apart.
+        let results = sprite_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            5,
+            None,
+            RestrictionsOption::Null,
+            None,
+            Some(5),
+        )
+        .unwrap();
+
+        let grid = results.results.counts.grid();
+        assert_eq!(grid.len(), 21);
+        assert_eq!(grid.column_names()[1], "v1_2");
+        assert_eq!(results.frequency.value().len(), 21 * SampleCategory::COUNT);
+
+        // Every sample is fully accounted for on the grid, with nothing falling
+        // off it — the failure the old integer binning would have produced.
+        for i in 0..results.results.len() {
+            assert_eq!(results.results.counts.row(i).iter().sum::<u32>(), 20);
+        }
+    }
+
+    #[test]
+    fn both_layouts_describe_the_same_samples() {
+        let dir = "test_format_both";
+        let _ = std::fs::create_dir(dir);
+
+        let results = closure_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            5,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            Some(ParquetConfig {
+                file_path: format!("{dir}/"),
+                batch_size: 100,
+                format: OutputFormat::Both,
+            }),
+            None,
+        )
+        .unwrap();
+
+        let expected = results.results.len();
+        assert_eq!(parquet_rows(&format!("{dir}/counts.parquet")), expected);
+        assert_eq!(parquet_rows(&format!("{dir}/results.parquet")), expected);
+        assert_eq!(parquet_rows(&format!("{dir}/scale_values.parquet")), 5);
+        assert_eq!(parquet_rows(&format!("{dir}/format.parquet")), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn horns_is_invariant_to_the_grid_labelling() {
+        // Horns normalises by the scale's maximum variance, so labelling the
+        // grid positions differently cannot change it. That equivalence is what
+        // lets one horns implementation serve both a 1-7 CLOSURE run and a
+        // multi-item SPRITE grid whose values are fractional.
+        fn horns_at(values: &[f64], freqs: &[f64]) -> f64 {
+            let total: f64 = freqs.iter().sum();
+            let mean: f64 = values.iter().zip(freqs).map(|(v, f)| v * f / total).sum();
+            let numerator: f64 = values
+                .iter()
+                .zip(freqs)
+                .map(|(v, f)| (f / total) * (v - mean).powi(2))
+                .sum();
+            let span = values[values.len() - 1] - values[0];
+            numerator / (span.powi(2) / 4.0)
+        }
+
+        let freqs = [3.0, 1.0, 0.0, 4.0, 2.0];
+        let reference = horns_at(&[1.0, 2.0, 3.0, 4.0, 5.0], &freqs);
+
+        // Same five positions, three different labellings.
+        assert!((horns_from_counts(&freqs) - reference).abs() < 1e-12);
+        assert!((calculate_horns(&freqs, 1, 5) - reference).abs() < 1e-12);
+        assert!((horns_at(&[100.0, 200.0, 300.0, 400.0, 500.0], &freqs) - reference).abs() < 1e-12);
+        // A five-item grid: values 0.2 apart rather than 1 apart.
+        assert!((horns_at(&[1.0, 1.2, 1.4, 1.6, 1.8], &freqs) - reference).abs() < 1e-12);
+
+        assert!((horns_uniform(5) - calculate_horns(&[1.0; 5], 1, 5)).abs() < 1e-12);
+    }
 
     #[test]
     fn test_count_initial_combinations() {
@@ -2357,7 +3245,7 @@ mod tests {
     #[test]
     fn test_frequency_samples_column() {
         let repetitions = 5;
-        
+
         // Test with 5 repetitions (like scale 1..=5)
         let samples = FrequencySamplesColumn::new(repetitions);
 
@@ -2455,26 +3343,23 @@ mod tests {
         .unwrap();
 
         // Check that results table is properly formed
-        assert!(!results.results.sample.is_empty());
-        assert_eq!(
-            results.results.sample.len(),
-            results.results.horns.len()
-        );
-        assert_eq!(results.results.sample.len(), results.results.id.len());
+        assert!(!results.results.is_empty());
+        assert_eq!(results.results.len(), results.results.horns.len());
+        assert_eq!(results.results.len(), results.results.id.len());
         assert_eq!(results.results.id[0], 1.0);
         assert_eq!(
             results.results.id.last(),
-            Some(&(results.results.sample.len() as f64))
+            Some(&(results.results.len() as f64))
         );
 
         // Check metrics
         assert_eq!(
             results.metrics_main.samples_all,
-            results.results.sample.len() as f64
+            results.results.len() as f64
         );
         assert_eq!(
             results.metrics_main.values_all,
-            (results.results.sample.len() * 5) as f64
+            (results.results.len() * 5) as f64
         );
 
         // Check horns metrics
@@ -2488,8 +3373,8 @@ mod tests {
         assert_eq!(results.frequency.len(), expected_rows);
         assert_eq!(results.frequency.samples_group().len(), expected_rows);
         assert_eq!(results.frequency.value().len(), expected_rows);
-        assert_eq!(results.frequency.f_average().len(), expected_rows);
-        assert_eq!(results.frequency.f_absolute().len(), expected_rows);
+        assert_eq!(results.frequency.f_expected().len(), expected_rows);
+        assert_eq!(results.frequency.f_representative().len(), expected_rows);
         assert_eq!(results.frequency.f_relative().len(), expected_rows);
 
         // Check that samples column has correct values
@@ -2508,6 +3393,7 @@ mod tests {
         let config = ParquetConfig {
             file_path: "test_output/".to_string(),
             batch_size: 100,
+            format: OutputFormat::default(),
         };
 
         let _ = std::fs::create_dir("test_output");
@@ -2526,21 +3412,32 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!results.results.sample.is_empty());
+        assert!(!results.results.is_empty());
 
         // Verify parquet files are valid (more than just "PAR1" magic bytes)
-        for name in &["metrics_main", "metrics_horns", "frequency", "results"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "counts",
+            "scale_values",
+            "format",
+        ] {
             let path = format!("test_output/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
+        // The counts layout is the default, so no per-position file is written
+        assert!(!std::path::Path::new("test_output/results.parquet").exists());
+
         // Clean up test files
-        let _ = std::fs::remove_file("test_output/results.parquet");
-        let _ = std::fs::remove_file("test_output/metrics_main.parquet");
-        let _ = std::fs::remove_file("test_output/metrics_horns.parquet");
-        let _ = std::fs::remove_file("test_output/frequency.parquet");
-        let _ = std::fs::remove_dir("test_output");
+        let _ = std::fs::remove_dir_all("test_output");
     }
 
     #[test]
@@ -2550,6 +3447,7 @@ mod tests {
             file_path: "test_streaming/".to_string(),
             batch_size: 100,
             show_progress: false,
+            format: OutputFormat::default(),
         };
 
         let _ = std::fs::create_dir("test_streaming");
@@ -2563,32 +3461,34 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             1,    // items
-            config,
-            None, // no stop_after limit
+            config, None, // no stop_after limit
         )
         .unwrap();
 
         assert!(result.total_combinations > 0);
         assert_eq!(result.file_path, "test_streaming/");
 
-        // Check that both files were created
-        assert!(std::path::Path::new("test_streaming/sample.parquet").exists());
-        assert!(std::path::Path::new("test_streaming/horns.parquet").exists());
-
         // Verify parquet files are valid (more than just "PAR1" magic bytes)
-        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "counts",
+            "scale_values",
+            "format",
+        ] {
             let path = format!("test_streaming/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up test files
-        let _ = std::fs::remove_file("test_streaming/sample.parquet");
-        let _ = std::fs::remove_file("test_streaming/horns.parquet");
-        let _ = std::fs::remove_file("test_streaming/metrics_main.parquet");
-        let _ = std::fs::remove_file("test_streaming/metrics_horns.parquet");
-        let _ = std::fs::remove_file("test_streaming/frequency.parquet");
-        let _ = std::fs::remove_dir("test_streaming");
+        let _ = std::fs::remove_dir_all("test_streaming");
     }
 
     #[test]
@@ -2598,6 +3498,7 @@ mod tests {
             file_path: "test_streaming_unsum/".to_string(),
             batch_size: 1000,
             show_progress: false,
+            format: OutputFormat::default(),
         };
 
         let _ = std::fs::create_dir("test_streaming_unsum");
@@ -2619,17 +3520,26 @@ mod tests {
         assert!(result.total_combinations > 0);
 
         // Verify all parquet files are valid
-        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "counts",
+            "scale_values",
+            "format",
+        ] {
             let path = format!("test_streaming_unsum/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up
-        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
-            let _ = std::fs::remove_file(format!("test_streaming_unsum/{}.parquet", name));
-        }
-        let _ = std::fs::remove_dir("test_streaming_unsum");
+        let _ = std::fs::remove_dir_all("test_streaming_unsum");
     }
 
     #[test]
@@ -2639,6 +3549,7 @@ mod tests {
             file_path: "test_streaming_large/".to_string(),
             batch_size: 1000,
             show_progress: false,
+            format: OutputFormat::default(),
         };
 
         let _ = std::fs::create_dir("test_streaming_large");
@@ -2652,25 +3563,33 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             1,    // items
-            config,
-            None, // no stop_after → main parallel path
+            config, None, // no stop_after → main parallel path
         )
         .unwrap();
 
         assert!(result.total_combinations > 0);
 
         // Verify all parquet files are valid
-        for name in &["metrics_main", "metrics_horns", "frequency", "sample", "horns"] {
+        for name in &[
+            "metrics_main",
+            "metrics_horns",
+            "frequency",
+            "counts",
+            "scale_values",
+            "format",
+        ] {
             let path = format!("test_streaming_large/{}.parquet", name);
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size > 4, "{}.parquet is only {} bytes (likely just PAR1 header)", name, size);
+            assert!(
+                size > 4,
+                "{}.parquet is only {} bytes (likely just PAR1 header)",
+                name,
+                size
+            );
         }
 
         // Clean up
-        for name in &["sample", "horns", "metrics_main", "metrics_horns", "frequency"] {
-            let _ = std::fs::remove_file(format!("test_streaming_large/{}.parquet", name));
-        }
-        let _ = std::fs::remove_dir("test_streaming_large");
+        let _ = std::fs::remove_dir_all("test_streaming_large");
     }
 
     #[test]
@@ -2690,7 +3609,7 @@ mod tests {
         )
         .unwrap();
 
-        let total_samples = results_unlimited.results.sample.len();
+        let total_samples = results_unlimited.results.len();
         assert!(total_samples > 10); // Should have many samples
 
         // Test with limit of 10
@@ -2708,7 +3627,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(results_limited.results.sample.len(), 10);
+        assert_eq!(results_limited.results.len(), 10);
         assert_eq!(results_limited.results.horns.len(), 10);
         assert_eq!(results_limited.results.id.len(), 10);
 
@@ -2727,7 +3646,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(results_one.results.sample.len(), 1);
+        assert_eq!(results_one.results.len(), 1);
         assert_eq!(results_one.results.horns.len(), 1);
         assert_eq!(results_one.results.id.len(), 1);
     }
