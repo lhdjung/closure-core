@@ -901,3 +901,7 @@ The five commits identified the right problems and reached for the right tools.
 What is missing is at the output boundary: the loop computes a rich picture of `S`
 and then reports two bits of it, in three places incorrectly, to a file format that
 never receives them.
+
+
+### From previous model run
+One thing I deliberately left alone: can_be's existential Some(true) over the whole band (the small-n weak-witness concern from the assessment). That's a design decision about the API's claim semantics, not a defect, and it deserves your call rather than a drive-by change.
