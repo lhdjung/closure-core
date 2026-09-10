@@ -102,7 +102,6 @@ pub mod modality;
 pub mod sample_counts;
 mod sprite;
 mod sprite_types;
-mod utils;
 
 pub use count::closure_count;
 pub use sample_counts::{
@@ -678,61 +677,134 @@ impl<U: IntegerType> ResultListFromMeanSdN<U> {
     }
 }
 
-/// Context for CLOSURE search containing precomputed bounds and lookup tables
-/// for efficient DFS pruning during sample space exploration
-struct ClosureSearchContext<T, U> {
-    /// Upper bound for target sum (mean * n + rounding_error_mean * n)
-    target_sum_upper: T,
-    /// Lower bound for target sum (mean * n - rounding_error_mean * n)
-    target_sum_lower: T,
-    /// Upper bound for standard deviation
-    sd_upper: T,
-    /// Lower bound for standard deviation
-    sd_lower: T,
-    /// Sample size as usize for array indexing
-    n_usize: usize,
-    /// Lookup table: min_scale_sum[value][n_left] = minimum possible sum for n_left remaining positions
-    min_scale_sum: Vec<Vec<T>>,
-    /// Lookup table: scale_max_sum[n_left] = maximum possible sum for n_left remaining positions
-    scale_max_sum: Vec<T>,
-    /// Sample size minus one (n - 1)
-    n_minus_1: U,
-    /// Maximum scale value plus one (scale_max + 1) for range operations
-    scale_max_plus_1: U,
+/// Slack added to every float threshold before it is rounded to an integer.
+///
+/// Scale values are integers, so a sample's sum and sum of squares are exact
+/// integers and the only rounding anywhere in the search is in the thresholds
+/// themselves: `mean * n` is not exactly `81` for `mean = 3.24, n = 25`, and
+/// `(sd + rounding_error_sd)²` is rarely exact either. A slack far below one
+/// unit but far above f64 error keeps a sample whose statistic sits exactly on
+/// a bound from being dropped by the last bit of that arithmetic.
+const BOUND_TOLERANCE: f64 = 1e-6;
+
+/// Integer-exact acceptance bounds for a CLOSURE search.
+///
+/// Shared by the DFS in this file and the DP counter in [`count`], so the two
+/// accept exactly the same samples by construction rather than by luck.
+///
+/// A sample is admissible when `sum_lo <= Σx <= sum_hi` and `m2n_lo <=
+/// n·Σx² − (Σx)² <= m2n_hi`. The second quantity is `n·(n−1)` times the sample
+/// variance, which is why it is an integer.
+pub(crate) struct SearchBounds {
+    pub sum_lo: i64,
+    pub sum_hi: i64,
+    pub m2n_lo: i64,
+    pub m2n_hi: i64,
+    /// `(n−1)·(sd − rounding_error_sd)²`, floored at zero.
+    pub var_nm1_lo: f64,
+    /// `(n−1)·(sd + rounding_error_sd)²`.
+    pub var_nm1_hi: f64,
 }
 
-/// Implements range over Rint-friendly generic integer type U
-struct IntegerRange<U>
-where
-    U: Integer + Copy,
-{
-    current: U,
-    end: U,
-}
-
-impl<U> Iterator for IntegerRange<U>
-where
-    U: Integer + Copy,
-{
-    type Item = U;
-
-    /// Increment over U type integers
-    fn next(&mut self) -> Option<U> {
-        if self.current < self.end {
-            let next = self.current;
-            self.current = self.current + U::one();
-            Some(next)
-        } else {
-            None
+impl SearchBounds {
+    pub(crate) fn new(mean: f64, sd: f64, n: usize, re_mean: f64, re_sd: f64) -> Self {
+        let n_f = n as f64;
+        let target_sum = mean * n_f;
+        let sum_slack = re_mean * n_f;
+        let sd_lo = (sd - re_sd).max(0.0);
+        let sd_hi = sd + re_sd;
+        let var_nm1_lo = sd_lo * sd_lo * (n_f - 1.0);
+        let var_nm1_hi = sd_hi * sd_hi * (n_f - 1.0);
+        Self {
+            sum_lo: (target_sum - sum_slack - BOUND_TOLERANCE).ceil() as i64,
+            sum_hi: (target_sum + sum_slack + BOUND_TOLERANCE).floor() as i64,
+            m2n_lo: (n_f * var_nm1_lo - BOUND_TOLERANCE).ceil() as i64,
+            m2n_hi: (n_f * var_nm1_hi + BOUND_TOLERANCE).floor() as i64,
+            var_nm1_lo,
+            var_nm1_hi,
         }
     }
 }
 
-/// Creates an iterator over the space of U type integers
-fn range_u<U: Integer + Copy>(start: U, end: U) -> IntegerRange<U> {
-    IntegerRange {
-        current: start,
-        end,
+/// Everything the DFS needs, computed once per run.
+///
+/// The search runs entirely in integer arithmetic on a running sum and sum of
+/// squares; see [`SearchBounds`] for why that is exact.
+struct ClosureSearchContext {
+    n: usize,
+    scale_min: i64,
+    scale_max: i64,
+    sum_lo: i64,
+    sum_hi: i64,
+    /// Lower bound on `n·Σx² − (Σx)²` of a complete sample.
+    m2n_lo: i64,
+    /// `m2_hi[k]` bounds `k·Σx² − (Σx)²` over the first `k` values. The sum of
+    /// squared deviations from the running mean never decreases as values are
+    /// added, so a partial sample over the bound cannot be completed.
+    m2_hi: Vec<i64>,
+}
+
+impl ClosureSearchContext {
+    fn new<T: FloatType, U: IntegerType>(
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
+    ) -> Result<Self, ParameterError> {
+        let invalid = |msg: &str| Err(ParameterError::InputValidation(msg.to_string()));
+        let (Some(n_i64), Some(scale_min), Some(scale_max)) =
+            (U::to_i64(&n), U::to_i64(&scale_min), U::to_i64(&scale_max))
+        else {
+            return invalid("n, scale_min and scale_max must fit in an i64");
+        };
+        if n_i64 < 2 {
+            return invalid("n must be at least 2");
+        }
+        if scale_min > scale_max {
+            return invalid("scale_max must not be below scale_min");
+        }
+        let to_f64 = |x: T| T::to_f64(&x).filter(|v| v.is_finite());
+        let (Some(mean), Some(sd), Some(re_mean), Some(re_sd)) = (
+            to_f64(mean),
+            to_f64(sd),
+            to_f64(rounding_error_mean),
+            to_f64(rounding_error_sd),
+        ) else {
+            return invalid("mean, sd and the rounding errors must be finite");
+        };
+        if sd < 0.0 || re_mean < 0.0 || re_sd < 0.0 {
+            return invalid("sd and the rounding errors must not be negative");
+        }
+        let n = n_i64 as usize;
+        let bounds = SearchBounds::new(mean, sd, n, re_mean, re_sd);
+        let m2_hi = (0..=n)
+            .map(|k| (k as f64 * bounds.var_nm1_hi + BOUND_TOLERANCE).floor() as i64)
+            .collect();
+        Ok(Self {
+            n,
+            scale_min,
+            scale_max,
+            sum_lo: bounds.sum_lo,
+            sum_hi: bounds.sum_hi,
+            m2n_lo: bounds.m2n_lo,
+            m2_hi,
+        })
+    }
+
+    /// Number of scale values.
+    fn scale_range(&self) -> usize {
+        (self.scale_max - self.scale_min + 1) as usize
+    }
+
+    /// Seed depth for splitting the search into independent branches: three
+    /// values, or fewer when `n` is smaller than that. Two gave only 28
+    /// very unevenly sized branches on a 7-point scale; three balances the
+    /// load measurably better and four adds nothing.
+    fn seed_depth(&self) -> usize {
+        self.n.min(3)
     }
 }
 
@@ -760,27 +832,26 @@ pub fn count_initial_combinations(scale_min: i32, scale_max: i32, depth: usize) 
 
 /// Calculate horns index for a frequency distribution
 fn calculate_horns(freqs: &[f64], scale_min: i32, scale_max: i32) -> f64 {
-    let scale_values: Vec<f64> = (scale_min..=scale_max).map(|v| v as f64).collect();
-
     let total: f64 = freqs.iter().sum();
     if total == 0.0 {
         return 0.0;
     }
 
-    let freqs_relative: Vec<f64> = freqs.iter().map(|f| f / total).collect();
+    // Called once per sample, so no allocation here.
+    let value = |i: usize| (scale_min + i as i32) as f64;
 
     // Calculate mean
-    let mean: f64 = scale_values
+    let mean: f64 = freqs
         .iter()
-        .zip(freqs_relative.iter())
-        .map(|(v, f)| v * f)
+        .enumerate()
+        .map(|(i, f)| value(i) * (f / total))
         .sum();
 
     // Calculate weighted sum of squared deviations
-    let numerator: f64 = scale_values
+    let numerator: f64 = freqs
         .iter()
-        .zip(freqs_relative.iter())
-        .map(|(v, f)| f * (v - mean).powi(2))
+        .enumerate()
+        .map(|(i, f)| (f / total) * (value(i) - mean).powi(2))
         .sum();
 
     // Maximum possible variance given scale limits
@@ -1113,7 +1184,7 @@ fn median(sorted: &[f64]) -> f64 {
 /// Calculate median absolute deviation
 fn mad(values: &[f64], median_val: f64) -> f64 {
     let mut deviations: Vec<f64> = values.iter().map(|&v| (v - median_val).abs()).collect();
-    deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    deviations.par_sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     median(&deviations)
 }
 
@@ -1178,6 +1249,9 @@ where
     }
 }
 
+/// Rows per parallel task in the per-sample statistics pass.
+const STATS_CHUNK_ROWS: usize = 4096;
+
 /// Calculate all statistics for the samples.
 ///
 /// `exhaustive` says whether `counts` is the complete set of samples matching
@@ -1202,17 +1276,32 @@ where
     let samples_all = counts.nrow();
     let values_all = samples_all * n;
 
-    // Calculate horns for each sample; classify its shape in the same pass.
-    let mut shapes = ShapeAccumulator::new(group_size, n, DEFAULT_MODE_PROMINENCE);
-
+    // Calculate horns for each sample and classify its shape in the same
+    // pass, in parallel over chunks of rows. This pass costs more than the
+    // search itself on large result sets.
+    let k = group_size;
+    let chunks: Vec<(Vec<f64>, ShapeAccumulator)> = counts
+        .as_flat()
+        .par_chunks(k * STATS_CHUNK_ROWS)
+        .map(|chunk| {
+            let mut shapes = ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE);
+            let mut horns = Vec::with_capacity(chunk.len() / k);
+            let mut freqs = vec![0.0f64; k];
+            for row in chunk.chunks_exact(k) {
+                for (slot, &c) in freqs.iter_mut().zip(row.iter()) {
+                    *slot = c as f64;
+                }
+                horns.push(horns_from_counts(&freqs));
+                shapes.update(row);
+            }
+            (horns, shapes)
+        })
+        .collect();
     let mut horns_values = Vec::with_capacity(samples_all);
-    let mut freqs = vec![0.0f64; group_size];
-    for row in counts.rows() {
-        for (slot, &c) in freqs.iter_mut().zip(row.iter()) {
-            *slot = c as f64;
-        }
-        horns_values.push(horns_from_counts(&freqs));
-        shapes.update(row);
+    let mut shapes = ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE);
+    for (horns, part) in chunks {
+        horns_values.extend(horns);
+        shapes.merge(part);
     }
     let modality_shapes = shapes.finish(exhaustive);
 
@@ -1228,7 +1317,7 @@ where
     };
 
     let mut horns_sorted = horns_values.clone();
-    horns_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    horns_sorted.par_sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let horns_min = horns_sorted[0];
     let horns_max = horns_sorted[samples_all - 1];
     let horns_median = median(&horns_sorted);
@@ -1531,139 +1620,30 @@ where
     RecordBatch::try_new(schema, arrays).map_err(|e| e.into())
 }
 
-/// Internal function to prepare computation parameters
-/// Initialize the search context for CLOSURE computation
-///
-/// Prepares all necessary bounds, lookup tables, and derived parameters needed
-/// for efficient depth-first search through the sample space. This includes:
-/// - Computing target sum bounds accounting for rounding errors
-/// - Computing SD bounds accounting for rounding errors
-/// - Pre-computing lookup tables for O(1) pruning decisions
-/// - Type conversions and convenience values
-fn initialize_closure_search<T, U>(
-    mean: T,
-    sd: T,
-    n: U,
-    scale_min: U,
-    scale_max: U,
-    rounding_error_mean: T,
-    rounding_error_sd: T,
-) -> ClosureSearchContext<T, U>
-where
-    T: FloatType,
-    U: IntegerType,
-{
-    // Convert integer `n` to float to enable multiplication with other floats
-    let n_float = T::from(U::to_i32(&n).unwrap()).unwrap();
-
-    // Target sum calculations
-    let target_sum = mean * n_float;
-    let rounding_error_sum = rounding_error_mean * n_float;
-
-    let target_sum_upper = target_sum + rounding_error_sum;
-    let target_sum_lower = target_sum - rounding_error_sum;
-    let sd_upper = sd + rounding_error_sd;
-    let sd_lower = sd - rounding_error_sd;
-
-    // Convert to usize for range operations
-    let n_usize = U::to_usize(&n).unwrap();
-
-    // Create 2D array for min_scale_sum like in Python
-    // min_scale_sum[value][n_left] = value * n_left
-    let scale_range = U::to_usize(&(scale_max - scale_min + U::one())).unwrap();
-    let mut min_scale_sum_t: Vec<Vec<T>> = Vec::with_capacity(scale_range);
-
-    // For each possible value from scale_min to scale_max
-    for value in range_u(scale_min, scale_max + U::one()) {
-        let value_float = T::from(value).unwrap();
-        let row: Vec<T> = (0..n_usize)
-            .map(|n_left| value_float * T::from(n_left).unwrap())
-            .collect();
-        min_scale_sum_t.push(row);
-    }
-
-    // max_scale_sum remains 1D as in the original
-    let scale_max_sum_t: Vec<T> = (0..n_usize)
-        .map(|x| T::from(scale_max).unwrap() * T::from(x).unwrap())
-        .collect();
-
-    let n_minus_1 = n - U::one();
-    let scale_max_plus_1 = scale_max + U::one();
-
-    ClosureSearchContext {
-        target_sum_upper,
-        target_sum_lower,
-        sd_upper,
-        sd_lower,
-        n_usize,
-        min_scale_sum: min_scale_sum_t,
-        scale_max_sum: scale_max_sum_t,
-        n_minus_1,
-        scale_max_plus_1,
-    }
-}
-
-/// Generate initial combinations for parallel processing at a given depth
-fn generate_initial_combinations<T, U>(
-    scale_min: U,
-    scale_max_plus_1: U,
-    depth: usize,
-) -> Vec<(Vec<U>, T, T)>
-where
-    T: FloatType,
-    U: IntegerType,
-{
-    let mut results = Vec::new();
+/// Every sorted combination of `depth` scale-value indices from
+/// `0..scale_range`, each the seed of one independent search branch.
+fn generate_initial_combinations(scale_range: usize, depth: usize) -> Vec<Vec<usize>> {
+    let mut seeds = Vec::new();
     let mut combo = Vec::with_capacity(depth);
-    generate_combinations_recursive(
-        scale_min,
-        scale_max_plus_1,
-        scale_min,
-        depth,
-        &mut combo,
-        &mut results,
-    );
-    results
-}
-
-/// Recursively generate sorted combinations with replacement and compute
-/// running_sum and running_m2 for each.
-fn generate_combinations_recursive<T, U>(
-    _scale_min: U,
-    scale_max_plus_1: U,
-    min_value: U,
-    remaining: usize,
-    combo: &mut Vec<U>,
-    results: &mut Vec<(Vec<U>, T, T)>,
-) where
-    T: FloatType,
-    U: IntegerType,
-{
-    if remaining == 0 {
-        let depth = combo.len();
-        let sum: T = combo
-            .iter()
-            .fold(T::zero(), |acc, &v| acc + T::from(v).unwrap());
-        let mean = sum / T::from(depth).unwrap();
-        let m2: T = combo.iter().fold(T::zero(), |acc, &v| {
-            let diff = T::from(v).unwrap() - mean;
-            acc + diff * diff
-        });
-        results.push((combo.clone(), sum, m2));
-        return;
+    fn walk(
+        scale_range: usize,
+        min_idx: usize,
+        left: usize,
+        combo: &mut Vec<usize>,
+        out: &mut Vec<Vec<usize>>,
+    ) {
+        if left == 0 {
+            out.push(combo.clone());
+            return;
+        }
+        for idx in min_idx..scale_range {
+            combo.push(idx);
+            walk(scale_range, idx, left - 1, combo, out);
+            combo.pop();
+        }
     }
-    for value in range_u(min_value, scale_max_plus_1) {
-        combo.push(value);
-        generate_combinations_recursive(
-            _scale_min,
-            scale_max_plus_1,
-            value,
-            remaining - 1,
-            combo,
-            results,
-        );
-        combo.pop();
-    }
+    walk(scale_range, 0, depth, &mut combo, &mut seeds);
+    seeds
 }
 
 /// Generate all valid combinations (memory mode) with summary statistics
@@ -1704,17 +1684,7 @@ where
             "CLOSURE requires items == 1".to_string(),
         ));
     }
-    let ClosureSearchContext {
-        target_sum_upper,
-        target_sum_lower,
-        sd_upper,
-        sd_lower,
-        n_usize,
-        min_scale_sum,
-        scale_max_sum,
-        n_minus_1,
-        scale_max_plus_1,
-    } = initialize_closure_search(
+    let ctx = ClosureSearchContext::new(
         mean,
         sd,
         n,
@@ -1722,119 +1692,62 @@ where
         scale_max,
         rounding_error_mean,
         rounding_error_sd,
-    );
+    )?;
+    let n_usize = ctx.n;
+    let combinations = generate_initial_combinations(ctx.scale_range(), ctx.seed_depth());
 
-    // Generate initial combinations at configurable depth
-    let depth = 2;
-    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
+    let k = ctx.scale_range();
 
     // Process combinations in parallel with optional early termination.
-    // Every branch returns count vectors, one per valid sample.
-    let results: Vec<Vec<u32>> = if let Some(limit) = stop_after {
-        // Fast path for small limits: use sequential processing to avoid parallel overhead
-        if limit <= 100 {
-            let mut found = Vec::with_capacity(limit);
-            for (combo, running_sum, running_m2) in combinations {
-                if found.len() >= limit {
+    // Every branch returns a flat row-major buffer of count vectors, one row
+    // per valid sample.
+    let branches: Vec<Vec<u32>> = match stop_after {
+        // Small limits run sequentially: the parallel overhead outweighs the
+        // work of finding a handful of samples.
+        Some(limit) if limit <= 100 => {
+            let mut found = Vec::with_capacity(limit * k);
+            for combo in &combinations {
+                let have = found.len() / k;
+                if have >= limit {
                     break;
                 }
-
-                let remaining = limit - found.len();
-                let branch_results = closure_branch(
-                    &combo,
-                    running_sum,
-                    running_m2,
-                    n_usize,
-                    target_sum_upper,
-                    target_sum_lower,
-                    sd_upper,
-                    sd_lower,
-                    &min_scale_sum,
-                    &scale_max_sum,
-                    n_minus_1,
-                    scale_max_plus_1,
-                    scale_min,
-                    Some(remaining), // Pass the remaining count for early exit
-                );
-
-                found.extend(branch_results);
+                found.extend(closure_branch(combo, &ctx, Some(limit - have)));
             }
-            found
-        } else {
-            // Parallel path for larger limits
-            use std::sync::atomic::{AtomicUsize, Ordering};
-            use std::sync::Arc;
-
-            let found_count = Arc::new(AtomicUsize::new(0));
-
+            vec![found]
+        }
+        Some(limit) => {
+            // Branches stop early once the shared count passes the limit, but
+            // several can still overshoot it together; the truncation below
+            // makes `stop_after` an exact upper bound.
+            let found_count = AtomicUsize::new(0);
             combinations
                 .par_iter()
-                .flat_map(|(combo, running_sum, running_m2)| {
-                    // Check if we've already found enough samples
-                    if found_count.load(Ordering::Relaxed) >= limit {
-                        return Vec::new();
-                    }
-
-                    // Calculate how many more results we need
+                .map(|combo| {
                     let current = found_count.load(Ordering::Relaxed);
-                    let remaining = if current >= limit {
+                    if current >= limit {
                         return Vec::new();
-                    } else {
-                        limit - current
-                    };
-
-                    let branch_results = closure_branch(
-                        combo,
-                        *running_sum,
-                        *running_m2,
-                        n_usize,
-                        target_sum_upper,
-                        target_sum_lower,
-                        sd_upper,
-                        sd_lower,
-                        &min_scale_sum,
-                        &scale_max_sum,
-                        n_minus_1,
-                        scale_max_plus_1,
-                        scale_min,
-                        Some(remaining), // Pass remaining count for early exit
-                    );
-
-                    // Update counter
-                    if !branch_results.is_empty() {
-                        found_count.fetch_add(branch_results.len(), Ordering::Relaxed);
                     }
-
+                    let branch_results = closure_branch(combo, &ctx, Some(limit - current));
+                    found_count.fetch_add(branch_results.len() / k, Ordering::Relaxed);
                     branch_results
                 })
                 .collect()
         }
-    } else {
-        combinations
+        None => combinations
             .par_iter()
-            .flat_map(|(combo, running_sum, running_m2)| {
-                closure_branch(
-                    combo,
-                    *running_sum,
-                    *running_m2,
-                    n_usize,
-                    target_sum_upper,
-                    target_sum_lower,
-                    sd_upper,
-                    sd_lower,
-                    &min_scale_sum,
-                    &scale_max_sum,
-                    n_minus_1,
-                    scale_max_plus_1,
-                    scale_min,
-                    None, // No limit for unlimited search
-                )
-            })
-            .collect()
+            .map(|combo| closure_branch(combo, &ctx, None))
+            .collect(),
     };
+    let mut results = Vec::with_capacity(branches.iter().map(Vec::len).sum());
+    for branch in branches {
+        results.extend_from_slice(&branch);
+    }
+    if let Some(limit) = stop_after {
+        results.truncate(limit * k);
+    }
 
     // Calculate all statistics
-    let counts = SampleCounts::from_rows(
+    let counts = SampleCounts::from_flat(
         <Closure as SampleFormat<U>>::value_grid(scale_min, scale_max, items),
         n_usize,
         results,
@@ -1978,6 +1891,45 @@ impl StreamingFrequencyState {
             shapes: ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE),
             k,
             n,
+        }
+    }
+
+    /// Fold another state over the same grid into this one, so branches can
+    /// accumulate locally and take the shared lock once.
+    pub(crate) fn merge(&mut self, other: Self) {
+        debug_assert_eq!((self.k, self.n), (other.k, other.n));
+        for (a, b) in self.all_freq.iter_mut().zip(other.all_freq) {
+            *a += b;
+        }
+        for (a, b) in self.freq_dist.iter_mut().zip(other.freq_dist) {
+            *a += b;
+        }
+        self.shapes.merge(other.shapes);
+
+        // The same tie rule as `update`, applied to a whole group at once.
+        if other.min_count > 0 {
+            if (other.current_min_horns - self.current_min_horns).abs() < 1e-10 {
+                for (a, b) in self.min_freq.iter_mut().zip(other.min_freq) {
+                    *a += b;
+                }
+                self.min_count += other.min_count;
+            } else if other.current_min_horns < self.current_min_horns {
+                self.current_min_horns = other.current_min_horns;
+                self.min_freq = other.min_freq;
+                self.min_count = other.min_count;
+            }
+        }
+        if other.max_count > 0 {
+            if (other.current_max_horns - self.current_max_horns).abs() < 1e-10 {
+                for (a, b) in self.max_freq.iter_mut().zip(other.max_freq) {
+                    *a += b;
+                }
+                self.max_count += other.max_count;
+            } else if other.current_max_horns > self.current_max_horns {
+                self.current_max_horns = other.current_max_horns;
+                self.max_freq = other.max_freq;
+                self.max_count = other.max_count;
+            }
         }
     }
 
@@ -2251,7 +2203,7 @@ pub(crate) fn write_streaming_statistics(
     };
 
     let mut horns_sorted = all_horns.to_vec();
-    horns_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    horns_sorted.par_sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let horns_min = horns_sorted[0];
     let horns_max = horns_sorted[samples_all - 1];
     let horns_median = median(&horns_sorted);
@@ -2394,17 +2346,7 @@ where
             "CLOSURE requires items == 1".to_string(),
         ));
     }
-    let ClosureSearchContext {
-        target_sum_upper,
-        target_sum_lower,
-        sd_upper,
-        sd_lower,
-        n_usize,
-        min_scale_sum,
-        scale_max_sum,
-        n_minus_1,
-        scale_max_plus_1,
-    } = initialize_closure_search(
+    let ctx = ClosureSearchContext::new(
         mean,
         sd,
         n,
@@ -2412,7 +2354,8 @@ where
         scale_max,
         rounding_error_mean,
         rounding_error_sd,
-    );
+    )?;
+    let n_usize = ctx.n;
 
     // Setup channels for streaming results
     let (tx_results, rx_results) = channel::<Vec<(Vec<u32>, f64)>>();
@@ -2429,12 +2372,8 @@ where
 
     // Counter for tracking progress through initial combinations
     let initial_combo_counter = Arc::new(AtomicUsize::new(0));
-    let depth = 2;
-    let initial_combo_total = count_initial_combinations(
-        U::to_i32(&scale_min).unwrap(),
-        U::to_i32(&scale_max).unwrap(),
-        depth,
-    ) as usize;
+    let combinations = generate_initial_combinations(ctx.scale_range(), ctx.seed_depth());
+    let initial_combo_total = combinations.len();
 
     // The value grid every result in this run is indexed on.
     let grid = <Closure as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
@@ -2488,10 +2427,6 @@ where
         (all_horns, freq_state_for_stats)
     });
 
-    // Generate initial combinations at configurable depth
-    let depth = 2;
-    let combinations = generate_initial_combinations(scale_min, scale_max_plus_1, depth);
-
     // Fast path for small stop_after limits: use sequential processing
     if let Some(limit) = stop_after {
         if limit <= 100 {
@@ -2499,30 +2434,14 @@ where
             let mut freqs: Vec<f64> = Vec::with_capacity(grid_len);
             let mut found_count = 0;
 
-            for (combo, running_sum, running_m2) in combinations {
+            for combo in &combinations {
                 if found_count >= limit {
                     break;
                 }
 
-                let remaining = limit - found_count;
-                let branch_results = closure_branch(
-                    &combo,
-                    running_sum,
-                    running_m2,
-                    n_usize,
-                    target_sum_upper,
-                    target_sum_lower,
-                    sd_upper,
-                    sd_lower,
-                    &min_scale_sum,
-                    &scale_max_sum,
-                    n_minus_1,
-                    scale_max_plus_1,
-                    scale_min,
-                    Some(remaining), // Pass remaining count for early exit
-                );
+                let branch_results = closure_branch(combo, &ctx, Some(limit - found_count));
 
-                for counts in branch_results.into_iter() {
+                for counts in branch_results.chunks_exact(grid_len) {
                     if found_count >= limit {
                         break;
                     }
@@ -2533,10 +2452,10 @@ where
                     freqs.extend(counts.iter().map(|&c| c as f64));
                     let horns = horns_from_counts(&freqs);
 
-                    freq_state_for_thread.lock().unwrap().update(&counts, horns);
+                    freq_state_for_thread.lock().unwrap().update(counts, horns);
 
                     // Send to writer and stats
-                    if tx_results.send(vec![(counts, horns)]).is_ok() {
+                    if tx_results.send(vec![(counts.to_vec(), horns)]).is_ok() {
                         let _ = tx_stats.send((vec![horns], HashMap::new()));
                     }
 
@@ -2572,108 +2491,83 @@ where
     }
 
     // Process combinations in parallel (original path for unlimited or large limits)
-    combinations
-        .par_iter()
-        .for_each(|(combo, running_sum, running_m2)| {
-            // Check if writer has failed before doing expensive computation
-            if writer_failed_for_compute.load(Ordering::Relaxed) == 1 {
+    combinations.par_iter().for_each(|combo| {
+        // Check if writer has failed before doing expensive computation
+        if writer_failed_for_compute.load(Ordering::Relaxed) == 1 {
+            return;
+        }
+
+        // Check if we've reached the stop_after limit
+        if let Some(limit) = stop_after {
+            if counter_for_thread.load(Ordering::Relaxed) >= limit {
                 return;
             }
+        }
 
-            // Check if we've reached the stop_after limit
-            if let Some(limit) = stop_after {
-                if counter_for_thread.load(Ordering::Relaxed) >= limit {
-                    return;
-                }
-            }
-
-            // Track progress through initial combinations
-            let current_initial = initial_combo_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if config.show_progress && current_initial.is_multiple_of(10) {
-                let percentage = (current_initial as f64 / initial_combo_total as f64) * 100.0;
-                eprintln!(
-                    "Progress: {:.1}% of initial combinations explored...",
-                    percentage
-                );
-            }
-
-            // Calculate how many more results we need
-            let remaining = if let Some(limit) = stop_after {
-                let current = counter_for_thread.load(Ordering::Relaxed);
-                if current >= limit {
-                    return; // Already have enough
-                }
-                Some(limit - current)
-            } else {
-                None
-            };
-
-            let branch_results = closure_branch(
-                combo,
-                *running_sum,
-                *running_m2,
-                n_usize,
-                target_sum_upper,
-                target_sum_lower,
-                sd_upper,
-                sd_lower,
-                &min_scale_sum,
-                &scale_max_sum,
-                n_minus_1,
-                scale_max_plus_1,
-                scale_min,
-                remaining, // Pass remaining count for early exit
+        // Track progress through initial combinations
+        let current_initial = initial_combo_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if config.show_progress && current_initial.is_multiple_of(10) {
+            let percentage = (current_initial as f64 / initial_combo_total as f64) * 100.0;
+            eprintln!(
+                "Progress: {:.1}% of initial combinations explored...",
+                percentage
             );
+        }
 
-            if !branch_results.is_empty() {
-                // Check again before processing results
-                if writer_failed_for_compute.load(Ordering::Relaxed) == 1 {
-                    return;
-                }
-
-                let mut results_with_horns = Vec::with_capacity(branch_results.len());
-                let mut horns_batch = Vec::with_capacity(branch_results.len());
-                let mut freqs: Vec<f64> = Vec::with_capacity(grid_len);
-
-                // Calculate horns for each sample and update frequency state
-                for counts in branch_results.into_iter() {
-                    // The counts vector already is the frequency vector.
-                    freqs.clear();
-                    freqs.extend(counts.iter().map(|&c| c as f64));
-                    let horns = horns_from_counts(&freqs);
-
-                    freq_state_for_thread.lock().unwrap().update(&counts, horns);
-
-                    horns_batch.push(horns);
-                    results_with_horns.push((counts, horns));
-                }
-
-                // Update counter and potentially truncate results if we exceed limit
-                let current_count =
-                    counter_for_thread.fetch_add(results_with_horns.len(), Ordering::Relaxed);
-
-                // Truncate results if we've exceeded the stop_after limit
-                let final_results = if let Some(limit) = stop_after {
-                    if current_count >= limit {
-                        return; // We already have enough
-                    } else if current_count + results_with_horns.len() > limit {
-                        // Take only what we need to reach the limit
-                        let take_count = limit - current_count;
-                        results_with_horns.into_iter().take(take_count).collect()
-                    } else {
-                        results_with_horns
-                    }
-                } else {
-                    results_with_horns
-                };
-
-                // Send to writer and stats collector
-                if tx_results.send(final_results).is_err() {
-                    // Channel is closed, writer must have failed
-                }
-                let _ = tx_stats.send((horns_batch, HashMap::new()));
+        // Calculate how many more results we need
+        let remaining = if let Some(limit) = stop_after {
+            let current = counter_for_thread.load(Ordering::Relaxed);
+            if current >= limit {
+                return; // Already have enough
             }
-        });
+            Some(limit - current)
+        } else {
+            None
+        };
+
+        let mut branch_results = closure_branch(combo, &ctx, remaining);
+        if branch_results.is_empty() || writer_failed_for_compute.load(Ordering::Relaxed) == 1 {
+            return;
+        }
+
+        // Claim this branch's share of the limit before touching any
+        // statistics, so the running statistics only ever see samples
+        // that are also written.
+        let found = branch_results.len() / grid_len;
+        let current_count = counter_for_thread.fetch_add(found, Ordering::Relaxed);
+        if let Some(limit) = stop_after {
+            if current_count >= limit {
+                return;
+            }
+            branch_results.truncate((limit - current_count).min(found) * grid_len);
+        }
+
+        let mut freqs: Vec<f64> = Vec::with_capacity(grid_len);
+        let results_with_horns: Vec<(Vec<u32>, f64)> = branch_results
+            .chunks_exact(grid_len)
+            .map(|counts| {
+                // The counts vector already is the frequency vector.
+                freqs.clear();
+                freqs.extend(counts.iter().map(|&c| c as f64));
+                let horns = horns_from_counts(&freqs);
+                (counts.to_vec(), horns)
+            })
+            .collect();
+        let horns_batch: Vec<f64> = results_with_horns.iter().map(|(_, h)| *h).collect();
+
+        // Accumulate locally and take the shared lock once per branch; the
+        // per-sample shape classification is the expensive part.
+        let mut local = StreamingFrequencyState::new(grid_len, n_usize);
+        for (counts, horns) in &results_with_horns {
+            local.update(counts, *horns);
+        }
+        freq_state_for_thread.lock().unwrap().merge(local);
+
+        // A closed channel means the writer failed; it has already
+        // reported that.
+        let _ = tx_results.send(results_with_horns);
+        let _ = tx_stats.send((horns_batch, HashMap::new()));
+    });
 
     // Close channels
     drop(tx_results);
@@ -2690,16 +2584,8 @@ where
         (Vec::new(), freq_state)
     });
 
-    // Check if we successfully wrote any results
-    if total_written == 0 {
-        eprintln!("\nERROR: No results were written to disk.");
-        return Ok(StreamingResult {
-            total_combinations: 0,
-            file_path: config.file_path,
-        });
-    }
-
-    // Write statistics files
+    // Written even when nothing was found, so a reader always finds a
+    // complete result set, as the sequential path above already guarantees.
     write_streaming_statistics(
         &base_path,
         &all_horns,
@@ -2715,193 +2601,107 @@ where
     })
 }
 
-/// Immutable context for the recursive closure search, precomputed once per branch.
+/// Collect every valid sample that extends one seed combination.
 ///
-/// Bundles lookup tables and thresholds to avoid recomputing them at every node
-/// and to keep the recursive function's parameter list manageable.
-struct ClosureBranchCtx<T, U> {
-    n: usize,
-    target_sum_upper: T,
-    target_sum_lower: T,
-    m2_upper_threshold: T,        // sd_upper² * (n-1)
-    m2_lower_threshold: T,        // sd_lower² * (n-1)
-    min_scale_sum_t: Vec<Vec<T>>, // Borrowed from caller via clone-free ref would be ideal,
-    scale_max_sum_t: Vec<T>,      // but we just store refs below
-    limit: usize,
-    /// Float value for each scale index: value_as_t[i] = T::from(scale_min + i)
-    value_as_t: Vec<T>,
-    /// Reciprocal table: inv_len[k] = 1.0 / k for k=1..=n (inv_len[0] is unused)
-    inv_len: Vec<T>,
-    /// Ties the context to the integer type the search was parameterised with.
-    _marker: PhantomData<U>,
-}
-
-// Collect all valid combinations from a starting point.
-//
-// Combinations are carried as a count per scale value rather than as an
-// expanded list of values. The DFS only ever appends values in non-decreasing
-// order, so the two encode the same thing; counts just make that explicit and
-// shrink the clone at every emitted leaf from `n` values to `k`.
-//
-// Uses recursive backtracking with a single reusable counts array (increment on
-// entry, decrement on exit) to avoid heap-allocating at every search tree node.
-// SD checks use squared comparisons (M2 vs threshold) to avoid sqrt() per node.
-// All generic conversions (T::from, U::to_usize) are precomputed into lookup
-// tables so the hot loop uses only array indexing and floating-point arithmetic.
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn closure_branch<T, U>(
-    start_combination: &[U],
-    running_sum_init: T,
-    running_m2_init: T,
-    n: usize, // Use usize for the length
-    target_sum_upper: T,
-    target_sum_lower: T,
-    sd_upper: T,
-    sd_lower: T,
-    min_scale_sum_t: &[Vec<T>], // Now 2D array
-    scale_max_sum_t: &[T],
-    _n_minus_1: U,
-    scale_max_plus_1: U,
-    scale_min: U,              // Need this to calculate indices
-    stop_after: Option<usize>, // Optional limit for early termination
-) -> Vec<Vec<u32>>
-where
-    T: FloatType,
-    U: IntegerType,
-{
+/// Samples are carried as a count per scale value rather than as an expanded
+/// list of values. The DFS only ever appends values in non-decreasing order, so
+/// the two encode the same thing; counts just make that explicit and shrink the
+/// clone at every emitted leaf from `n` values to `k`.
+///
+/// The search is exact: it tracks an integer running sum and sum of squares and
+/// compares them against the integer thresholds in [`ClosureSearchContext`],
+/// so no floating-point error accumulates along a branch.
+fn closure_branch(
+    seed: &[usize],
+    ctx: &ClosureSearchContext,
+    stop_after: Option<usize>,
+) -> Vec<u32> {
     let mut results = Vec::new();
-    let limit = stop_after.unwrap_or(usize::MAX);
-
-    // Precompute squared SD thresholds to avoid sqrt() in the hot loop.
-    let n_minus_1_float = T::from(n - 1).unwrap();
-    // When sd_lower <= 0, the original check sqrt(m2/(n-1)) >= sd_lower is trivially
-    // true (sqrt is non-negative). Set threshold to zero so m2 >= 0 always passes.
-    let m2_lower_threshold = if sd_lower <= T::zero() {
-        T::zero()
-    } else {
-        sd_lower * sd_lower * n_minus_1_float
-    };
-    let m2_upper_threshold = sd_upper * sd_upper * n_minus_1_float;
-
-    // Precompute scale value lookup table (eliminates T::from / U arithmetic per iteration)
-    let scale_range = min_scale_sum_t.len();
-    let mut value_as_t = Vec::with_capacity(scale_range);
-    for v in range_u(scale_min, scale_max_plus_1) {
-        value_as_t.push(T::from(v).unwrap());
+    let mut counts = vec![0u32; ctx.scale_range()];
+    let mut sum = 0i64;
+    let mut ssq = 0i64;
+    for &idx in seed {
+        counts[idx] += 1;
+        let v = ctx.scale_min + idx as i64;
+        sum += v;
+        ssq += v * v;
     }
-
-    // Precompute reciprocal table: inv_len[k] = 1/k (eliminates division per node)
-    let mut inv_len = Vec::with_capacity(n + 1);
-    inv_len.push(T::zero()); // inv_len[0] unused
-    for k in 1..=n {
-        inv_len.push(T::one() / T::from(k).unwrap());
-    }
-
-    // Tabulate the seed combination and take the starting min_value_idx from
-    // its last (i.e. largest) element.
-    let mut counts = vec![0u32; scale_range];
-    for &value in start_combination {
-        counts[U::to_usize(&(value - scale_min)).unwrap()] += 1;
-    }
-    let last_value = start_combination[start_combination.len() - 1];
-    let min_value_idx = U::to_usize(&(last_value - scale_min)).unwrap();
-
-    let ctx = ClosureBranchCtx {
-        n,
-        target_sum_upper,
-        target_sum_lower,
-        m2_upper_threshold,
-        m2_lower_threshold,
-        min_scale_sum_t: min_scale_sum_t.to_vec(),
-        scale_max_sum_t: scale_max_sum_t.to_vec(),
-        limit,
-        value_as_t,
-        inv_len,
-        _marker: PhantomData::<U>,
-    };
-
+    let min_idx = seed.last().copied().unwrap_or(0);
+    // The limit in buffer elements, so the hot loop compares lengths directly.
+    let limit = stop_after.map_or(usize::MAX, |limit| limit.saturating_mul(counts.len()));
     closure_branch_recurse(
         &mut counts,
-        start_combination.len(),
-        running_sum_init,
-        running_m2_init,
-        min_value_idx,
-        &ctx,
+        seed.len(),
+        sum,
+        ssq,
+        min_idx,
+        ctx,
+        limit,
         &mut results,
     );
-
     results
 }
 
-/// Recursive backtracking core for closure_branch.
+/// Recursive backtracking core for [`closure_branch`].
 ///
-/// Extends the combination one element at a time by incrementing a count on
-/// entry and decrementing it on exit, reusing a single allocation across the
-/// entire search tree. `current_len` tracks how many values the counts stand
-/// for, which the count vector alone would only tell us by summing it.
-/// The inner loop iterates over precomputed usize indices, avoiding all
-/// generic trait conversions (T::from, U::to_usize) in the hot path.
-fn closure_branch_recurse<T, U>(
+/// Extends the sample one value at a time by incrementing a count on entry and
+/// decrementing it on exit, reusing a single allocation across the entire
+/// search tree. `k` is how many values the counts stand for.
+#[allow(clippy::too_many_arguments)]
+fn closure_branch_recurse(
     counts: &mut [u32],
-    current_len: usize,
-    running_sum: T,
-    running_m2: T,
-    min_value_idx: usize, // index into ctx.value_as_t for the minimum next value
-    ctx: &ClosureBranchCtx<T, U>,
-    results: &mut Vec<Vec<u32>>,
-) where
-    T: FloatType,
-    U: IntegerType,
-{
-    // Terminal: combination is complete
-    if current_len >= ctx.n {
-        // Check SD lower bound: m2 >= sd_lower² * (n-1), no sqrt needed
-        if running_m2 >= ctx.m2_lower_threshold {
-            results.push(counts.to_vec()); // Only clone when emitting a result
+    k: usize,
+    sum: i64,
+    ssq: i64,
+    min_idx: usize,
+    ctx: &ClosureSearchContext,
+    limit: usize,
+    results: &mut Vec<u32>,
+) {
+    if k >= ctx.n {
+        // Every bound is checked here rather than relying on the pruning
+        // below, which a seed as long as `n` never passes through.
+        let m2n = ctx.n as i64 * ssq - sum * sum;
+        if sum >= ctx.sum_lo && sum <= ctx.sum_hi && m2n >= ctx.m2n_lo && m2n <= ctx.m2_hi[ctx.n] {
+            results.extend_from_slice(counts);
         }
         return;
     }
 
-    let n_left = ctx.n - current_len - 1;
-    let next_n = current_len + 1;
-    let current_mean = running_sum * ctx.inv_len[current_len];
-    let inv_next_n = ctx.inv_len[next_n];
-    let scale_range = ctx.value_as_t.len();
+    let n_left = (ctx.n - k - 1) as i64;
+    let next_k = (k + 1) as i64;
+    let m2_hi = ctx.m2_hi[k + 1];
 
-    for vi in min_value_idx..scale_range {
-        let next_value_as_t = ctx.value_as_t[vi];
-        let next_sum = running_sum + next_value_as_t;
+    for idx in min_idx..counts.len() {
+        let v = ctx.scale_min + idx as i64;
+        let next_sum = sum + v;
 
-        // vi is already the value_index for min_scale_sum_t
-        let minmean = next_sum + ctx.min_scale_sum_t[vi][n_left];
-        if minmean > ctx.target_sum_upper {
+        // Remaining values are at least `v`, so the smallest reachable sum
+        // only grows from here.
+        if next_sum + v * n_left > ctx.sum_hi {
             break;
         }
-
-        let maxmean = next_sum + ctx.scale_max_sum_t[n_left];
-        if maxmean < ctx.target_sum_lower {
+        if next_sum + ctx.scale_max * n_left < ctx.sum_lo {
             continue;
         }
 
-        let next_mean = next_sum * inv_next_n;
-        let delta = next_value_as_t - current_mean;
-        let delta2 = next_value_as_t - next_mean;
-        let next_m2 = running_m2 + delta * delta2;
-
-        // SD upper bound pruning: m2 <= sd_upper² * (n-1), no sqrt needed
-        if next_m2 <= ctx.m2_upper_threshold {
-            counts[vi] += 1;
-            closure_branch_recurse(
-                counts, next_n, next_sum, next_m2, vi, // next value must be >= this value
-                ctx, results,
-            );
-            counts[vi] -= 1;
-
-            // Early exit if we've hit the limit
-            if results.len() >= ctx.limit {
-                return;
+        let next_ssq = ssq + v * v;
+        if next_k * next_ssq - next_sum * next_sum > m2_hi {
+            // The partial M2 is a parabola in `v` with its minimum at the
+            // running mean, so once `v` is past the mean every larger value
+            // overshoots too.
+            if v * k as i64 >= sum {
+                break;
             }
+            continue;
+        }
+
+        counts[idx] += 1;
+        closure_branch_recurse(counts, k + 1, next_sum, next_ssq, idx, ctx, limit, results);
+        counts[idx] -= 1;
+
+        if results.len() >= limit {
+            return;
         }
     }
 }

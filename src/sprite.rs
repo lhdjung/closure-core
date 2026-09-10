@@ -1,7 +1,6 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
-use crate::utils::{is_near, round_f64};
 use crate::{
     counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
     ResultListFromMeanSdN, SampleCounts, SampleFormat, StreamingConfig, StreamingFrequencyState,
@@ -38,12 +37,11 @@ where
     mean: T,
     sd: T,
     n: U, // Changed from n_obs: u32 to match CLOSURE
-    #[allow(dead_code)] // Stored for potential future use/debugging
-    rounding_error_mean: T, // New: tolerance for mean
-    #[allow(dead_code)] // Stored for potential future use/debugging
-    rounding_error_sd: T, // New: tolerance for SD
-    m_prec: i32, // Internal: inferred from rounding_error_mean
-    sd_prec: i32, // Internal: inferred from rounding_error_sd
+    /// Half-width of the accepted interval around `mean`, inclusive, plus a
+    /// float slack: the same semantics CLOSURE gives `rounding_error_mean`.
+    mean_tolerance: f64,
+    /// Likewise for `sd`.
+    sd_tolerance: f64,
     /// Scale factor used to convert floating-point values to integers
     scale_factor: u32,
     /// Scaled possible values (integers)
@@ -128,9 +126,16 @@ where
         ));
     }
 
-    // Derive precision and scale factor from rounding errors
-    let m_prec = precision_from_rounding_error(rounding_error_mean);
-    let sd_prec = precision_from_rounding_error(rounding_error_sd);
+    // The rounding errors are the acceptance tolerances; the internal grid
+    // resolution is only derived from them.
+    let re_mean = T::to_f64(&rounding_error_mean).unwrap_or(f64::NAN);
+    let re_sd = T::to_f64(&rounding_error_sd).unwrap_or(f64::NAN);
+    let sd_f64 = T::to_f64(&sd).unwrap_or(f64::NAN);
+    if !(re_mean >= 0.0 && re_sd >= 0.0 && sd_f64 >= 0.0) {
+        return Err(ParameterError::InputValidation(
+            "sd and the rounding errors must be finite and not negative".to_string(),
+        ));
+    }
     let scale_factor = scale_factor_from_rounding_errors(rounding_error_mean, rounding_error_sd);
 
     // Check mean is in range
@@ -245,6 +250,17 @@ where
         .collect();
 
     let n_fixed = fixed_responses_scaled.len();
+    let n_usize = U::to_usize(&n).unwrap_or(0);
+    if n_usize < 2 {
+        return Err(ParameterError::InputValidation(
+            "n must be at least 2".to_string(),
+        ));
+    }
+    if n_fixed > n_usize {
+        return Err(ParameterError::InputValidation(format!(
+            "The restrictions fix {n_fixed} responses, but n is only {n_usize}"
+        )));
+    }
 
     let value_to_index: HashMap<i64, usize> = final_possible_values_scaled
         .iter()
@@ -255,11 +271,9 @@ where
     Ok(SpriteParams {
         mean,
         sd,
-        n,                   // Changed from n_obs
-        rounding_error_mean, // New field
-        rounding_error_sd,   // New field
-        m_prec,              // Kept internal
-        sd_prec,             // Kept internal
+        n, // Changed from n_obs
+        mean_tolerance: re_mean + DUST,
+        sd_tolerance: re_sd + DUST,
         scale_factor,
         possible_values_scaled: final_possible_values_scaled,
         fixed_responses_scaled,
@@ -351,8 +365,9 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 /// * `n` - The number of observations (generic integer type)
 /// * `scale_min` - The minimum value on the scale (generic integer type)
 /// * `scale_max` - The maximum value on the scale (generic integer type)
-/// * `rounding_error_mean` - Tolerance for mean (replaces m_prec)
-/// * `rounding_error_sd` - Tolerance for SD (replaces sd_prec)
+/// * `rounding_error_mean` - A sample is accepted when its mean is within this
+///   distance of `mean`, inclusive — the same rule CLOSURE applies
+/// * `rounding_error_sd` - Likewise for the sample SD
 /// * `items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
@@ -468,8 +483,9 @@ where
 /// * `n` - The number of observations (generic integer type)
 /// * `scale_min` - The minimum value on the scale (generic integer type)
 /// * `scale_max` - The maximum value on the scale (generic integer type)
-/// * `rounding_error_mean` - Tolerance for mean (replaces m_prec)
-/// * `rounding_error_sd` - Tolerance for SD (replaces sd_prec)
+/// * `rounding_error_mean` - A sample is accepted when its mean is within this
+///   distance of `mean`, inclusive — the same rule CLOSURE applies
+/// * `rounding_error_sd` - Likewise for the sample SD
 /// * `items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
 /// * `restrictions_minimum` - Optional minimum count requirements for specific values
@@ -606,16 +622,9 @@ where
         (Vec::new(), freq_state)
     });
 
-    if total_written == 0 {
-        eprintln!("\nERROR: No results were written to disk.");
-        return Ok(StreamingResult {
-            total_combinations: 0,
-            file_path: config.file_path,
-        });
-    }
-
-    // Write statistics files
-    // SPRITE never enumerates the space exhaustively.
+    // Write statistics files, even when nothing was found, so a reader always
+    // finds a complete result set. SPRITE never enumerates the space
+    // exhaustively.
     write_streaming_statistics(
         &base_path,
         &all_horns,
@@ -960,8 +969,7 @@ where
 
     let max_loops_sd =
         (n_u32 * (pv.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
-    let granule_sd = T::from(0.1f64).unwrap().powi(params.sd_prec) / T::from(2.0).unwrap()
-        + T::from(DUST).unwrap();
+    let sd_tolerance = T::from(params.sd_tolerance).unwrap();
 
     // Precompute fixed-part sums (constant for the lifetime of this attempt)
     let fixed_sum: i64 = params
@@ -988,10 +996,6 @@ where
         })
         .sum();
 
-    // Hoisted constant: target mean rounded to reporting precision
-    let target_mean_rounded =
-        T::from(round_f64(T::to_f64(&params.mean).unwrap(), params.m_prec)).unwrap();
-
     for _ in 1..=max_loops_sd {
         // Check for success (O(1) using running sums)
         let current_sd: T = T::from(sd_from_running(
@@ -1002,7 +1006,7 @@ where
         ))
         .unwrap();
 
-        if (current_sd - params.sd).abs() <= granule_sd {
+        if (current_sd - params.sd).abs() <= sd_tolerance {
             // Success - combine vec with fixed responses
             let mut full_vec = vec;
             full_vec.extend_from_slice(&params.fixed_responses_scaled);
@@ -1023,13 +1027,7 @@ where
         // Check for and correct mean drift (O(1) using running sum)
         let current_mean_f64 =
             mean_from_running(running_sum + fixed_sum, n_usize, params.scale_factor);
-        let current_mean_rounded = T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
-
-        if !is_near(
-            T::to_f64(&current_mean_rounded).unwrap(),
-            T::to_f64(&target_mean_rounded).unwrap(),
-            DUST,
-        ) {
+        if (current_mean_f64 - mean_f64).abs() > params.mean_tolerance {
             adjust_mean_internal(&mut vec, params, 20, rng).unwrap_or(());
             // Re-sync: adjust_mean modified vec (rare path, O(n) is acceptable here)
             running_sum = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
@@ -1073,20 +1071,12 @@ where
     let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
     let n_total = vec.len() + params.fixed_responses_scaled.len();
 
-    // Hoist constant: target mean rounded to reporting precision
-    let target_mean_rounded =
-        T::from(round_f64(T::to_f64(&target_mean).unwrap(), params.m_prec)).unwrap();
+    let target_mean_f64 = T::to_f64(&target_mean).unwrap();
 
     for _ in 0..max_iter {
         let current_mean_f64 =
             mean_from_running(running_sum + fixed_sum, n_total, params.scale_factor);
-        let current_mean_rounded = T::from(round_f64(current_mean_f64, params.m_prec)).unwrap();
-
-        if is_near(
-            T::to_f64(&current_mean_rounded).unwrap(),
-            T::to_f64(&target_mean_rounded).unwrap(),
-            DUST,
-        ) {
+        if (current_mean_f64 - target_mean_f64).abs() <= params.mean_tolerance {
             return Ok(());
         }
 
@@ -1428,6 +1418,15 @@ pub mod tests {
     use super::*;
     use crate::OutputFormat;
 
+    /// The acceptance rule, as a test would state it: inclusive, with the
+    /// same float slack the search uses.
+    fn assert_within(actual: f64, target: f64, tolerance: f64, what: &str) {
+        assert!(
+            (actual - target).abs() <= tolerance + DUST,
+            "{what} {actual} is not within {tolerance} of {target}"
+        );
+    }
+
     /// Helper to convert scaled integers to floats
     fn unscale_distribution(scaled_values: &[i32], scale_factor: u32) -> Vec<f64> {
         scaled_values
@@ -1458,7 +1457,7 @@ pub mod tests {
         // Results are in 100x scale (standard for CLOSURE/SPRITE statistics)
         let first_dist = unscale_distribution(&results.results.sample(0), 100);
         let computed_mean = mean(&first_dist);
-        assert_eq!(round_f64(computed_mean, 1), 2.2);
+        assert_within(computed_mean, 2.2, 0.05, "mean");
     }
 
     #[test]
@@ -1485,7 +1484,7 @@ pub mod tests {
             let dist_scaled = &results.results.sample(i);
             let dist = unscale_distribution(dist_scaled, 100);
             let computed_sd = std_dev(&dist).unwrap();
-            assert_eq!(round_f64(computed_sd, 1), 1.3);
+            assert_within(computed_sd, 1.3, 0.05, "sd");
         }
     }
 
@@ -1539,11 +1538,8 @@ pub mod tests {
             let dist = unscale_distribution(dist_scaled, scale_factor);
             let computed_mean = mean(&dist);
             let computed_sd = std_dev(&dist).unwrap();
-            let rounded_mean = round_f64(computed_mean, test_mean_digits);
-            let rounded_sd = round_f64(computed_sd, test_sd_digits);
-
-            assert_eq!(rounded_mean, test_mean);
-            assert_eq!(rounded_sd, test_sd);
+            assert_within(computed_mean, test_mean, rounding_error_mean, "mean");
+            assert_within(computed_sd, test_sd, rounding_error_sd, "sd");
         }
     }
 
@@ -1797,8 +1793,8 @@ pub mod tests {
         for i in 0..results.results.len() {
             let dist_scaled = &results.results.sample(i);
             let dist = unscale_distribution(dist_scaled, 100);
-            assert_eq!(round_f64(mean(&dist), 1), 3.0);
-            assert_eq!(round_f64(std_dev(&dist).unwrap(), 1), 1.0);
+            assert_within(mean(&dist), 3.0, 0.05, "mean");
+            assert_within(std_dev(&dist).unwrap(), 1.0, 0.05, "sd");
         }
 
         // SPRITE should find at least 100 distributions (above the old LP floor of 99).

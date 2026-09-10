@@ -315,6 +315,20 @@ impl SampleCounts {
         Self { grid, n, data }
     }
 
+    /// Build a table from a flat row-major count buffer.
+    ///
+    /// # Panics
+    /// Panics if the buffer's length is not a multiple of the grid width.
+    pub fn from_flat(grid: ValueGrid, n: usize, data: Vec<u32>) -> Self {
+        assert!(
+            data.len().is_multiple_of(grid.len().max(1)),
+            "can't build SampleCounts: buffer length ({}) isn't a multiple of grid width ({})",
+            data.len(),
+            grid.len()
+        );
+        Self { grid, n, data }
+    }
+
     /// Append an already-tabulated row.
     ///
     /// # Panics
@@ -906,6 +920,15 @@ pub trait SampleFormat<U: IntegerType> {
     {
         let counts = &results.results.counts;
         let batch_size = config.batch_size.max(1);
+        // The streaming paths create their directory; memory mode used to
+        // fail every write silently when it was missing.
+        if let Err(e) = std::fs::create_dir_all(base_path) {
+            eprintln!(
+                "ERROR: Could not create output directory '{}': {}",
+                base_path, e
+            );
+            return;
+        }
 
         if config.format.writes_counts() {
             let _ = Self::write_counts(base_path, counts, &results.results.horns, batch_size);

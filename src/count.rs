@@ -4,6 +4,7 @@
 //! without enumerating them, using dynamic programming over frequency
 //! assignments for each scale value.
 
+use crate::SearchBounds;
 use std::collections::HashMap;
 
 /// Count valid sorted combinations that CLOSURE would find.
@@ -44,25 +45,18 @@ pub fn closure_count(
         return 0;
     }
 
+    let n_usize = n as usize;
     let n_i64 = n as i64;
     let n_f64 = n as f64;
 
-    // --- Sum bounds (integer, since scale values are integers) ---
-    let target_sum = mean * n_f64;
-    let sum_tolerance = rounding_error_mean * n_f64;
-    let sum_lower = ((target_sum - sum_tolerance).ceil() as i64).max(n_i64 * scale_min as i64);
-    let sum_upper = ((target_sum + sum_tolerance).floor() as i64).min(n_i64 * scale_max as i64);
+    // The same integer thresholds the DFS in `lib.rs` uses, so the two agree
+    // on every sample by construction.
+    let bounds = SearchBounds::new(mean, sd, n_usize, rounding_error_mean, rounding_error_sd);
+    let sum_lower = bounds.sum_lo.max(n_i64 * scale_min as i64);
+    let sum_upper = bounds.sum_hi.min(n_i64 * scale_max as i64);
     if sum_lower > sum_upper {
         return 0;
     }
-
-    // --- Variance bounds ---
-    // sample_sd = sqrt((sum_sq - sum²/n) / (n-1))
-    // We track var_nm1 = sum_sq - sum²/n = sample_variance * (n-1)
-    let sd_lo = (sd - rounding_error_sd).max(0.0);
-    let sd_hi = sd + rounding_error_sd;
-    let var_nm1_lo = sd_lo * sd_lo * (n_f64 - 1.0);
-    let var_nm1_hi = sd_hi * sd_hi * (n_f64 - 1.0);
 
     // Global sum_sq bounds for pruning (across all valid sums).
     // var_nm1 = sum_sq - sum²/n, so sum_sq = var_nm1 + sum²/n.
@@ -72,12 +66,11 @@ pub fn closure_count(
         (sum_lower.unsigned_abs().min(sum_upper.unsigned_abs())) as f64
     };
     let max_abs_sum = (sum_lower.unsigned_abs().max(sum_upper.unsigned_abs())) as f64;
-    let global_sq_lo = (var_nm1_lo + min_abs_sum * min_abs_sum / n_f64 - 1.0) as i64;
-    let global_sq_hi = (var_nm1_hi + max_abs_sum * max_abs_sum / n_f64 + 1.0) as i64;
+    let global_sq_lo = (bounds.var_nm1_lo + min_abs_sum * min_abs_sum / n_f64 - 1.0) as i64;
+    let global_sq_hi = (bounds.var_nm1_hi + max_abs_sum * max_abs_sum / n_f64 + 1.0) as i64;
 
     // --- DP ---
     let scale_max_i64 = scale_max as i64;
-    let scale_max_sq = scale_max_i64 * scale_max_i64;
 
     // State: (remaining_items, sum, sum_sq) -> count of frequency assignments
     let mut dp: HashMap<(u32, i64, i64), u64> = HashMap::new();
@@ -91,17 +84,22 @@ pub fn closure_count(
         let v_sq = v_i64 * v_i64;
         let is_last = v == scale_max;
         let next_v = (v + 1) as i64;
-        let next_v_sq = next_v * next_v;
+        // Squares of the values still available, `next_v..=scale_max`. With a
+        // negative `next_v` the smallest square is not at `next_v` and the
+        // largest may not be at `scale_max`, so both are taken over the range.
+        let rem_sq_lo = if next_v <= 0 && scale_max_i64 >= 0 {
+            0
+        } else {
+            (next_v * next_v).min(scale_max_i64 * scale_max_i64)
+        };
+        let rem_sq_hi = (next_v * next_v).max(scale_max_i64 * scale_max_i64);
 
         let mut next_dp: HashMap<(u32, i64, i64), u64> = HashMap::with_capacity(dp.len());
 
         for (&(remaining, sum, sum_sq), &count) in &dp {
             if remaining == 0 {
                 // Complete state; check constraints and accumulate
-                accumulate_if_valid(
-                    &mut total, count, sum, sum_sq, n_i64, n_f64, sum_lower, sum_upper, var_nm1_lo,
-                    var_nm1_hi,
-                );
+                accumulate_if_valid(&mut total, count, sum, sum_sq, n_i64, &bounds);
                 continue; // Don't propagate — it would just pass through unchanged
             }
 
@@ -138,12 +136,18 @@ pub fn closure_count(
                         continue; // Larger f will decrease min_total_sum
                     }
 
-                    // Sum-of-squares pruning (same monotonicity as sum pruning)
-                    let max_total_sq = new_sq + nr * scale_max_sq;
+                    // Sum-of-squares pruning. Monotone in f only when v² is
+                    // no larger than the remaining squares, i.e. for v >= 0;
+                    // otherwise a larger f can still be feasible, so skip
+                    // rather than stop.
+                    let max_total_sq = new_sq + nr * rem_sq_hi;
                     if max_total_sq < global_sq_lo {
-                        break;
+                        if v >= 0 {
+                            break;
+                        }
+                        continue;
                     }
-                    let min_total_sq = new_sq + nr * next_v_sq;
+                    let min_total_sq = new_sq + nr * rem_sq_lo;
                     if min_total_sq > global_sq_hi {
                         continue;
                     }
@@ -165,10 +169,7 @@ pub fn closure_count(
         if remaining != 0 {
             continue;
         }
-        accumulate_if_valid(
-            &mut total, count, sum, sum_sq, n_i64, n_f64, sum_lower, sum_upper, var_nm1_lo,
-            var_nm1_hi,
-        );
+        accumulate_if_valid(&mut total, count, sum, sum_sq, n_i64, &bounds);
     }
 
     total
@@ -182,22 +183,14 @@ fn accumulate_if_valid(
     sum: i64,
     sum_sq: i64,
     n_i64: i64,
-    n_f64: f64,
-    sum_lower: i64,
-    sum_upper: i64,
-    var_nm1_lo: f64,
-    var_nm1_hi: f64,
+    bounds: &SearchBounds,
 ) {
-    if sum < sum_lower || sum > sum_upper {
+    if sum < bounds.sum_lo || sum > bounds.sum_hi {
         return;
     }
-    // Use n*sum_sq - sum² to avoid division for the integer part,
-    // then compare against n * var_nm1 bounds.
-    let n_times_var_nm1 = n_i64 * sum_sq - sum * sum;
-    let n_times_var_nm1_f = n_times_var_nm1 as f64;
-    let threshold_lo = n_f64 * var_nm1_lo;
-    let threshold_hi = n_f64 * var_nm1_hi;
-    if n_times_var_nm1_f < threshold_lo - 1e-6 || n_times_var_nm1_f > threshold_hi + 1e-6 {
+    // n·Σx² − (Σx)² is n·(n−1) times the sample variance, and an integer.
+    let m2n = n_i64 * sum_sq - sum * sum;
+    if m2n < bounds.m2n_lo || m2n > bounds.m2n_hi {
         return;
     }
     *total += count;
@@ -277,8 +270,6 @@ mod tests {
     #[test]
     fn test_count_matches_closure_parallel() {
         // Cross-validate with closure_parallel on a small case.
-        // Use small rounding tolerances to avoid f64 boundary mismatches
-        // between CLOSURE's floating-point DFS and our integer DP.
         use crate::closure_parallel;
 
         let mean = 3.0_f64;

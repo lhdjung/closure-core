@@ -720,6 +720,38 @@ impl ShapeAccumulator {
         self.n_scanned += 1;
     }
 
+    /// Fold another accumulator over the same grid and thresholds into this
+    /// one, so chunks of a result set can be scanned in parallel.
+    pub fn merge(&mut self, other: Self) {
+        debug_assert_eq!(self.k, other.k);
+        debug_assert_eq!(self.ladder, other.ladder);
+        for (mine, theirs) in self.ladder_counts.iter_mut().zip(other.ladder_counts) {
+            for (a, b) in mine.iter_mut().zip(theirs) {
+                *a += b;
+            }
+        }
+        for (mine, theirs) in self.per_class.iter_mut().zip(other.per_class) {
+            if theirs.n_samples == 0 {
+                continue;
+            }
+            if mine.n_samples == 0 {
+                *mine = theirs;
+                continue;
+            }
+            for (lo, &other_lo) in mine.count_lo.iter_mut().zip(&theirs.count_lo) {
+                *lo = (*lo).min(other_lo);
+            }
+            for (hi, &other_hi) in mine.count_hi.iter_mut().zip(&theirs.count_hi) {
+                *hi = (*hi).max(other_hi);
+            }
+            mine.n_samples += theirs.n_samples;
+        }
+        self.deficit_min = self.deficit_min.min(other.deficit_min);
+        self.deficit_max = self.deficit_max.max(other.deficit_max);
+        self.deficit_sum += other.deficit_sum;
+        self.n_scanned += other.n_scanned;
+    }
+
     /// Finish, declaring whether the scan covered the whole solution space.
     ///
     /// Pass `false` for a truncated search or for SPRITE. That does not weaken
@@ -1160,6 +1192,45 @@ mod tests {
         let summed: u64 = shapes.bounds.iter().map(|b| b.n_samples).sum();
         assert_eq!(summed, shapes.n_scanned);
         assert_eq!(shapes.n_scanned, 220, "C(9+3, 3) count vectors");
+    }
+
+    #[test]
+    fn merging_accumulators_matches_one_sequential_scan() {
+        let rows: Vec<[u32; 4]> = (0..=9u32)
+            .flat_map(|a| {
+                (0..=(9 - a))
+                    .flat_map(move |b| (0..=(9 - a - b)).map(move |c| [a, b, c, 9 - a - b - c]))
+            })
+            .collect();
+        let mut whole = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+        for row in &rows {
+            whole.update(row);
+        }
+        let mut merged = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+        for chunk in rows.chunks(37) {
+            let mut part = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+            for row in chunk {
+                part.update(row);
+            }
+            merged.merge(part);
+        }
+        // An empty accumulator is an identity.
+        merged.merge(ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE));
+
+        let (whole, merged) = (whole.finish(true), merged.finish(true));
+        assert_eq!(whole.n_scanned, merged.n_scanned);
+        assert_eq!(whole.deficit_min, merged.deficit_min);
+        assert_eq!(whole.deficit_max, merged.deficit_max);
+        assert_eq!(whole.deficit_mean, merged.deficit_mean);
+        for (a, b) in whole.bounds.iter().zip(&merged.bounds) {
+            assert_eq!(
+                (a.class, a.n_samples, &a.count_lo, &a.count_hi),
+                (b.class, b.n_samples, &b.count_lo, &b.count_hi)
+            );
+        }
+        for (a, b) in whole.ladder.iter().zip(&merged.ladder) {
+            assert_eq!(a.n_per_class, b.n_per_class);
+        }
     }
 
     #[test]
