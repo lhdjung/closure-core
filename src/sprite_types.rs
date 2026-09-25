@@ -50,10 +50,17 @@ impl RestrictionsMinimum {
     }
 }
 
+/// Which minimum-count restrictions SPRITE applies.
 #[derive(Debug, Clone)]
 pub enum RestrictionsOption {
+    /// At least one response at `scale_min` and one at `scale_max`, i.e. the
+    /// reported scale is also the observed range. This excludes every sample
+    /// that does not reach both ends, and makes an exact restriction on
+    /// either end a conflict; use [`RestrictionsOption::Null`] for none.
     Default,
+    /// The given minimum counts, or none for `Opt(None)`.
     Opt(Option<RestrictionsMinimum>),
+    /// No minimum counts.
     Null,
 }
 

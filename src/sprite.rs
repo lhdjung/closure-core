@@ -366,7 +366,9 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 /// * `rounding_error_sd` - Likewise for the sample SD
 /// * `items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
-/// * `restrictions_minimum` - Optional minimum count requirements for specific values
+/// * `restrictions_minimum` - Minimum count requirements for specific values.
+///   [`RestrictionsOption::Default`] requires at least one response at each end
+///   of the scale; pass [`RestrictionsOption::Null`] for no minimum
 /// * `parquet_config` - Optional configuration for writing results to Parquet files
 /// * `stop_after` - Optional maximum number of distributions to find
 ///
@@ -476,7 +478,9 @@ where
 /// * `rounding_error_sd` - Likewise for the sample SD
 /// * `items` - Number of items averaged (default 1)
 /// * `restrictions_exact` - Optional exact count requirements for specific values
-/// * `restrictions_minimum` - Optional minimum count requirements for specific values
+/// * `restrictions_minimum` - Minimum count requirements for specific values.
+///   [`RestrictionsOption::Default`] requires at least one response at each end
+///   of the scale; pass [`RestrictionsOption::Null`] for no minimum
 /// * `config` - Streaming configuration (file path, batch size, progress reporting)
 /// * `stop_after` - Optional limit on number of distributions to find
 ///
