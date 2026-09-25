@@ -6,7 +6,7 @@ and says exactly what to change in unsum for each one.
 - **From:** closure-core `1fe8f95`. unsum's `src/rust/Cargo.lock` pins this
   commit (branch `frequency-details`), and `src/rust/vendor/closure-core` is
   byte-identical to it.
-- **To:** branch `optimize` as of `f7dda71`, 28 commits later.
+- **To:** branch `optimize` as of `9448030`, 31 commits later.
 - **unsum state:** line numbers refer to unsum's working tree on 2026-09-25,
   including its uncommitted changes.
 
@@ -38,7 +38,7 @@ skipped.
 
 | # | What changed in closure-core | Blocks | What to change in unsum | Where |
 |---|---|---|---|---|
-| 1 | The vendored copy is 28 commits behind | everything | Re-pin and re-vendor | `src/rust/Cargo.toml`, `vendor.tar.xz` |
+| 1 | The vendored copy is 31 commits behind | everything | Re-pin and re-vendor | `src/rust/Cargo.toml`, `vendor.tar.xz` |
 | 2 | `ParquetConfig` / `StreamingConfig` gained a `format` field | compile | Set `format: OutputFormat::Samples` | `lib.rs` config wrappers |
 | 3 | `ModalityConclusion` was removed; it is now `ModalityShapes` | compile | Build `modality_conclusion` from `rl.modality_shapes` | `lib.rs` `modality_conclusion_to_robj` |
 | 4 | `FrequencyTable::f_count()` was removed | compile | Use `f_expected()` and `f_representative()` | `lib.rs` `frequency_table_to_robj` |
@@ -226,6 +226,14 @@ match closure_count(mean, sd, n, scale_min, scale_max, rounding_error_mean, roun
     Ok(count) => Robj::from(count),
     Err(e) => Robj::from(format!("CLOSURE error: {}", e)),
 }
+```
+
+*Verified* from R with the patch:
+
+```
+count_closure_combinations(3.0,  1.0, 20L, 1L, 5L, 0.05, 0.05)  # 48
+count_closure_combinations(3.0, -1.0, 20L, 1L, 5L, 0.05, 0.05)  # "CLOSURE error: sd and the rounding errors must not be negative"
+count_closure_combinations(3.0,  1.0,  1L, 1L, 5L, 0.05, 0.05)  # "CLOSURE error: n must be at least 2"
 ```
 
 On the R side, `closure_count_all()` (`R/count.R`) should then treat a
@@ -559,7 +567,7 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 ## Appendix A: full binding patch
 
 This is a patch against unsum's `src/rust/src/lib.rs`. It compiles against
-closure-core `f7dda71` without warnings. The verification in this document was
+closure-core `9448030` without warnings. The verification in this document was
 run on a package built with exactly this file.
 
 ```diff
