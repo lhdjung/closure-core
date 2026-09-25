@@ -4,7 +4,7 @@
 //! without enumerating them, using dynamic programming over frequency
 //! assignments for each scale value.
 
-use crate::SearchBounds;
+use crate::{ClosureSearchContext, SearchBounds};
 use std::collections::HashMap;
 
 /// Count valid sorted combinations that CLOSURE would find.
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// from `scale_min..=scale_max` whose sample mean and sample SD match the
 /// targets within the given rounding tolerances.
 ///
-/// This is equivalent to `closure_parallel(...).results.sample.len()` but
+/// This is equivalent to `closure_parallel(...).results.len()` but
 /// orders of magnitude faster since it never constructs the actual samples.
 ///
 /// # Algorithm
@@ -31,7 +31,8 @@ use std::collections::HashMap;
 /// - `rounding_error_mean`, `rounding_error_sd`: Allowed rounding tolerances
 ///
 /// # Returns
-/// The number of valid sorted combinations.
+/// The number of valid sorted combinations, or 0 for any input that
+/// `closure_parallel` rejects as invalid.
 pub fn closure_count(
     mean: f64,
     sd: f64,
@@ -41,7 +42,19 @@ pub fn closure_count(
     rounding_error_mean: f64,
     rounding_error_sd: f64,
 ) -> u64 {
-    if n < 2 || scale_min > scale_max {
+    // The same validation `closure_parallel` runs. Without it a negative `sd`
+    // was read as a band of SDs from 0 up to |sd| minus the tolerance.
+    if ClosureSearchContext::new(
+        mean,
+        sd,
+        n,
+        scale_min,
+        scale_max,
+        rounding_error_mean,
+        rounding_error_sd,
+    )
+    .is_err()
+    {
         return 0;
     }
 

@@ -141,6 +141,25 @@ fn invalid_parameters_are_errors_not_panics() {
 }
 
 #[test]
+fn the_counter_rejects_what_the_search_rejects() {
+    // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
+    // read as "SD between 0 and 0.95" and counted 10 samples.
+    for (mean, sd, re_mean, re_sd) in [
+        (3.0, -1.0, 0.05, 0.05),
+        (3.0, 1.0, -0.05, 0.05),
+        (3.0, 1.0, 0.05, -0.05),
+        (f64::NAN, 1.0, 0.05, 0.05),
+        (3.0, f64::INFINITY, 0.05, 0.05),
+    ] {
+        assert!(
+            closure_parallel::<f64, i32>(mean, sd, 10, 1, 5, re_mean, re_sd, 1, None, None)
+                .is_err()
+        );
+        assert_eq!(closure_count(mean, sd, 10, 1, 5, re_mean, re_sd), 0);
+    }
+}
+
+#[test]
 fn a_sample_is_found_from_its_own_exact_statistics() {
     // Feed the search the full-precision mean and SD of a known sample with
     // zero tolerance. The sample sits exactly on every bound, which is where
