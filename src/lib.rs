@@ -1768,7 +1768,8 @@ where
             &normalize_base_path(&config.file_path),
             &closure_results,
             &config,
-        );
+        )
+        .map_err(output_error)?;
     }
 
     Ok(closure_results)
@@ -1805,12 +1806,12 @@ fn normalize_base_path(file_path: &str) -> String {
 ///
 /// Shared by both techniques and both modes, so a `metrics_horns.parquet` means
 /// the same thing wherever it came from.
-pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFromMeanSdN<U>) {
-    let Ok((mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema)) =
-        create_stats_writers(base_path)
-    else {
-        return;
-    };
+pub(crate) fn write_statistics_files<U>(
+    base_path: &str,
+    results: &ResultListFromMeanSdN<U>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut mm_writer, mut mh_writer, mut freq_writer, mm_schema, mh_schema, freq_schema) =
+        create_stats_writers(base_path)?;
 
     // Write metrics_main
     let mm_batch = RecordBatch::try_new(
@@ -1820,10 +1821,8 @@ pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFro
             Arc::new(Float64Array::from(vec![results.metrics_main.values_all])),
         ],
     );
-    if let Ok(batch) = mm_batch {
-        let _ = mm_writer.write(&batch);
-    }
-    let _ = mm_writer.close();
+    mm_writer.write(&mm_batch?)?;
+    mm_writer.close()?;
 
     // Write metrics_horns
     let mh_batch = RecordBatch::try_new(
@@ -1840,10 +1839,8 @@ pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFro
             Arc::new(Float64Array::from(vec![results.metrics_horns.range])),
         ],
     );
-    if let Ok(batch) = mh_batch {
-        let _ = mh_writer.write(&batch);
-    }
-    let _ = mh_writer.close();
+    mh_writer.write(&mh_batch?)?;
+    mh_writer.close()?;
 
     // Write frequency table
     let freq_batch = RecordBatch::try_new(
@@ -1860,16 +1857,14 @@ pub(crate) fn write_statistics_files<U>(base_path: &str, results: &ResultListFro
             Arc::new(Float64Array::from(results.frequency.f_relative().to_vec())),
         ],
     );
-    if let Ok(batch) = freq_batch {
-        let _ = freq_writer.write(&batch);
-    }
-    let _ = freq_writer.close();
+    freq_writer.write(&freq_batch?)?;
+    freq_writer.close()?;
 
-    let _ = write_frequency_dist_to_parquet(
+    write_frequency_dist_to_parquet(
         &results.frequency_dist,
         &format!("{}frequency_dist.parquet", base_path),
-    );
-    let _ = write_modality_to_parquet(base_path, results);
+    )?;
+    write_modality_to_parquet(base_path, results)
 }
 
 /// Running frequency statistics for the streaming paths.
@@ -2214,13 +2209,12 @@ pub(crate) fn write_streaming_statistics(
     grid: &ValueGrid,
     final_freq_state: Arc<Mutex<StreamingFrequencyState>>,
     exhaustive: bool,
-) {
+) -> Result<(), ParameterError> {
     let samples_all = all_horns.len();
     if samples_all == 0 {
         // Still create the files so a reader finds a complete, empty result set.
         let results: ResultListFromMeanSdN<i32> = empty_result_list(grid.clone(), n_usize);
-        write_statistics_files(base_path, &results);
-        return;
+        return write_statistics_files(base_path, &results).map_err(output_error);
     }
 
     let values_all = samples_all * n_usize;
@@ -2338,7 +2332,24 @@ pub(crate) fn write_streaming_statistics(
         ),
     };
 
-    write_statistics_files(base_path, &results);
+    write_statistics_files(base_path, &results).map_err(output_error)
+}
+
+/// A failed write, as the error the public functions return.
+pub(crate) fn output_error(e: impl std::fmt::Display) -> ParameterError {
+    ParameterError::Output(format!("failed to write results: {e}"))
+}
+
+/// Join a streaming writer thread, turning a write failure or a panic into an
+/// error. A run whose samples did not all reach disk must not return `Ok`:
+/// its count and statistics would describe samples the files do not hold.
+pub(crate) fn join_writer(
+    handle: thread::JoinHandle<Result<usize, String>>,
+) -> Result<usize, ParameterError> {
+    match handle.join() {
+        Ok(result) => result.map_err(output_error),
+        Err(_) => Err(output_error("the writer thread panicked")),
+    }
 }
 
 /// Generate all valid combinations (streaming mode) with summary statistics
@@ -2485,10 +2496,10 @@ where
             drop(tx_results);
             drop(tx_stats);
 
-            let total_written = writer_handle.join().unwrap_or(0);
+            let total_written = join_writer(writer_handle)?;
             let (all_horns, final_freq_state) = stats_handle
                 .join()
-                .unwrap_or_else(|_| (Vec::new(), freq_state));
+                .map_err(|_| output_error("the statistics thread panicked"))?;
 
             // Write statistics files
             write_streaming_statistics(
@@ -2499,7 +2510,7 @@ where
                 final_freq_state,
                 // A truncated search saw only part of the space.
                 stop_after.is_none(),
-            );
+            )?;
 
             return Ok(StreamingResult {
                 total_combinations: total_written,
@@ -2592,15 +2603,11 @@ where
     drop(tx_stats);
 
     // Wait for threads to complete
-    let total_written = writer_handle.join().unwrap_or_else(|_| {
-        eprintln!("ERROR: Writer thread panicked unexpectedly");
-        0
-    });
+    let total_written = join_writer(writer_handle)?;
 
-    let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
-        eprintln!("ERROR: Statistics thread panicked unexpectedly");
-        (Vec::new(), freq_state)
-    });
+    let (all_horns, final_freq_state) = stats_handle
+        .join()
+        .map_err(|_| output_error("the statistics thread panicked"))?;
 
     // Written even when nothing was found, so a reader always finds a
     // complete result set, as the sequential path above already guarantees.
@@ -2611,7 +2618,7 @@ where
         &grid,
         final_freq_state,
         stop_after.is_none(),
-    );
+    )?;
 
     Ok(StreamingResult {
         total_combinations: total_written,
@@ -2814,7 +2821,7 @@ mod tests {
 
         let results =
             closure_parallel(3.5, 1.5, 100, 1i32, 5i32, 0.01, 0.01, 1, None, None).unwrap();
-        write_statistics_files(&base, &results);
+        write_statistics_files(&base, &results).unwrap();
 
         assert_eq!(
             parquet_columns(&format!("{base}frequency.parquet")),

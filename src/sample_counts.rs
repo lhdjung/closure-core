@@ -734,14 +734,18 @@ pub trait SampleFormat<U: IntegerType> {
 
     /// Write the two files that describe the layout: the column-to-value key
     /// and the format stamp.
-    fn write_grid_files(base_path: &str, grid: &ValueGrid, n: usize) {
-        let _ = write_scale_values_parquet(&format!("{}scale_values.parquet", base_path), grid);
-        let _ = write_format_parquet(
+    fn write_grid_files(
+        base_path: &str,
+        grid: &ValueGrid,
+        n: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        write_scale_values_parquet(&format!("{}scale_values.parquet", base_path), grid)?;
+        write_format_parquet(
             &format!("{}format.parquet", base_path),
             Self::TECHNIQUE,
             grid,
             n,
-        );
+        )
     }
 
     /// Create the streaming writer for `counts.parquet`.
@@ -772,7 +776,7 @@ pub trait SampleFormat<U: IntegerType> {
         batch_size: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let grid = counts.grid();
-        Self::write_grid_files(base_path, grid, counts.n());
+        Self::write_grid_files(base_path, grid, counts.n())?;
 
         let mut writer = Self::counts_writer(base_path, grid, counts.n())?;
         let nrow = counts.nrow();
@@ -800,7 +804,7 @@ pub trait SampleFormat<U: IntegerType> {
         n: usize,
         batch_size: usize,
     ) -> Result<CountsFileWriter, Box<dyn std::error::Error>> {
-        Self::write_grid_files(base_path, &grid, n);
+        Self::write_grid_files(base_path, &grid, n)?;
         CountsFileWriter::create(base_path, grid, n, batch_size)
     }
 
@@ -810,7 +814,8 @@ pub trait SampleFormat<U: IntegerType> {
     /// so a technique's streaming path only has to produce `(counts, horns)`
     /// pairs and let this drain them. Returns the join handle; the thread
     /// finishes when the sending half of `rx` is dropped and yields the number
-    /// of samples written.
+    /// of samples written, or the first write error. On an error it also sets
+    /// `writer_failed` so the search can stop early, and drops `rx`.
     #[allow(clippy::too_many_arguments)]
     fn spawn_streaming_writer(
         base_path: String,
@@ -821,88 +826,92 @@ pub trait SampleFormat<U: IntegerType> {
         progress: Option<(usize, &'static str)>,
         rx: Receiver<Vec<(Vec<u32>, f64)>>,
         writer_failed: Arc<AtomicUsize>,
-    ) -> JoinHandle<usize> {
+    ) -> JoinHandle<Result<usize, String>> {
         thread::spawn(move || {
-            let mut counts_writer = if format.writes_counts() {
-                match Self::counts_file_writer(&base_path, grid.clone(), n, batch_size) {
-                    Ok(w) => Some(w),
-                    Err(e) => {
-                        eprintln!(
-                            "ERROR: Failed to create counts writer under '{}': {}",
-                            base_path, e
-                        );
-                        writer_failed.store(1, Ordering::Relaxed);
-                        return 0;
-                    }
-                }
-            } else {
-                None
-            };
-
-            let mut legacy = if format.writes_samples() {
-                match LegacySampleWriter::create(&base_path, n, batch_size) {
-                    Ok(w) => Some(w),
-                    Err(e) => {
-                        eprintln!(
-                            "ERROR: Failed to create sample writer under '{}': {}",
-                            base_path, e
-                        );
-                        writer_failed.store(1, Ordering::Relaxed);
-                        return 0;
-                    }
-                }
-            } else {
-                None
-            };
-
-            let mut total_written = 0usize;
-            let mut last_progress_report = 0usize;
-
-            while let Ok(batch) = rx.recv() {
-                for (counts, horns) in batch {
-                    if let Some(writer) = counts_writer.as_mut() {
-                        if let Err(e) = writer.push(&counts, horns) {
-                            eprintln!("ERROR: Failed to write counts batch: {}", e);
-                            return total_written;
-                        }
-                    }
-                    if let Some(writer) = legacy.as_mut() {
-                        if let Err(e) = writer.push(&grid.expand::<i32>(&counts), horns) {
-                            eprintln!("ERROR: Failed to write samples batch: {}", e);
-                            return total_written;
-                        }
-                    }
-                    total_written += 1;
-                }
-
-                if let Some((every, label)) = progress {
-                    if total_written - last_progress_report >= every {
-                        eprintln!("Progress: {} {} written...", total_written, label);
-                        last_progress_report = total_written;
-                    }
-                }
+            let result =
+                Self::drain_to_disk(&base_path, &grid, n, batch_size, format, progress, rx);
+            if result.is_err() {
+                writer_failed.store(1, Ordering::Relaxed);
             }
-
-            if let Some(writer) = counts_writer {
-                if let Err(e) = writer.finish() {
-                    eprintln!("ERROR: Failed to close counts file: {}", e);
-                }
-            }
-            if let Some(writer) = legacy {
-                if let Err(e) = writer.finish() {
-                    eprintln!("ERROR: Failed to close sample file: {}", e);
-                }
-            }
-
-            if let Some((_, label)) = progress {
-                eprintln!(
-                    "Streaming complete: {} total {} written",
-                    total_written, label
-                );
-            }
-
-            total_written
+            result
         })
+    }
+
+    /// The body of [`Self::spawn_streaming_writer`]'s thread.
+    fn drain_to_disk(
+        base_path: &str,
+        grid: &ValueGrid,
+        n: usize,
+        batch_size: usize,
+        format: OutputFormat,
+        progress: Option<(usize, &'static str)>,
+        rx: Receiver<Vec<(Vec<u32>, f64)>>,
+    ) -> Result<usize, String> {
+        let mut counts_writer = if format.writes_counts() {
+            Some(
+                Self::counts_file_writer(base_path, grid.clone(), n, batch_size).map_err(|e| {
+                    format!("failed to create the counts file under '{base_path}': {e}")
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let mut legacy = if format.writes_samples() {
+            Some(
+                LegacySampleWriter::create(base_path, n, batch_size).map_err(|e| {
+                    format!("failed to create the sample file under '{base_path}': {e}")
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let mut total_written = 0usize;
+        let mut last_progress_report = 0usize;
+
+        while let Ok(batch) = rx.recv() {
+            for (counts, horns) in batch {
+                if let Some(writer) = counts_writer.as_mut() {
+                    writer
+                        .push(&counts, horns)
+                        .map_err(|e| format!("failed to write the counts file: {e}"))?;
+                }
+                if let Some(writer) = legacy.as_mut() {
+                    writer
+                        .push(&grid.expand::<i32>(&counts), horns)
+                        .map_err(|e| format!("failed to write the sample file: {e}"))?;
+                }
+                total_written += 1;
+            }
+
+            if let Some((every, label)) = progress {
+                if total_written - last_progress_report >= every {
+                    eprintln!("Progress: {} {} written...", total_written, label);
+                    last_progress_report = total_written;
+                }
+            }
+        }
+
+        if let Some(writer) = counts_writer {
+            writer
+                .finish()
+                .map_err(|e| format!("failed to close the counts file: {e}"))?;
+        }
+        if let Some(writer) = legacy {
+            writer
+                .finish()
+                .map_err(|e| format!("failed to close the sample file: {e}"))?;
+        }
+
+        if let Some((_, label)) = progress {
+            eprintln!(
+                "Streaming complete: {} total {} written",
+                total_written, label
+            );
+        }
+
+        Ok(total_written)
     }
 
     /// Write a complete in-memory result list to `base_path`.
@@ -915,41 +924,35 @@ pub trait SampleFormat<U: IntegerType> {
         base_path: &str,
         results: &ResultListFromMeanSdN<U>,
         config: &ParquetConfig,
-    ) where
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
         U: 'static,
     {
         let counts = &results.results.counts;
         let batch_size = config.batch_size.max(1);
-        // The streaming paths create their directory; memory mode used to
-        // fail every write silently when it was missing.
-        if let Err(e) = std::fs::create_dir_all(base_path) {
-            eprintln!(
-                "ERROR: Could not create output directory '{}': {}",
-                base_path, e
-            );
-            return;
-        }
+        std::fs::create_dir_all(base_path)
+            .map_err(|e| format!("could not create output directory '{base_path}': {e}"))?;
 
         if config.format.writes_counts() {
-            let _ = Self::write_counts(base_path, counts, &results.results.horns, batch_size);
+            Self::write_counts(base_path, counts, &results.results.horns, batch_size)?;
         }
 
         if config.format.writes_samples() {
             let results_path = format!("{}results.parquet", base_path);
-            if let Ok(mut writer) = crate::create_results_writer(&results_path) {
-                let total_samples = results.results.len();
-                for start in (0..total_samples).step_by(batch_size) {
-                    let end = (start + batch_size).min(total_samples);
-                    if let Ok(batch) = crate::results_to_record_batch(&results.results, start, end)
-                    {
-                        let _ = writer.write(&batch);
-                    }
-                }
-                let _ = writer.close();
+            let mut writer = crate::create_results_writer(&results_path)?;
+            let total_samples = results.results.len();
+            for start in (0..total_samples).step_by(batch_size) {
+                let end = (start + batch_size).min(total_samples);
+                writer.write(&crate::results_to_record_batch(
+                    &results.results,
+                    start,
+                    end,
+                )?)?;
             }
+            writer.close()?;
         }
 
-        crate::write_statistics_files(base_path, results);
+        crate::write_statistics_files(base_path, results)
     }
 }
 

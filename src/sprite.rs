@@ -437,7 +437,8 @@ where
             &crate::normalize_base_path(&config.file_path),
             &sprite_results,
             &config,
-        );
+        )
+        .map_err(crate::output_error)?;
     }
 
     Ok(sprite_results)
@@ -573,15 +574,11 @@ where
     );
 
     // Wait for threads to complete
-    let total_written = writer_handle.join().unwrap_or_else(|_| {
-        eprintln!("ERROR: Writer thread panicked unexpectedly");
-        0
-    });
+    let total_written = crate::join_writer(writer_handle)?;
 
-    let (all_horns, final_freq_state) = stats_handle.join().unwrap_or_else(|_| {
-        eprintln!("ERROR: Statistics thread panicked unexpectedly");
-        (Vec::new(), freq_state)
-    });
+    let (all_horns, final_freq_state) = stats_handle
+        .join()
+        .map_err(|_| crate::output_error("the statistics thread panicked"))?;
 
     // Write statistics files, even when nothing was found, so a reader always
     // finds a complete result set. SPRITE never enumerates the space
@@ -593,7 +590,7 @@ where
         &grid,
         final_freq_state,
         false,
-    );
+    )?;
 
     Ok(StreamingResult {
         total_combinations: total_written,

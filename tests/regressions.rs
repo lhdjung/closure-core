@@ -416,3 +416,79 @@ fn streaming_writes_into_the_named_directory_and_creates_it() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_failed_write_is_an_error_not_an_empty_result() {
+    use closure_core::{
+        closure_parallel, sprite_parallel_streaming, ParameterError, ParquetConfig,
+        RestrictionsOption,
+    };
+
+    // A directory squatting on `counts.parquet` makes that file impossible to
+    // create. Streaming used to print the error and return Ok with zero
+    // samples; memory mode ignored every write error and returned Ok.
+    let dir = std::env::temp_dir().join("closure_regression_failed_write");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("counts.parquet")).unwrap();
+    let path = dir.display().to_string();
+
+    let streamed = closure_parallel_streaming::<f64, i32>(
+        3.0,
+        1.0,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        StreamingConfig::new(path.clone(), 100, false),
+        None,
+    );
+    assert!(matches!(streamed, Err(ParameterError::Output(_))));
+
+    let limited = closure_parallel_streaming::<f64, i32>(
+        3.0,
+        1.0,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        StreamingConfig::new(path.clone(), 100, false),
+        Some(5),
+    );
+    assert!(matches!(limited, Err(ParameterError::Output(_))));
+
+    let sprite = sprite_parallel_streaming::<f64, i32>(
+        2.2,
+        1.3,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        None,
+        RestrictionsOption::Default,
+        StreamingConfig::new(path.clone(), 100, false),
+        Some(5),
+    );
+    assert!(matches!(sprite, Err(ParameterError::Output(_))));
+
+    let in_memory = closure_parallel::<f64, i32>(
+        3.0,
+        1.0,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        Some(ParquetConfig::new(path, 100)),
+        None,
+    );
+    assert!(matches!(in_memory, Err(ParameterError::Output(_))));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
