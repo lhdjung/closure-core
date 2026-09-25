@@ -221,14 +221,28 @@ fn can_be_is_the_disjunction_over_scanned_samples() {
         let shapes = &results.modality_shapes;
         assert!(shapes.exhaustive, "an unlimited run enumerates everything");
 
+        // `can_be` also counts thresholds between the rungs, so the flags are
+        // re-derived at every whole threshold in the band.
+        let (lo, hi) = (
+            shapes.ladder[0].min_prominence_counts,
+            shapes.ladder[shapes.ladder.len() - 1].min_prominence_counts,
+        );
         let mut any_bell = false;
         let mut any_unimodal = false;
+        let mut any_two = false;
+        for row in results.results.counts.rows() {
+            for t in lo..=hi {
+                let class = closure_core::modality::classify(row, t);
+                any_bell |= class.is_bell();
+                any_unimodal |= class.is_unimodal();
+                any_two |= class == ShapeClass::TwoModes;
+            }
+        }
+        assert_eq!(shapes.can_be(|c| c == ShapeClass::TwoModes), Some(any_two));
         for rung in &shapes.ladder {
             let mut per_class = [0u64; 6];
             for row in results.results.counts.rows() {
                 let class = closure_core::modality::classify(row, rung.min_prominence_counts);
-                any_bell |= class.is_bell();
-                any_unimodal |= class.is_unimodal();
                 per_class[class as usize] += 1;
             }
             for (i, class) in ShapeClass::all().enumerate() {

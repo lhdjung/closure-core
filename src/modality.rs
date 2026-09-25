@@ -55,7 +55,8 @@
 //! threshold splits modes and manufactures proofs that the data could not have
 //! been unimodal, raising it merges modes and manufactures proofs that the data
 //! could not have been multimodal. Every sample is therefore classified at
-//! each threshold in [`DEFAULT_PROMINENCE_LADDER`], and
+//! each threshold in [`DEFAULT_PROMINENCE_LADDER`] and at every
+//! whole-observation threshold between its ends, and
 //! [`ModalityShapes::can_be`] answers `Some(false)` only when the class is empty
 //! across all of them. [`ModalityShapes::min_prominence_admitting`] reports the
 //! margin.
@@ -475,6 +476,16 @@ pub struct ModalityShapes {
     /// Per-class counts at every threshold in the envelope, ascending.
     /// See [`DEFAULT_PROMINENCE_LADDER`].
     pub ladder: Vec<LadderRung>,
+    /// Samples per class that take that class at *some* whole-observation
+    /// threshold between the lowest and the highest rung, indexed in
+    /// [`ShapeClass`] declaration order. A sample can count towards several
+    /// classes. This, not the rungs, is what [`Self::can_be`] reads: a sample
+    /// can have two modes only strictly between two rungs, as it passes from
+    /// three modes to one.
+    pub band_n_per_class: Vec<u64>,
+    /// Per class, the lowest threshold in the band (as a fraction of `n`) at
+    /// which any sample takes it; `None` when no threshold in the band does.
+    pub band_min_prominence: Vec<Option<f64>>,
     /// Smallest [`unimodality_deficit`] over the scanned samples.
     pub deficit_min: u32,
     /// Mean [`unimodality_deficit`] over the scanned samples.
@@ -497,18 +508,19 @@ impl ModalityShapes {
     /// The lowest threshold in the envelope at which `class` has any member,
     /// or `None` when it is empty throughout.
     ///
+    /// Every whole-observation threshold in the band counts, not only the
+    /// rungs, so the answer need not be a rung. Above the lowest rung it is
+    /// reported as `t / n` for a threshold of `t` observations.
+    ///
     /// This is the robustness number behind a `Some(false)`: it says how far the
     /// prominence rule would have to be relaxed or tightened before the shape
     /// became admissible at all. `None` means no threshold in the defensible
     /// band admits it.
     pub fn min_prominence_admitting(&self, class: ShapeClass) -> Option<f64> {
-        self.ladder
-            .iter()
-            .filter(|rung| rung.n_of(class) > 0)
-            .map(|rung| rung.min_prominence)
-            .fold(None, |acc: Option<f64>, p| {
-                Some(acc.map_or(p, |a| a.min(p)))
-            })
+        self.band_min_prominence
+            .get(class as usize)
+            .copied()
+            .flatten()
     }
 
     /// Proportion of scanned samples in `class`.
@@ -526,7 +538,7 @@ impl ModalityShapes {
     /// Whether the raw data could have had a shape satisfying `predicate`.
     ///
     /// - `Some(true)`: a scanned sample has such a shape at *some* threshold in
-    ///   the prominence envelope, so it is possible. Sound whether or not the
+    ///   the prominence envelope, rung or not, so it is possible. Sound whether or not the
     ///   search was exhaustive — a witness is a witness.
     /// - `Some(false)`: **no** admissible sample has such a shape at *any*
     ///   threshold in the envelope, so the raw data did not either. Only ever
@@ -551,10 +563,13 @@ impl ModalityShapes {
     /// [`Self::min_prominence_admitting`] to see the margin, and
     /// [`Self::can_be_at_primary`] for the single-threshold answer.
     pub fn can_be(&self, predicate: impl Fn(ShapeClass) -> bool) -> Option<bool> {
-        let found = self
-            .ladder
-            .iter()
-            .any(|rung| ShapeClass::all().any(|c| predicate(c) && rung.n_of(c) > 0));
+        let found = ShapeClass::all().any(|c| {
+            predicate(c)
+                && self
+                    .band_n_per_class
+                    .get(c as usize)
+                    .is_some_and(|&n| n > 0)
+        });
         match (found, self.exhaustive) {
             (true, _) => Some(true),
             (false, true) => Some(false),
@@ -611,12 +626,26 @@ impl ModalityShapes {
     }
 }
 
+/// Most rungs a ladder can have: the default band plus a configured threshold.
+const MAX_RUNGS: usize = DEFAULT_PROMINENCE_LADDER.len() + 1;
+
+/// Modes a class stands for, with three or more counted as 3.
+fn mode_count(class: ShapeClass) -> u8 {
+    match class {
+        ShapeClass::Flat => 0,
+        ShapeClass::OneModeInterior | ShapeClass::OneModeLowEdge | ShapeClass::OneModeHighEdge => 1,
+        ShapeClass::TwoModes => 2,
+        ShapeClass::ThreeOrMoreModes => 3,
+    }
+}
+
 /// Running shape statistics over a stream of count vectors.
 ///
 /// Shared by the in-memory and streaming paths so both report the same thing;
 /// it needs one sample at a time and never the whole result set.
 pub struct ShapeAccumulator {
     k: usize,
+    n: usize,
     min_prominence: f64,
     /// Every threshold in the envelope, ascending, as (fraction, observations).
     /// Always contains `min_prominence`; see [`DEFAULT_PROMINENCE_LADDER`].
@@ -625,6 +654,10 @@ pub struct ShapeAccumulator {
     primary: usize,
     /// `[rung][class]` sample counts.
     ladder_counts: Vec<Vec<u64>>,
+    /// `[class]` samples taking the class somewhere in the band.
+    band_counts: Vec<u64>,
+    /// `[class]` lowest threshold, in observations, at which a sample took it.
+    band_min: Vec<Option<u32>>,
     n_scanned: u64,
     per_class: Vec<ShapeBounds>,
     deficit_min: u32,
@@ -661,8 +694,11 @@ impl ShapeAccumulator {
 
         Self {
             k,
+            n,
             min_prominence,
             ladder_counts: vec![vec![0u64; n_classes]; ladder.len()],
+            band_counts: vec![0; n_classes],
+            band_min: vec![None; n_classes],
             ladder,
             primary,
             n_scanned: 0,
@@ -685,16 +721,17 @@ impl ShapeAccumulator {
         debug_assert_eq!(counts.len(), self.k);
         // One run decomposition serves every threshold in the envelope.
         let runs = runs_of(counts);
-        let mut primary_class = None;
+        let mut rung_classes = [ShapeClass::Flat; MAX_RUNGS];
+        let rung_classes = &mut rung_classes[..self.ladder.len()];
         for (rung, &(_, threshold)) in self.ladder.iter().enumerate() {
             let class = classify_from_runs(&runs, counts.len(), threshold);
             self.ladder_counts[rung][class as usize] += 1;
-            if rung == self.primary {
-                primary_class = Some(class);
-            }
+            rung_classes[rung] = class;
         }
 
-        let class = primary_class.expect("the primary threshold is always a rung");
+        self.update_band(&runs, counts.len(), rung_classes);
+
+        let class = rung_classes[self.primary];
         let slot = &mut self.per_class[class as usize];
 
         if slot.n_samples == 0 {
@@ -720,6 +757,76 @@ impl ShapeAccumulator {
         self.n_scanned += 1;
     }
 
+    /// Record every class `runs` takes at some whole-observation threshold
+    /// between the lowest and the highest rung, given its class at each rung.
+    ///
+    /// This leans on how classification moves as the threshold `t` rises. The
+    /// number of modes never goes up: merging tied tallest runs (`summit −
+    /// valley < t`) only becomes more likely, a lower peak only drops out
+    /// (`height − col >= t`), and once every summit run has merged into one
+    /// group spanning the scale it stays that way. A single mode is the one
+    /// summit group, whose extent no longer changes, so a one-mode or `Flat`
+    /// class holds from where it first appears to the top of the band. The
+    /// class sequence is therefore three-or-more modes, then two, then one
+    /// fixed class of at most one mode, each part possibly empty. Only the two
+    /// boundaries need finding, and each is a binary search between the two
+    /// rungs it falls between.
+    fn update_band(&mut self, runs: &[Run], k: usize, rung_classes: &[ShapeClass]) {
+        let last = rung_classes.len() - 1;
+        if mode_count(rung_classes[0]) >= 3 {
+            self.record_band(ShapeClass::ThreeOrMoreModes, self.ladder[0].1);
+        }
+        if let Some((t, class)) = self.first_at_most(runs, k, rung_classes, 2) {
+            if class == ShapeClass::TwoModes {
+                self.record_band(class, t);
+            }
+        }
+        let top = rung_classes[last];
+        if mode_count(top) <= 1 {
+            let (t, _) = self
+                .first_at_most(runs, k, rung_classes, 1)
+                .expect("the top rung qualifies");
+            self.record_band(top, t);
+        }
+    }
+
+    /// The lowest threshold in the band at which `runs` has at most `modes`
+    /// modes, and its class there; see [`Self::update_band`] for why that set
+    /// of thresholds is an interval reaching the top of the band.
+    fn first_at_most(
+        &self,
+        runs: &[Run],
+        k: usize,
+        rung_classes: &[ShapeClass],
+        modes: u8,
+    ) -> Option<(u32, ShapeClass)> {
+        let j = rung_classes.iter().position(|&c| mode_count(c) <= modes)?;
+        if j == 0 {
+            return Some((self.ladder[0].1, rung_classes[0]));
+        }
+        // Rung j - 1 has more modes, so it sits strictly below rung j.
+        let (mut below, mut at) = (self.ladder[j - 1].1, self.ladder[j].1);
+        let mut class = rung_classes[j];
+        while at - below > 1 {
+            let mid = below + (at - below) / 2;
+            let c = classify_from_runs(runs, k, mid);
+            if mode_count(c) <= modes {
+                at = mid;
+                class = c;
+            } else {
+                below = mid;
+            }
+        }
+        Some((at, class))
+    }
+
+    /// Count one sample towards `class` in the band, first seen at `t`.
+    fn record_band(&mut self, class: ShapeClass, t: u32) {
+        let i = class as usize;
+        self.band_counts[i] += 1;
+        self.band_min[i] = Some(self.band_min[i].map_or(t, |b| b.min(t)));
+    }
+
     /// Fold another accumulator over the same grid and thresholds into this
     /// one, so chunks of a result set can be scanned in parallel.
     pub fn merge(&mut self, other: Self) {
@@ -729,6 +836,15 @@ impl ShapeAccumulator {
             for (a, b) in mine.iter_mut().zip(theirs) {
                 *a += b;
             }
+        }
+        for (a, b) in self.band_counts.iter_mut().zip(other.band_counts) {
+            *a += b;
+        }
+        for (a, b) in self.band_min.iter_mut().zip(other.band_min) {
+            *a = match (*a, b) {
+                (Some(x), Some(y)) => Some(x.min(y)),
+                (x, y) => x.or(y),
+            };
         }
         for (mine, theirs) in self.per_class.iter_mut().zip(other.per_class) {
             if theirs.n_samples == 0 {
@@ -760,6 +876,21 @@ impl ShapeAccumulator {
     pub fn finish(self, exhaustive: bool) -> ModalityShapes {
         let n = self.n_scanned;
         let primary = self.primary;
+        let (band_lo_fraction, band_lo) = self.ladder[0];
+        let sample_size = self.n.max(1) as f64;
+        let band_min_prominence = self
+            .band_min
+            .iter()
+            .map(|t| {
+                t.map(|t| {
+                    if t <= band_lo {
+                        band_lo_fraction
+                    } else {
+                        t as f64 / sample_size
+                    }
+                })
+            })
+            .collect();
         let ladder = self
             .ladder
             .iter()
@@ -777,6 +908,8 @@ impl ShapeAccumulator {
             n_scanned: n,
             bounds: self.per_class,
             ladder,
+            band_n_per_class: self.band_counts,
+            band_min_prominence,
             deficit_min: if n == 0 { 0 } else { self.deficit_min },
             deficit_mean: if n == 0 {
                 f64::NAN
@@ -1111,9 +1244,10 @@ mod tests {
         // threshold is a judgement call, so the deductive claim is not available.
         assert_eq!(shapes.can_be_at_primary(|c| c.is_bell()), Some(false));
         assert_eq!(shapes.can_be_bell_shaped(), Some(true));
+        // The valley is 8 deep, so 9 observations is where it stops counting.
         assert_eq!(
             shapes.min_prominence_admitting(ShapeClass::OneModeInterior),
-            Some(0.10)
+            Some(9.0 / 128.0)
         );
 
         // The same guard in the other direction: a shape visible only at the
@@ -1128,6 +1262,73 @@ mod tests {
             shapes.min_prominence_admitting(ShapeClass::TwoModes),
             Some(0.02)
         );
+    }
+
+    #[test]
+    fn a_shape_seen_only_between_rungs_is_still_a_witness() {
+        // At n = 100 the rungs are 2, 5 and 10 observations. This sample has
+        // three modes up to 3, two at exactly 4, and one from 5 on: two modes
+        // never shows at a rung, yet 0.04 is inside the band.
+        let row = [50, 10, 13, 10, 14, 3];
+        assert_eq!(classify(&row, 3), ShapeClass::ThreeOrMoreModes);
+        assert_eq!(classify(&row, 4), ShapeClass::TwoModes);
+        assert_eq!(classify(&row, 5), ShapeClass::OneModeLowEdge);
+
+        let mut acc = ShapeAccumulator::new(6, 100, DEFAULT_MODE_PROMINENCE);
+        acc.update(&row);
+        let shapes = acc.finish(true);
+        assert!(shapes
+            .ladder
+            .iter()
+            .all(|r| r.n_of(ShapeClass::TwoModes) == 0));
+        assert_eq!(shapes.can_be(|c| c == ShapeClass::TwoModes), Some(true));
+        assert_eq!(
+            shapes.min_prominence_admitting(ShapeClass::TwoModes),
+            Some(0.04)
+        );
+    }
+
+    #[test]
+    fn the_band_scan_sees_every_class_a_brute_force_scan_sees() {
+        // Checks the boundary search in `update_band` against classifying at
+        // every whole threshold in the band, over every count vector of a few
+        // (k, n). n = 100 gives a band of 2..=10 observations; n = 30 a narrow
+        // one on a wider grid.
+        fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+            if row.len() == k - 1 {
+                row.push(n);
+                out.push(row.clone());
+                row.pop();
+                return;
+            }
+            for c in 0..=n {
+                row.push(c);
+                compositions(k, n - c, row, out);
+                row.pop();
+            }
+        }
+        for (k, n) in [(4, 100), (6, 30)] {
+            let mut rows = Vec::new();
+            compositions(k, n, &mut Vec::new(), &mut rows);
+            let mut acc = ShapeAccumulator::new(k, n as usize, DEFAULT_MODE_PROMINENCE);
+            let (lo, hi) = (acc.ladder[0].1, acc.ladder[acc.ladder.len() - 1].1);
+            let mut expected = [0u64; 6];
+            let mut expected_min: [Option<u32>; 6] = [None; 6];
+            for row in &rows {
+                acc.update(row);
+                let mut seen = [false; 6];
+                for t in lo..=hi {
+                    let class = classify(row, t) as usize;
+                    seen[class] = true;
+                    expected_min[class] = Some(expected_min[class].map_or(t, |m| m.min(t)));
+                }
+                for (e, s) in expected.iter_mut().zip(seen) {
+                    *e += s as u64;
+                }
+            }
+            assert_eq!(acc.band_min, expected_min, "k={k} n={n}");
+            assert_eq!(acc.finish(true).band_n_per_class, expected, "k={k} n={n}");
+        }
     }
 
     #[test]

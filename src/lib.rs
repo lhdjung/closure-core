@@ -35,7 +35,7 @@
 //! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics |
 //! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
 //! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
-//! | `modality_summary` | one row: samples per shape class, whether the search was exhaustive, unimodality-deficit spread |
+//! | `modality_summary` | one row: samples per shape class at the primary threshold (`n_*`) and anywhere in the prominence band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread |
 //! | `modality_prominence` | samples per shape class at each threshold in the prominence envelope |
 //!
 //! # Reading the shape output
@@ -49,7 +49,9 @@
 //!   [`modality::ModalityShapes::can_be`] returns `None` for them rather than
 //!   claiming a proof. It is also only a proof relative to a threshold for what
 //!   counts as a mode, so `can_be` requires the class to be empty across a band
-//!   of thresholds rather than at one; `modality_prominence` shows the band.
+//!   of thresholds rather than at one. `band_n_*` in `modality_summary` counts
+//!   over every whole-observation threshold in that band, and
+//!   `modality_prominence` shows its rungs.
 //! - A class with **many** members means very little on its own. Since one
 //!   admissible dataset is enough for an author to point at, the useful output
 //!   is the class's *conditional bounds*: what every dataset of that shape would
@@ -2124,16 +2126,28 @@ fn write_modality_to_parquet<U>(
         ));
         columns.push(Arc::new(UInt64Array::from(vec![shapes.n_of(class)])));
     }
+    // Samples taking each class at some threshold in the band. A zero here,
+    // with `exhaustive` true, is the proof of impossibility `can_be` reports.
+    for class in ShapeClass::all() {
+        fields.push(Field::new(
+            format!("band_n_{}", class.as_str()),
+            DataType::UInt64,
+            false,
+        ));
+        columns.push(Arc::new(UInt64Array::from(vec![
+            shapes.band_n_per_class[class as usize],
+        ])));
+    }
     write_table(
         &format!("{}modality_summary.parquet", base_path),
         Arc::new(Schema::new(fields)),
         columns,
     )?;
 
-    // The prominence envelope: per-class counts at every threshold in the band,
-    // one row per (threshold, class). A zero count in `modality_summary` is a
-    // proof of impossibility only as far as this table keeps it at zero, so the
-    // two are meant to be read together.
+    // The prominence envelope: per-class counts at each rung of the band, one
+    // row per (threshold, class). A class can appear only between rungs, so
+    // the proof of impossibility is `band_n_*` in `modality_summary`, not a
+    // zero on every row here.
     let mut p_prom = Vec::new();
     let mut p_counts = Vec::new();
     let mut p_primary = Vec::new();
