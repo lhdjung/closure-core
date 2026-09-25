@@ -651,3 +651,30 @@ fn a_sprite_keeps_its_restrictions_across_runs() {
         }
     }
 }
+
+#[test]
+fn from_range_takes_scale_values() {
+    use closure_core::{sprite_parallel, RestrictionsMinimum, RestrictionsOption};
+
+    // `from_range(1, 5)` used to store keys 1 and 5, which as hundredths are
+    // 0.01 and 0.05, and SPRITE rejected them as invalid.
+    let results = sprite_parallel::<f64, i32>(
+        2.2,
+        1.3,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        None,
+        RestrictionsOption::new(RestrictionsMinimum::from_range(1, 5)),
+        None,
+        Some(20),
+    )
+    .unwrap();
+    assert!(!results.results.is_empty());
+    for row in results.results.counts.rows() {
+        assert!(row[0] >= 1 && row[4] >= 1, "both scale ends must appear");
+    }
+}

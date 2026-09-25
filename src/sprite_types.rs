@@ -32,13 +32,14 @@ impl OccurrenceConstraints {
 pub struct RestrictionsMinimum(pub HashMap<i32, usize>);
 
 impl RestrictionsMinimum {
-    /// At least one response at each of `min` and `max`, both given in
-    /// hundredths: `from_range(100, 500)` for a 1-5 scale, not
-    /// `from_range(1, 5)`.
+    /// At least one response at each of `min` and `max`, given as scale
+    /// values: `from_range(1, 5)` for a 1-5 scale. The keys it stores are in
+    /// hundredths like all others.
     pub fn from_range(min: i32, max: i32) -> Self {
         let mut map = HashMap::new();
-        map.insert(min, 1);
-        map.insert(max, 1);
+        // Saturating, so an absurd scale gives an invalid key, not a panic.
+        map.insert(min.saturating_mul(100), 1);
+        map.insert(max.saturating_mul(100), 1);
         Self(map)
     }
 
@@ -98,6 +99,7 @@ impl RestrictionsOption {
         RestrictionsOption::Default
     }
 
+    /// [`RestrictionsMinimum::from_range`] for scale values `min` and `max`.
     pub fn construct_from_default(self, min: i32, max: i32) -> Self {
         RestrictionsOption::Opt(Some(RestrictionsMinimum::from_range(min, max)))
     }

@@ -141,9 +141,9 @@ where
     // Handle restrictions
     let restrictions_exact = restrictions_exact.unwrap_or_default();
     let restrictions_minimum = match restrictions_minimum {
-        RestrictionsOption::Default => Some(
-            RestrictionsMinimum::from_range(scale_min_i32 * 100, scale_max_i32 * 100).extract(),
-        ),
+        RestrictionsOption::Default => {
+            Some(RestrictionsMinimum::from_range(scale_min_i32, scale_max_i32).extract())
+        }
         RestrictionsOption::Opt(opt_map) => opt_map.map(|rm| rm.extract()),
         RestrictionsOption::Null => None,
     };

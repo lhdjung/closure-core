@@ -551,7 +551,8 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 | "Return an error from closure_count on invalid input" | `closure_count` returns `Result<u64, ParameterError>` (3.6) |
 | `745928f` | SPRITE streaming honours `stop_after` |
 | `f799da3`, `31c452a`, `0c1c877` | Overflow and range checks turned into errors |
-| `0c74d37`, `be5a3f7` | Restriction docs. unsum passes `NULL`, i.e. `RestrictionsOption::Null`, so neither the default "both scale ends" rule nor the hundredths keys affect it. |
+| `0c74d37`, `be5a3f7` | Restriction docs. unsum passes `NULL`, i.e. `RestrictionsOption::Null`, so neither the default "both scale ends" rule nor the hundredths keys affect it. If `restrict_exact` / `restrict_min` are ever exposed, their names must be hundredths (`"300"` for the value 3), which is what `parse_restrict_*` in the binding already passes through. |
+| "Take scale values in RestrictionsMinimum::from_range" | `from_range(1, 5)` now means the scale values 1 and 5; it used to need `from_range(100, 500)`. unsum does not call it. |
 
 ---
 
