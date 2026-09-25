@@ -119,6 +119,9 @@ pub enum ParameterError {
     Consistency(String),
     #[error("{0}")]
     Conflict(String),
+    /// Results could not be written where the caller asked for them.
+    #[error("{0}")]
+    Output(String),
 }
 
 // Re-export sprite types needed for the public API
@@ -1771,6 +1774,23 @@ where
     Ok(closure_results)
 }
 
+/// The directory a streaming run writes into, created if missing, with the
+/// trailing separator [`normalize_base_path`] adds.
+///
+/// Streaming used to read a `file_path` that was not an existing directory as
+/// a file-name prefix (`out` gave `out_counts.parquet`) where memory mode wrote
+/// `out/counts.parquet`. It also never created a missing directory named with
+/// a trailing slash, then reported the failed run as zero samples found.
+pub(crate) fn prepare_output_dir(file_path: &str) -> Result<String, ParameterError> {
+    let base_path = normalize_base_path(file_path);
+    std::fs::create_dir_all(&base_path).map_err(|e| {
+        ParameterError::Output(format!(
+            "could not create output directory '{base_path}': {e}"
+        ))
+    })?;
+    Ok(base_path)
+}
+
 /// Append a trailing separator so `{base_path}name.parquet` lands inside the
 /// directory the caller named.
 fn normalize_base_path(file_path: &str) -> String {
@@ -2397,24 +2417,8 @@ where
     let freq_state = Arc::new(Mutex::new(StreamingFrequencyState::new(grid_len, n_usize)));
     let freq_state_for_thread = freq_state.clone();
 
-    // Handle file paths more carefully
-    let base_path = if config.file_path.ends_with('/') {
-        config.file_path.clone()
-    } else if std::path::Path::new(&config.file_path).is_dir() {
-        format!("{}/", config.file_path)
-    } else {
-        // If it doesn't exist or isn't a directory, treat as a prefix
-        format!("{}_", config.file_path)
-    };
-
-    // Create parent directory if needed
-    if let Some(parent) = std::path::Path::new(&base_path).parent() {
-        if !parent.to_str().unwrap_or("").is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("Warning: Could not create directory {:?}: {}", parent, e);
-            }
-        }
-    }
+    // One directory per run, as in memory mode.
+    let base_path = prepare_output_dir(&config.file_path)?;
 
     // Spawn the shared writer thread. It owns the output format; this path
     // only feeds it (counts, horns) pairs.

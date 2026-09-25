@@ -361,3 +361,58 @@ fn sprite_with_every_response_fixed_does_not_panic() {
     assert_eq!(run(2.5), 0);
     assert_eq!(run(3.0), 1);
 }
+
+#[test]
+fn streaming_writes_into_the_named_directory_and_creates_it() {
+    use closure_core::{sprite_parallel_streaming, RestrictionsOption};
+
+    // Streaming used to read `out` (not an existing directory) as a file-name
+    // prefix, writing `out_counts.parquet` where memory mode wrote
+    // `out/counts.parquet`, and never created a missing `out/`: that run
+    // returned Ok with zero samples and wrote nothing.
+    let root = std::env::temp_dir().join("closure_regression_stream_dirs");
+    let _ = std::fs::remove_dir_all(&root);
+    for (i, suffix) in ["", "/"].iter().enumerate() {
+        let closure_dir = root.join(format!("closure{i}/nested"));
+        let path = format!("{}{suffix}", closure_dir.display());
+        let result = closure_parallel_streaming::<f64, i32>(
+            3.0,
+            1.0,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            StreamingConfig::new(path, 100, false),
+            None,
+        )
+        .unwrap();
+        assert!(result.total_combinations > 0);
+        assert!(closure_dir.join("counts.parquet").exists(), "{suffix:?}");
+        assert!(
+            closure_dir.join("metrics_main.parquet").exists(),
+            "{suffix:?}"
+        );
+
+        let sprite_dir = root.join(format!("sprite{i}/nested"));
+        let path = format!("{}{suffix}", sprite_dir.display());
+        sprite_parallel_streaming::<f64, i32>(
+            2.2,
+            1.3,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            RestrictionsOption::Default,
+            StreamingConfig::new(path, 100, false),
+            Some(5),
+        )
+        .unwrap();
+        assert!(sprite_dir.join("counts.parquet").exists(), "{suffix:?}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

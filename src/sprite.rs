@@ -531,23 +531,8 @@ where
     )));
     let freq_state_for_thread = freq_state.clone();
 
-    // Handle file paths
-    let base_path = if config.file_path.ends_with('/') {
-        config.file_path.clone()
-    } else if std::path::Path::new(&config.file_path).is_dir() {
-        format!("{}/", config.file_path)
-    } else {
-        format!("{}_", config.file_path)
-    };
-
-    // Create parent directory if needed
-    if let Some(parent) = std::path::Path::new(&base_path).parent() {
-        if !parent.to_str().unwrap_or("").is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("Warning: Could not create directory {:?}: {}", parent, e);
-            }
-        }
-    }
+    // One directory per run, as in memory mode.
+    let base_path = crate::prepare_output_dir(&config.file_path)?;
 
     // Spawn the shared writer thread. It owns the output format; this path
     // only feeds it (counts, horns) pairs.
