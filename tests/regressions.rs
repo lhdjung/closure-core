@@ -298,3 +298,36 @@ fn multi_item_sprite_samples_match_on_the_real_grid() {
         assert_eq!(row[1], 2, "1 1/3 must appear exactly twice");
     }
 }
+
+#[test]
+fn sprite_reaches_every_total_the_mean_tolerance_allows() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // Mean 3.0 ± 0.05 at n = 100 admits totals 295..=305. Every attempt used
+    // to aim at exactly 300, and no step of the search changes the total, so
+    // all 170-odd samples SPRITE found had the same sum.
+    let results = sprite_parallel::<f64, i32>(
+        3.0,
+        1.0,
+        100,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        None,
+        RestrictionsOption::Default,
+        None,
+        Some(2000),
+    )
+    .unwrap();
+    let values = results.results.counts.grid().values().to_vec();
+    let mut totals = std::collections::BTreeSet::new();
+    for row in results.results.counts.rows() {
+        let (mean, sd) = row_mean_sd(row, &values);
+        assert!((mean - 3.0).abs() <= 0.05 + 1e-9, "mean {mean}");
+        assert!((sd - 1.0).abs() <= 0.05 + 1e-9, "sd {sd}");
+        totals.insert((mean * 100.0).round() as i64);
+    }
+    assert_eq!(totals, (295..=305).collect());
+}

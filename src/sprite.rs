@@ -22,8 +22,10 @@ const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
 const MAX_DUP_LOOPS: u32 = 20;
 const DUST: f64 = 1e-12;
-/// Lincoln-Petersen coverage target: stop when N̂ = n_found + cumulative_dup and
-/// n_found / N̂ ≥ this threshold (i.e. we estimate ≥ 99 % of all valid distributions found).
+/// Stop once this share of all draws are duplicates. Under uniform sampling
+/// that share estimates the fraction of the solution space already found, but
+/// SPRITE's random walk is not uniform, so it only says that the part of the
+/// space SPRITE tends to reach looks exhausted.
 const LP_COVERAGE_THRESHOLD: f64 = 0.99;
 
 // Internal struct to hold the final, validated parameters (generic version)
@@ -338,7 +340,7 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
     }
 }
 
-/// Main SPRITE API: Generate all valid distributions matching summary statistics
+/// Main SPRITE API: Generate valid distributions matching summary statistics at random
 ///
 /// This is the SPRITE equivalent of `closure_parallel()`. It finds multiple possible
 /// distributions of raw data that match the given mean and standard deviation.
@@ -737,8 +739,7 @@ fn find_distributions_all_streaming<T, U>(
             if duplicate_rate >= LP_COVERAGE_THRESHOLD {
                 if config.show_progress {
                     eprintln!(
-                        "Warning: Duplicate rate {:.1}% — estimated {:.1}% of valid distributions found ({} unique). Stopping search.",
-                        duplicate_rate * 100.0,
+                        "Warning: Duplicate rate {:.1}%: the distributions SPRITE reaches look exhausted ({} unique). Stopping search.",
                         duplicate_rate * 100.0,
                         n_found as usize
                     );
@@ -832,8 +833,7 @@ where
             let duplicate_rate = cumulative_duplicates as f64 / total_draws;
             if duplicate_rate >= LP_COVERAGE_THRESHOLD {
                 eprintln!(
-                    "Warning: Duplicate rate {:.1}% — estimated {:.1}% of valid distributions found ({} unique). Stopping search.",
-                    duplicate_rate * 100.0,
+                    "Warning: Duplicate rate {:.1}%: the distributions SPRITE reaches look exhausted ({} unique). Stopping search.",
                     duplicate_rate * 100.0,
                     unique_distributions.len()
                 );
@@ -869,25 +869,41 @@ where
 
     let n_u32 = U::to_u32(&params.n).unwrap();
 
-    // Direct mean initialization (O(n)):
-    // Fill r_n slots with floor_val; raise exactly n_ceil of them to ceil_val so
-    // the integer sum equals the target sum exactly — no iterative adjustment needed.
     let pv = &params.possible_values_scaled;
     let mean_f64 = T::to_f64(&params.mean).unwrap();
     let scale_f64 = params.scale_factor as f64;
-    let mean_scaled_f64 = mean_f64 * scale_f64;
 
     let fixed_sum_init: i64 = params
         .fixed_responses_scaled
         .iter()
         .map(|v| U::to_i64(v).unwrap())
         .sum();
-    let total_target_sum: i64 = (mean_f64 * n_usize as f64 * scale_f64).round() as i64;
+
+    // Every total within the mean tolerance is admissible, and the SD phase
+    // below never changes the total, so each attempt aims at one of them at
+    // random. Aiming every attempt at `round(mean * n)` left all the other
+    // admissible totals unreachable.
+    let n_units = n_usize as f64 * scale_f64;
+    let (pv_min, pv_max) = match (pv.first(), pv.last()) {
+        (Some(lo), Some(hi)) => (U::to_i64(lo).unwrap(), U::to_i64(hi).unwrap()),
+        _ => (0, 0),
+    };
+    let sum_lo = (((mean_f64 - params.mean_tolerance) * n_units).ceil() as i64)
+        .max(fixed_sum_init + r_n as i64 * pv_min);
+    let sum_hi = (((mean_f64 + params.mean_tolerance) * n_units).floor() as i64)
+        .min(fixed_sum_init + r_n as i64 * pv_max);
+    if sum_lo > sum_hi {
+        return Err("No total within the mean tolerance is reachable.".to_string());
+    }
+    let total_target_sum = rng.random_range(sum_lo..=sum_hi);
     let vec_target_sum = total_target_sum - fixed_sum_init;
 
-    // Index of the largest pv entry ≤ mean_scaled (floor)
+    // Direct mean initialization (O(n)): fill the r_n free slots with the
+    // grid value just below their target mean and raise exactly enough of them
+    // to the next one that the total is hit exactly.
+    let slot_mean = vec_target_sum as f64 / r_n.max(1) as f64;
     let floor_idx = pv
-        .partition_point(|v| (U::to_i64(v).unwrap() as f64) <= mean_scaled_f64 + 1e-9)
+        .partition_point(|v| (U::to_i64(v).unwrap() as f64) <= slot_mean + 1e-9)
         .saturating_sub(1);
 
     let mut vec: Vec<U> = if !pv.is_empty() && r_n > 0 {
@@ -1620,25 +1636,10 @@ pub mod tests {
                 let computed_mean = mean(&sample_values);
                 let computed_sd = std_dev(&sample_values).unwrap();
 
-                // Check that mean is within tolerance
-                let mean_diff = (computed_mean - expected_mean).abs();
-                assert!(
-                    mean_diff <= rounding_error_mean,
-                    "Mean mismatch: expected {}, got {} (diff: {})",
-                    expected_mean,
-                    computed_mean,
-                    mean_diff
-                );
-
-                // Check that SD is within tolerance
-                let sd_diff = (computed_sd - expected_sd).abs();
-                assert!(
-                    sd_diff <= rounding_error_sd,
-                    "SD mismatch: expected {}, got {} (diff: {})",
-                    expected_sd,
-                    computed_sd,
-                    sd_diff
-                );
+                // Inclusive, with the search's float slack: a sample whose
+                // total sits on the edge of the tolerance is admissible.
+                assert_within(computed_mean, expected_mean, rounding_error_mean, "mean");
+                assert_within(computed_sd, expected_sd, rounding_error_sd, "sd");
 
                 total_samples_checked += 1;
             }
@@ -1718,7 +1719,7 @@ pub mod tests {
     /// In practice SPRITE's random walk only reaches a subset of all valid distributions
     /// (Cause 2, sampling bias), so LP fires when that subset is saturated rather than when
     /// the full space is covered. The number of unique distributions found is therefore bounded
-    /// by the accessible neighborhood (~168–300 for these inputs in typical runs). This test
+    /// by the accessible neighborhood (~1,400–1,500 for these inputs in typical runs). This test
     /// simply verifies that SPRITE finds at least 100 distributions — more than the old
     /// formula's hard floor of 99 — and that all returned distributions are valid.
     #[test]
