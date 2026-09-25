@@ -33,7 +33,7 @@
 //!
 //! Modality of an integer count vector is not well defined on its own. Ties are
 //! common and one count of difference creates or destroys a "strict local
-//! maximum": `(30, 29, 30, 29, 32)` has three of them and is, by any reasonable
+//! maximum": `(30, 29, 30, 29, 30)` has three of them and is, by any reasonable
 //! reading, flat. Mode detection here therefore requires *topographic
 //! prominence* — a candidate peak must rise by at least
 //! [`DEFAULT_MODE_PROMINENCE`] of the sample above the higher of the two
