@@ -134,7 +134,8 @@ fn the_dp_counter_agrees_with_the_enumeration() {
             for sd in SDS {
                 for rem in REMS {
                     let enumerated = run(mean, sd, n, rem).results.counts.nrow() as u64;
-                    let counted = closure_count(mean, sd, n, SCALE_MIN, SCALE_MAX, rem, rem);
+                    let counted =
+                        closure_count(mean, sd, n, SCALE_MIN, SCALE_MAX, rem, rem).unwrap();
                     assert_eq!(
                         enumerated, counted,
                         "enumeration and DP count disagree at mean={mean} sd={sd} n={n} rem={rem}"
@@ -450,7 +451,7 @@ fn the_representative_is_an_actual_sample_and_the_expectation_need_not_be() {
 fn large_n_still_agrees_with_the_dp_counter() {
     for n in [200, 400] {
         let enumerated = run(3.0, 1.3, n, 0.005).results.counts.nrow() as u64;
-        let counted = closure_count(3.0, 1.3, n, SCALE_MIN, SCALE_MAX, 0.005, 0.005);
+        let counted = closure_count(3.0, 1.3, n, SCALE_MIN, SCALE_MAX, 0.005, 0.005).unwrap();
         assert_eq!(enumerated, counted, "disagreement at n={n}");
     }
 }

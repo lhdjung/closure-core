@@ -6,7 +6,7 @@ use closure_core::{closure_count, closure_parallel};
 use std::time::Instant;
 
 fn main() {
-    println!("closure_count() vs closure_parallel() — head-to-head benchmark");
+    println!("closure_count().unwrap() vs closure_parallel() — head-to-head benchmark");
     println!("All cases use items=1, parquet_config=None, stop_after=None");
     println!("* = wider rounding tolerance (0.1 instead of 0.05)");
     println!();
@@ -26,7 +26,8 @@ fn main() {
             c.scale_max,
             c.re_mean,
             c.re_sd,
-        );
+        )
+        .unwrap();
         let t_count = start.elapsed();
 
         let start = Instant::now();

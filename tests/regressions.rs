@@ -29,7 +29,7 @@ fn a_sample_size_equal_to_the_seed_depth_is_still_checked() {
         .map(|i| results.results.sample(i))
         .collect();
     assert_eq!(samples, vec![vec![3, 3]]);
-    assert_eq!(closure_count(3.0, 0.0, 2, 1, 5, 0.0, 0.0), 1);
+    assert_eq!(closure_count(3.0, 0.0, 2, 1, 5, 0.0, 0.0).unwrap(), 1);
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn a_sample_exactly_on_a_bound_is_found() {
     assert!(!results.results.is_empty());
     assert_eq!(
         results.results.len() as u64,
-        closure_count(3.24, 1.0, 25, 1, 5, 0.0, 0.05)
+        closure_count(3.24, 1.0, 25, 1, 5, 0.0, 0.05).unwrap()
     );
 }
 
@@ -62,7 +62,7 @@ fn the_counter_agrees_with_the_search_on_negative_scales() {
         let results =
             closure_parallel::<f64, i32>(mean, sd, n, lo, hi, 0.05, 0.05, 1, None, None).unwrap();
         assert_eq!(
-            closure_count(mean, sd, n, lo, hi, 0.05, 0.05),
+            closure_count(mean, sd, n, lo, hi, 0.05, 0.05).unwrap(),
             results.results.len() as u64,
             "mean={mean} sd={sd} n={n} scale=[{lo},{hi}]"
         );
@@ -154,7 +154,8 @@ fn invalid_parameters_are_errors_not_panics() {
 #[test]
 fn the_counter_rejects_what_the_search_rejects() {
     // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
-    // read as "SD between 0 and 0.95" and counted 10 samples.
+    // read as "SD between 0 and 0.95" and counted 10 samples. It now returns
+    // the error `closure_parallel` does.
     for (mean, sd, re_mean, re_sd) in [
         (3.0, -1.0, 0.05, 0.05),
         (3.0, 1.0, -0.05, 0.05),
@@ -166,7 +167,7 @@ fn the_counter_rejects_what_the_search_rejects() {
             closure_parallel::<f64, i32>(mean, sd, 10, 1, 5, re_mean, re_sd, 1, None, None)
                 .is_err()
         );
-        assert_eq!(closure_count(mean, sd, 10, 1, 5, re_mean, re_sd), 0);
+        assert!(closure_count(mean, sd, 10, 1, 5, re_mean, re_sd).is_err());
     }
 }
 
@@ -197,7 +198,7 @@ fn a_sample_is_found_from_its_own_exact_statistics() {
         let found = (0..results.results.len()).any(|i| results.results.sample(i) == sample);
         assert!(found, "{sample:?} not found from mean={mean} sd={sd}");
         assert_eq!(
-            closure_count(mean, sd, n, lo, hi, 0.0, 0.0),
+            closure_count(mean, sd, n, lo, hi, 0.0, 0.0).unwrap(),
             results.results.len() as u64
         );
     }

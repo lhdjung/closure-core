@@ -44,16 +44,17 @@ skipped.
 | 4 | `FrequencyTable::f_count()` was removed | compile | Use `f_expected()` and `f_representative()` | `lib.rs` `frequency_table_to_robj` |
 | 5 | `ResultsTable.sample` field was removed | compile | Use `results.sample(i)` | `lib.rs` `results_table_to_robj` |
 | 6 | Error messages come through `Display` | readable errors | `format!("{}", e)`, not `{:?}` | `lib.rs`, 3 places |
-| 7 | `frequency` columns: `f_count` → `f_expected` + `f_representative`; `value` is now double | every generator call | Update the schema check and every `f_count` use | `R/utils.R`, plots, predicates, docs |
-| 8 | `value` columns of `frequency_dist`, `modality_counts`, `modality_pairs` are now double | every generator call | Update the schema check | `R/utils.R` |
-| 9 | `modality_conclusion` can be `NA`, and its columns mean different things | results, docs | Handle `NA` and update the docs | `R/s7-result.R`, docs |
-| 10 | Streaming writes 5 more files (`modality_*.parquet`) | `path = ` runs | Extend `FILES_EXPECTED`, read the new files | `R/constants.R`, `R/read-write-basic.R` |
-| 11 | Multi-item SPRITE tables are one row per grid value, not per integer | SPRITE `items > 1` | Use the grid length, not `scale_max - scale_min + 1` | `R/utils.R` |
-| 12 | Empty streaming runs write every file | empty results | Retire the empty-folder special case | `R/read-write-basic.R` |
-| 13 | Numbers differ: CLOSURE boundaries, SPRITE coverage, and more | tests, NEWS | Update snapshots and NEWS | `tests/`, `NEWS.md` |
+| 7 | `closure_count` returns `Result<u64, ParameterError>` | nothing at compile time; see 3.6 | Match on the result | `lib.rs` `count_closure_combinations`, `R/count.R` |
+| 8 | `frequency` columns: `f_count` → `f_expected` + `f_representative`; `value` is now double | every generator call | Update the schema check and every `f_count` use | `R/utils.R`, plots, predicates, docs |
+| 9 | `value` columns of `frequency_dist`, `modality_counts`, `modality_pairs` are now double | every generator call | Update the schema check | `R/utils.R` |
+| 10 | `modality_conclusion` can be `NA`, and its columns mean different things | results, docs | Handle `NA` and update the docs | `R/s7-result.R`, docs |
+| 11 | Streaming writes 5 more files (`modality_*.parquet`) | `path = ` runs | Extend `FILES_EXPECTED`, read the new files | `R/constants.R`, `R/read-write-basic.R` |
+| 12 | Multi-item SPRITE tables are one row per grid value, not per integer | SPRITE `items > 1` | Use the grid length, not `scale_max - scale_min + 1` | `R/utils.R` |
+| 13 | Empty streaming runs write every file | empty results | Retire the empty-folder special case | `R/read-write-basic.R` |
+| 14 | Numbers differ: CLOSURE boundaries, SPRITE coverage, and more | tests, NEWS | Update snapshots and NEWS | `tests/`, `NEWS.md` |
 
-Rows 1–6 are all in the binding patch in [Appendix A](#appendix-a-full-binding-patch),
-which compiles and is verified end to end. Rows 7–12 are R changes, set out
+Rows 1–7 are all in the binding patch in [Appendix A](#appendix-a-full-binding-patch),
+which compiles and is verified end to end. Rows 8–13 are R changes, set out
 in [section 4](#4-step-3-the-r-code).
 
 ---
@@ -94,7 +95,8 @@ error[E0609]: no field `modality_conclusion` on type `&ResultListFromMeanSdN<i32
 error[E0615]: attempted to take value of method `sample` on type `&ResultsTable<i32>`
 ```
 
-Each subsection below fixes one of them. The complete patch is in
+Sections 3.1–3.4 fix them. Sections 3.5 and 3.6 cover changes that compile
+unchanged but behave differently. The complete patch is in
 [Appendix A](#appendix-a-full-binding-patch). It compiles without warnings and
 is what the verification ran on.
 
@@ -206,6 +208,30 @@ gets just the message. *Verified:*
 "CLOSURE error: sd and the rounding errors must not be negative"
 "Streaming error: failed to write results: failed to create the sample file under '…/bad/': Is a directory (os error 21)"
 ```
+
+### 3.6 `closure_count` returns a `Result`
+
+`closure_count(...)` now returns `Result<u64, ParameterError>`. It gives the
+same error `closure_parallel` gives for the same invalid input (negative SD or
+tolerance, non-finite values, `n < 2`, `scale_min > scale_max`, scale out of
+range). It used to return `0` for those, and before that it counted them.
+
+**This does not break the build.** `Robj::from(count)` still compiles, because
+extendr converts any `Result` into an `Robj`. With extendr's default
+`result_panic` feature, an `Err` then becomes a Rust panic, which reaches R as
+an unhelpful error. Match on it instead, as the patch does:
+
+```rust
+match closure_count(mean, sd, n, scale_min, scale_max, rounding_error_mean, rounding_error_sd) {
+    Ok(count) => Robj::from(count),
+    Err(e) => Robj::from(format!("CLOSURE error: {}", e)),
+}
+```
+
+On the R side, `closure_count_all()` (`R/count.R`) should then treat a
+character result the way `generate-basic.R` does: abort with the message.
+Normally unsum's own argument checks catch invalid input before it gets that
+far.
 
 ---
 
@@ -356,8 +382,9 @@ a bar plot of the medoid), and fall back or warn when it is `NaN`.
 - It now agrees exactly with the number of samples `closure_generate()` finds,
   including samples sitting exactly on a bound and negative scales.
 - Input that `closure_generate()` would reject (negative SD or tolerance,
-  non-finite values, `n < 2`, `scale_min > scale_max`) returns `0`, not an
-  error. unsum validates these in R first, so nothing changes in practice.
+  non-finite values, `n < 2`, `scale_min > scale_max`) is now an error; see
+  3.6 for handling it. unsum validates these in R first, so it should not
+  happen in practice.
 - Counts above about 1.8e19 saturate at `u64::MAX` instead of wrapping to a
   small number. R receives a double (*verified*: `numeric double 48`), so
   `1.844674e+19` means "at least this many".
@@ -411,7 +438,9 @@ all of them belong in `NEWS.md`.
 ## 6. New errors
 
 All of these arrive in R as the character string the binding returns. unsum
-already turns that into `abort_in_export()` and deletes the new folder.
+already turns that into `abort_in_export()` and deletes the new folder. The
+input errors also come from `count_closure_combinations()` once it is patched
+as in 3.6.
 
 | Condition | Error | Before |
 |---|---|---|
@@ -519,6 +548,7 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 | `6fcadce` | SPRITE `n = 2` with default restrictions no longer panics |
 | `af4236e`, `57b36b1` | Output folder semantics; write failures are errors (`ParameterError::Output`) |
 | `b6e7a47`, `9b939b5` | `closure_count` validation and saturation |
+| "Return an error from closure_count on invalid input" | `closure_count` returns `Result<u64, ParameterError>` (3.6) |
 | `745928f` | SPRITE streaming honours `stop_after` |
 | `f799da3`, `31c452a`, `0c1c877` | Overflow and range checks turned into errors |
 | `0c74d37`, `be5a3f7` | Restriction docs. unsum passes `NULL`, i.e. `RestrictionsOption::Null`, so neither the default "both scale ends" rule nor the hundredths keys affect it. |
@@ -559,7 +589,7 @@ run on a package built with exactly this file.
          }))
      }
  }
-@@ -105,13 +108,87 @@
+@@ -105,25 +108,99 @@
      .into()
  }
  
@@ -581,10 +611,10 @@ run on a package built with exactly this file.
 +        can_be_bimodal  = vec![to_rbool(ms.can_be_multimodal())],
 +        j_shape_low     = vec![to_rbool(ms.can_be_j_shape_low())],
 +        j_shape_high    = vec![to_rbool(ms.can_be_j_shape_high())]
-+    )
-+    .into()
-+}
-+
+     )
+     .into()
+ }
+ 
 +/// Long format, one row per (class, grid value), like `modality_shapes.parquet`.
 +fn modality_shapes_to_robj(ms: &ModalityShapes, values: &[f64]) -> Robj {
 +    let (mut class, mut n_samples, mut value, mut count_lo, mut count_hi) =
@@ -650,10 +680,10 @@ run on a package built with exactly this file.
 +        primary = primary,
 +        class = class,
 +        n_samples = n_samples
-     )
-     .into()
- }
-@@ -119,11 +196,11 @@
++    )
++    .into()
++}
++
  /// Helper function to convert FrequencyTable to R data frame
  /// The frequency table now includes a 'samples' column as the first column
  fn frequency_table_to_robj(freq_table: &closure_core::FrequencyTable) -> Robj {
@@ -707,7 +737,32 @@ run on a package built with exactly this file.
          .collect();
  
      // Create a list of samples (each element is a vector)
-@@ -406,7 +482,7 @@
+@@ -289,7 +365,9 @@
+     rounding_error_mean: f64,
+     rounding_error_sd: f64,
+ ) -> Robj {
+-    let count = closure_count(
++    // Invalid input is an error now, not a count of 0; report it the way
++    // `create_combinations()` does.
++    match closure_count(
+         mean,
+         sd,
+         n,
+@@ -297,9 +375,10 @@
+         scale_max,
+         rounding_error_mean,
+         rounding_error_sd,
+-    );
+-
+-    Robj::from(count)
++    ) {
++        Ok(count) => Robj::from(count),
++        Err(e) => Robj::from(format!("CLOSURE error: {}", e)),
++    }
+ }
+ 
+ #[extendr]
+@@ -406,7 +485,7 @@
          let result = match result {
              Ok(r) => r,
              Err(e) => {
@@ -716,7 +771,7 @@ run on a package built with exactly this file.
              }
          };
          let result_list = list!(
-@@ -435,7 +511,7 @@
+@@ -435,7 +514,7 @@
              ) {
                  Ok(results) => results,
                  Err(e) => {
@@ -725,7 +780,7 @@ run on a package built with exactly this file.
                  }
              }
          }
-@@ -463,7 +539,7 @@
+@@ -463,7 +542,7 @@
              ) {
                  Ok(results) => results,
                  Err(e) => {

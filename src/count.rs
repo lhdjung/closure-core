@@ -4,7 +4,7 @@
 //! without enumerating them, using dynamic programming over frequency
 //! assignments for each scale value.
 
-use crate::{ClosureSearchContext, SearchBounds};
+use crate::{ClosureSearchContext, ParameterError, SearchBounds};
 use std::collections::HashMap;
 
 /// Count valid sorted combinations that CLOSURE would find.
@@ -31,9 +31,12 @@ use std::collections::HashMap;
 /// - `rounding_error_mean`, `rounding_error_sd`: Allowed rounding tolerances
 ///
 /// # Returns
-/// The number of valid sorted combinations, or 0 for any input that
-/// `closure_parallel` rejects as invalid. Counts beyond `u64::MAX` (about
+/// The number of valid sorted combinations. Counts beyond `u64::MAX` (about
 /// 1.8e19) saturate there rather than wrapping around to a small number.
+///
+/// # Errors
+/// The same [`ParameterError`] `closure_parallel` returns for the same
+/// input, such as a negative `sd` or `n < 2`.
 pub fn closure_count(
     mean: f64,
     sd: f64,
@@ -42,10 +45,10 @@ pub fn closure_count(
     scale_max: i32,
     rounding_error_mean: f64,
     rounding_error_sd: f64,
-) -> u64 {
+) -> Result<u64, ParameterError> {
     // The same validation `closure_parallel` runs. Without it a negative `sd`
     // was read as a band of SDs from 0 up to |sd| minus the tolerance.
-    if ClosureSearchContext::new(
+    ClosureSearchContext::new(
         mean,
         sd,
         n,
@@ -53,11 +56,7 @@ pub fn closure_count(
         scale_max,
         rounding_error_mean,
         rounding_error_sd,
-    )
-    .is_err()
-    {
-        return 0;
-    }
+    )?;
 
     let n_usize = n as usize;
     let n_i64 = n as i64;
@@ -69,7 +68,7 @@ pub fn closure_count(
     let sum_lower = bounds.sum_lo.max(n_i64 * scale_min as i64);
     let sum_upper = bounds.sum_hi.min(n_i64 * scale_max as i64);
     if sum_lower > sum_upper {
-        return 0;
+        return Ok(0);
     }
 
     // Global sum_sq bounds for pruning (across all valid sums).
@@ -188,7 +187,7 @@ pub fn closure_count(
         accumulate_if_valid(&mut total, count, sum, sum_sq, n_i64, &bounds);
     }
 
-    total
+    Ok(total)
 }
 
 /// Check sum and variance constraints; if valid, add `count` to `total`.
@@ -220,20 +219,20 @@ mod tests {
     fn test_count_single_solution() {
         // n=3, scale=[1,3], mean=2.0, sd=1.0
         // Only {1,2,3}: sum=6, sum_sq=14, var_nm1=14-36/3=2, sd=sqrt(2/2)=1.0
-        assert_eq!(closure_count(2.0, 1.0, 3, 1, 3, 0.0, 0.0), 1);
+        assert_eq!(closure_count(2.0, 1.0, 3, 1, 3, 0.0, 0.0).unwrap(), 1);
     }
 
     #[test]
     fn test_count_all_same() {
         // n=4, scale=[1,3], mean=2.0, sd=0.0
         // Only {2,2,2,2}
-        assert_eq!(closure_count(2.0, 0.0, 4, 1, 3, 0.0, 0.0), 1);
+        assert_eq!(closure_count(2.0, 0.0, 4, 1, 3, 0.0, 0.0).unwrap(), 1);
     }
 
     #[test]
     fn test_count_no_solutions() {
         // mean=1.5 with n=3 requires sum=4.5, not an integer → 0 solutions
-        assert_eq!(closure_count(1.5, 0.5, 3, 1, 3, 0.0, 0.0), 0);
+        assert_eq!(closure_count(1.5, 0.5, 3, 1, 3, 0.0, 0.0).unwrap(), 0);
     }
 
     #[test]
@@ -257,7 +256,7 @@ mod tests {
         //   {2,3,3,3} sum=11 — out of range
         //   {3,3,3,3} sum=12 — out of range
         // That's 11 in sum range. Now filter by SD <= 100 (wide tolerance):
-        let count = closure_count(2.0, 1.0, 4, 1, 3, 0.5, 100.0);
+        let count = closure_count(2.0, 1.0, 4, 1, 3, 0.5, 100.0).unwrap();
         assert_eq!(count, 11);
     }
 
@@ -265,7 +264,7 @@ mod tests {
     fn test_count_n2() {
         // n=2, scale=[1,5], mean=3.0, sd=0
         // Only {3,3}
-        assert_eq!(closure_count(3.0, 0.0, 2, 1, 5, 0.0, 0.0), 1);
+        assert_eq!(closure_count(3.0, 0.0, 2, 1, 5, 0.0, 0.0).unwrap(), 1);
 
         // n=2, scale=[1,5], mean=3.0, sd=sqrt(2) ≈ 1.4142
         // Need sum=6, var_nm1 = sum_sq - 36/2 = sum_sq - 18 = 2
@@ -273,14 +272,14 @@ mod tests {
         //   {2,4}: sum_sq=4+16=20 ✓
         // That's 1 solution
         let sd = (2.0_f64).sqrt();
-        assert_eq!(closure_count(3.0, sd, 2, 1, 5, 0.0, 0.0), 1);
+        assert_eq!(closure_count(3.0, sd, 2, 1, 5, 0.0, 0.0).unwrap(), 1);
     }
 
     #[test]
     fn test_count_edge_cases() {
-        assert_eq!(closure_count(1.0, 0.0, 0, 1, 5, 0.0, 0.0), 0); // n=0
-        assert_eq!(closure_count(1.0, 0.0, 1, 1, 5, 0.0, 0.0), 0); // n=1
-        assert_eq!(closure_count(1.0, 0.0, 5, 3, 2, 0.0, 0.0), 0); // invalid scale
+        assert!(closure_count(1.0, 0.0, 0, 1, 5, 0.0, 0.0).is_err()); // n=0
+        assert!(closure_count(1.0, 0.0, 1, 1, 5, 0.0, 0.0).is_err()); // n=1
+        assert!(closure_count(1.0, 0.0, 5, 3, 2, 0.0, 0.0).is_err()); // invalid scale
     }
 
     #[test]
@@ -302,7 +301,7 @@ mod tests {
         .unwrap();
         let expected = results.results.len() as u64;
 
-        let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd);
+        let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd).unwrap();
         assert_eq!(
             counted, expected,
             "count={counted} but closure_parallel found {expected}"
@@ -327,7 +326,7 @@ mod tests {
         .unwrap();
         let expected = results.results.len() as u64;
 
-        let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd);
+        let counted = closure_count(mean, sd, n, scale_min, scale_max, re_mean, re_sd).unwrap();
         assert_eq!(
             counted, expected,
             "count={counted} but closure_parallel found {expected}"
@@ -338,7 +337,7 @@ mod tests {
     fn test_count_moderate_case() {
         // n=10, scale=[1,7], mean=3.0, sd=2.0 — the benchmark from the plan
         // We just verify it completes quickly and returns a nonzero count.
-        let count = closure_count(3.0, 2.0, 10, 1, 7, 0.0, 0.0);
+        let count = closure_count(3.0, 2.0, 10, 1, 7, 0.0, 0.0).unwrap();
         assert!(count > 0, "Expected nonzero count for n=10 benchmark case");
     }
 
@@ -355,7 +354,7 @@ mod tests {
     ) {
         use crate::closure_parallel;
 
-        let counted = closure_count(mean, sd, n, smin, smax, re_m, re_s);
+        let counted = closure_count(mean, sd, n, smin, smax, re_m, re_s).unwrap();
 
         let results =
             closure_parallel::<f64, i32>(mean, sd, n, smin, smax, re_m, re_s, 1, None, None)
