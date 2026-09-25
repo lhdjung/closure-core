@@ -546,3 +546,28 @@ fn sprite_streaming_honours_stop_after() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sprite_without_a_limit_does_not_overflow() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // `stop_after = None` became `usize::MAX`, which was then multiplied by
+    // 20: a panic in debug builds. A small space lets the search end on its
+    // own duplicate-rate rule.
+    let results = sprite_parallel::<f64, i32>(
+        2.0,
+        0.9,
+        6,
+        1,
+        3,
+        0.05,
+        0.05,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!results.results.is_empty());
+}

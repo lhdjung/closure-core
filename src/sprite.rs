@@ -759,7 +759,8 @@ where
 
     // Process in batches for better control and early termination
     let batch_size = 100;
-    let max_iterations = n_distributions * MAX_DUP_LOOPS as usize;
+    // Saturating: `stop_after = None` arrives here as `usize::MAX`.
+    let max_iterations = n_distributions.saturating_mul(MAX_DUP_LOOPS as usize);
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
         if should_stop.load(Ordering::Relaxed) || results.len() >= n_distributions {
@@ -856,8 +857,6 @@ where
         return Err("No possible values to sample from for initialization.".to_string());
     }
 
-    let n_u32 = U::to_u32(&params.n).unwrap();
-
     let pv = &params.possible_values_scaled;
     let mean_f64 = T::to_f64(&params.mean).unwrap();
     let scale_f64 = params.scale_factor as f64;
@@ -935,11 +934,17 @@ where
 
     // Mean correction: no-op on the direct path (sum is exact); recovers the
     // fallback path or any floating-point edge case.
-    let max_loops_mean = n_u32 * pv.len() as u32;
+    // Both limits are computed in u64: n * k² overflows u32 on wide
+    // multi-item grids (n = 50,000 on 0..=100 at items = 3 is 4.5e9).
+    let n_u64 = n_usize as u64;
+    let k_u64 = pv.len() as u64;
+    let max_loops_mean = (n_u64 * k_u64).min(u32::MAX as u64) as u32;
     adjust_mean_internal(&mut vec, params, max_loops_mean, rng)?;
 
-    let max_loops_sd =
-        (n_u32 * (pv.len().pow(2) as u32)).clamp(MAX_DELTA_LOOPS_LOWER, MAX_DELTA_LOOPS_UPPER);
+    let max_loops_sd = n_u64
+        .saturating_mul(k_u64 * k_u64)
+        .clamp(MAX_DELTA_LOOPS_LOWER as u64, MAX_DELTA_LOOPS_UPPER as u64)
+        as u32;
     let sd_tolerance = T::from(params.sd_tolerance).unwrap();
 
     // Precompute fixed-part sums (constant for the lifetime of this attempt)
