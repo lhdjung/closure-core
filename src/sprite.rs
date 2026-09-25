@@ -313,8 +313,8 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
             rounding_error_mean,
             rounding_error_sd,
             items,
-            self.restrictions_exact.take(),
-            std::mem::replace(&mut self.restrictions_minimum, RestrictionsOption::Default),
+            self.restrictions_exact.clone(),
+            self.restrictions_minimum.clone(),
             parquet_config,
             stop_after,
         )
@@ -342,8 +342,8 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
             rounding_error_mean,
             rounding_error_sd,
             items,
-            self.restrictions_exact.take(),
-            std::mem::replace(&mut self.restrictions_minimum, RestrictionsOption::Default),
+            self.restrictions_exact.clone(),
+            self.restrictions_minimum.clone(),
             config,
             stop_after,
         )

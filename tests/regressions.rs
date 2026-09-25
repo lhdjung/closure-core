@@ -617,3 +617,36 @@ fn sprite_rejects_a_scale_its_integer_type_cannot_hold() {
     ));
     assert!(run(50, 3).is_ok());
 }
+
+#[test]
+fn a_sprite_keeps_its_restrictions_across_runs() {
+    use closure_core::{RestrictionsOption, Sprite, Technique};
+
+    // `run` used to `take()` the exact restrictions and reset the minimum
+    // ones to `Default`, so a second run on the same `Sprite` quietly ran
+    // unrestricted.
+    let mut sprite = Sprite {
+        restrictions_exact: Some([(300, 4)].into_iter().collect()),
+        restrictions_minimum: RestrictionsOption::Null,
+    };
+    for _ in 0..2 {
+        let results = <Sprite as Technique<f64, i32>>::run(
+            &mut sprite,
+            2.2,
+            1.3,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            Some(20),
+        )
+        .unwrap();
+        assert!(!results.results.is_empty());
+        for row in results.results.counts.rows() {
+            assert_eq!(row[2], 4, "the value 3 must appear exactly four times");
+        }
+    }
+}
