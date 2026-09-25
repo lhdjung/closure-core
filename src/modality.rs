@@ -831,8 +831,14 @@ impl ShapeAccumulator {
     /// Fold another accumulator over the same grid and thresholds into this
     /// one, so chunks of a result set can be scanned in parallel.
     pub fn merge(&mut self, other: Self) {
-        debug_assert_eq!(self.k, other.k);
-        debug_assert_eq!(self.ladder, other.ladder);
+        // The ladder alone does not pin the primary rung: 0.05 and 0.10 give
+        // the same default ladder, but per-class bounds taken at one would be
+        // silently merged into bounds taken at the other.
+        assert_eq!(
+            (self.k, self.n, &self.ladder, self.primary),
+            (other.k, other.n, &other.ladder, other.primary),
+            "can't merge shape accumulators over different grids or thresholds"
+        );
         for (mine, theirs) in self.ladder_counts.iter_mut().zip(other.ladder_counts) {
             for (a, b) in mine.iter_mut().zip(theirs) {
                 *a += b;
@@ -1440,6 +1446,14 @@ mod tests {
         for (a, b) in whole.ladder.iter().zip(&merged.ladder) {
             assert_eq!(a.n_per_class, b.n_per_class);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "different grids or thresholds")]
+    fn accumulators_at_different_primary_thresholds_do_not_merge() {
+        let mut a = ShapeAccumulator::new(5, 128, 0.05);
+        let b = ShapeAccumulator::new(5, 128, 0.10);
+        a.merge(b);
     }
 
     #[test]
