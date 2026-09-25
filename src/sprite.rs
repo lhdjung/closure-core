@@ -663,7 +663,14 @@ fn find_distributions_all_streaming<T, U>(
                     let hashable_values: Vec<i64> =
                         distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
 
+                    // Checked under the same lock as the insert, so no more
+                    // than `limit` samples are ever admitted, however many
+                    // attempts in the batch succeed at once.
                     let mut unique = unique_distributions.lock().unwrap();
+                    if stop_after.is_some_and(|limit| unique.len() >= limit) {
+                        should_stop.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     if unique.insert(hashable_values) {
                         drop(unique);
 

@@ -511,3 +511,38 @@ fn a_failed_write_is_an_error_not_an_empty_result() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sprite_streaming_honours_stop_after() {
+    use closure_core::{sprite_parallel_streaming, RestrictionsOption};
+
+    // The limit was checked before each attempt in a parallel batch, so every
+    // attempt already in flight still wrote its sample: `Some(3)` wrote 6 to
+    // 10.
+    let dir = std::env::temp_dir().join("closure_regression_sprite_stop_after");
+    for _ in 0..5 {
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = sprite_parallel_streaming::<f64, i32>(
+            2.2,
+            1.3,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            RestrictionsOption::Default,
+            StreamingConfig::new(dir.display().to_string(), 100, false),
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(result.total_combinations, 3);
+        let base = format!("{}/", dir.display());
+        assert_eq!(
+            f64_cell(&format!("{base}metrics_main.parquet"), "samples_all"),
+            3.0
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
