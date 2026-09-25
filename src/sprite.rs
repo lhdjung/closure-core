@@ -78,8 +78,12 @@ where
     U: IntegerType,
 {
     // Convert scale values to i32 for range checking and compatibility with existing logic
-    let scale_min_i32 = U::to_i32(&scale_min).unwrap();
-    let scale_max_i32 = U::to_i32(&scale_max).unwrap();
+    let (Some(scale_min_i32), Some(scale_max_i32)) = (U::to_i32(&scale_min), U::to_i32(&scale_max))
+    else {
+        return Err(ParameterError::InputValidation(
+            "scale_min and scale_max must fit in an i32".to_string(),
+        ));
+    };
 
     if scale_min_i32 >= scale_max_i32 {
         return Err(ParameterError::InputValidation(
@@ -107,6 +111,22 @@ where
     // instead rounded 1.333 to 1.3 at `items = 3`, and samples accepted on the
     // rounded values then missed the reported mean and SD on the real ones.
     let scale_factor = items;
+
+    // Internal values run from `scale_min * items` to `scale_max * items`, and
+    // samples are reported in hundredths; if both ends fit in `U` at both
+    // multipliers, so does everything between. Internal values that did not
+    // fit used to be dropped from the grid without a word, so samples could
+    // never use the top of the scale.
+    let fits_u = |v: i32| {
+        [items as i64, 100]
+            .iter()
+            .all(|&m| <U as NumCast>::from(v as i64 * m).is_some())
+    };
+    if !fits_u(scale_min_i32) || !fits_u(scale_max_i32) {
+        return Err(ParameterError::InputValidation(format!(
+            "scale values times 100 and times items ({items}) must fit in the sample's integer type"
+        )));
+    }
 
     // Check mean is in range
     let mean_f64 = T::to_f64(&mean).unwrap();
@@ -152,18 +172,14 @@ where
             let val_i32 = U::to_i32(&val).unwrap();
             let float_val = val_i32 as f64 + (i - 1) as f64 / items as f64;
             let scaled_val = (float_val * scale_factor as f64).round() as i64;
-            if let Some(u_val) = NumCast::from(scaled_val) {
-                poss_values_scaled.push(u_val);
-            }
+            poss_values_scaled.push(NumCast::from(scaled_val).expect("checked to fit"));
             val = val + U::one();
         }
     }
     // Add scale_max
     let max_i32 = U::to_i32(&scale_max).unwrap();
     let max_scaled = (max_i32 as f64 * scale_factor as f64).round() as i64;
-    if let Some(u_val) = NumCast::from(max_scaled) {
-        poss_values_scaled.push(u_val);
-    }
+    poss_values_scaled.push(NumCast::from(max_scaled).expect("checked to fit"));
 
     poss_values_scaled.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
     poss_values_scaled.dedup();
@@ -186,11 +202,8 @@ where
         }
         fixed_values_keys.insert(key);
         let scaled_val = (key as f64 / 100.0 * scale_factor as f64).round() as i64;
-        if let Some(u_val) = NumCast::from(scaled_val) {
-            for _ in 0..count {
-                fixed_responses_scaled.push(u_val);
-            }
-        }
+        let u_val: U = NumCast::from(scaled_val).expect("checked to fit");
+        fixed_responses_scaled.extend(std::iter::repeat_n(u_val, count));
     }
 
     if let Some(min_map) = restrictions_minimum {
@@ -202,11 +215,8 @@ where
                 )));
             }
             let scaled_val = (key as f64 / 100.0 * scale_factor as f64).round() as i64;
-            if let Some(u_val) = NumCast::from(scaled_val) {
-                for _ in 0..count {
-                    fixed_responses_scaled.push(u_val);
-                }
-            }
+            let u_val: U = NumCast::from(scaled_val).expect("checked to fit");
+            fixed_responses_scaled.extend(std::iter::repeat_n(u_val, count));
         }
     }
 

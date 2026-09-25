@@ -571,3 +571,38 @@ fn sprite_without_a_limit_does_not_overflow() {
     .unwrap();
     assert!(!results.results.is_empty());
 }
+
+#[test]
+fn sprite_rejects_a_scale_its_integer_type_cannot_hold() {
+    use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
+
+    // At items = 1000, a 1..=50 scale runs to 50,000 internal units, past i16.
+    // Values that did not fit used to be dropped from the grid silently.
+    let run = |scale_max: i16, items: u32| {
+        sprite_parallel::<f64, i16>(
+            25.0,
+            10.0,
+            20,
+            1,
+            scale_max,
+            0.05,
+            0.05,
+            items,
+            None,
+            RestrictionsOption::Default,
+            None,
+            Some(5),
+        )
+    };
+    assert!(matches!(
+        run(50, 1000),
+        Err(ParameterError::InputValidation(_))
+    ));
+    // Samples are reported in hundredths, which at 1..=500 reach 50,000.
+    // Reading one back used to panic instead.
+    assert!(matches!(
+        run(500, 1),
+        Err(ParameterError::InputValidation(_))
+    ));
+    assert!(run(50, 3).is_ok());
+}
