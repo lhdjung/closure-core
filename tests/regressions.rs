@@ -331,3 +331,33 @@ fn sprite_reaches_every_total_the_mean_tolerance_allows() {
     }
     assert_eq!(totals, (295..=305).collect());
 }
+
+#[test]
+fn sprite_with_every_response_fixed_does_not_panic() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // The default restrictions fix one response at each end of the scale, so
+    // at n = 2 nothing is left free. A mean other than 3 then sent the mean
+    // adjustment into `random_range(0..0)`.
+    let run = |mean: f64| {
+        sprite_parallel::<f64, i32>(
+            mean,
+            2.83,
+            2,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            RestrictionsOption::Default,
+            None,
+            Some(1),
+        )
+        .unwrap()
+        .results
+        .len()
+    };
+    assert_eq!(run(2.5), 0);
+    assert_eq!(run(3.0), 1);
+}

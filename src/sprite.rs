@@ -1061,6 +1061,10 @@ where
         if (current_mean_f64 - target_mean_f64).abs() <= params.mean_tolerance {
             return Ok(());
         }
+        // Every response is fixed by the restrictions: nothing can move.
+        if vec.is_empty() {
+            break;
+        }
 
         let current_mean = T::from(current_mean_f64).unwrap();
         let increase_mean = current_mean < target_mean;
