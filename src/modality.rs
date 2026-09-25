@@ -675,8 +675,9 @@ impl ShapeAccumulator {
     /// [`ModalityShapes::can_be`] be conservative in the threshold.
     pub fn new(k: usize, n: usize, min_prominence: f64) -> Self {
         // At least one observation, so a threshold of 0 does not admit ties as
-        // separate modes.
-        let to_counts = |p: f64| ((p * n as f64).ceil() as u32).max(1);
+        // separate modes. The slack keeps an exact product from rounding up a
+        // whole observation: 0.07 * 100 is 7.000000000000001 in f64.
+        let to_counts = |p: f64| ((p * n as f64 - 1e-9).ceil() as u32).max(1);
 
         let mut fractions: Vec<f64> = DEFAULT_PROMINENCE_LADDER.to_vec();
         // The configured threshold is always a rung, so `can_be` can never
@@ -1348,6 +1349,13 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].min_prominence < w[1].min_prominence));
         }
+    }
+
+    #[test]
+    fn a_threshold_that_is_a_whole_number_of_observations_is_not_rounded_up() {
+        let acc = ShapeAccumulator::new(5, 100, 0.07);
+        let primary = acc.ladder[acc.primary];
+        assert_eq!(primary, (0.07, 7));
     }
 
     #[test]
