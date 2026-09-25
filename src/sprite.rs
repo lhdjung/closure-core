@@ -365,8 +365,9 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 ///   distance of `mean`, inclusive — the same rule CLOSURE applies
 /// * `rounding_error_sd` - Likewise for the sample SD
 /// * `items` - Number of items averaged (default 1)
-/// * `restrictions_exact` - Optional exact count requirements for specific values
-/// * `restrictions_minimum` - Minimum count requirements for specific values.
+/// * `restrictions_exact` - Optional exact count requirements for specific
+///   values, keyed in hundredths of a scale point (`300` is the value 3)
+/// * `restrictions_minimum` - Minimum count requirements, keyed the same way.
 ///   [`RestrictionsOption::Default`] requires at least one response at each end
 ///   of the scale; pass [`RestrictionsOption::Null`] for no minimum
 /// * `parquet_config` - Optional configuration for writing results to Parquet files
@@ -477,8 +478,9 @@ where
 ///   distance of `mean`, inclusive — the same rule CLOSURE applies
 /// * `rounding_error_sd` - Likewise for the sample SD
 /// * `items` - Number of items averaged (default 1)
-/// * `restrictions_exact` - Optional exact count requirements for specific values
-/// * `restrictions_minimum` - Minimum count requirements for specific values.
+/// * `restrictions_exact` - Optional exact count requirements for specific
+///   values, keyed in hundredths of a scale point (`300` is the value 3)
+/// * `restrictions_minimum` - Minimum count requirements, keyed the same way.
 ///   [`RestrictionsOption::Default`] requires at least one response at each end
 ///   of the scale; pass [`RestrictionsOption::Null`] for no minimum
 /// * `config` - Streaming configuration (file path, batch size, progress reporting)

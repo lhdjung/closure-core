@@ -22,10 +22,19 @@ impl OccurrenceConstraints {
     }
 }
 
+/// Minimum counts for specific scale values: at least `count` responses at
+/// each key.
+///
+/// Keys are in **hundredths of a scale point**, like every restriction key in
+/// SPRITE: `300` is the value 3 and `133` is 1 1/3 on a three-item scale. A key
+/// that is not a grid value is an input error.
 #[derive(Debug, Clone)]
 pub struct RestrictionsMinimum(pub HashMap<i32, usize>);
 
 impl RestrictionsMinimum {
+    /// At least one response at each of `min` and `max`, both given in
+    /// hundredths: `from_range(100, 500)` for a 1-5 scale, not
+    /// `from_range(1, 5)`.
     pub fn from_range(min: i32, max: i32) -> Self {
         let mut map = HashMap::new();
         map.insert(min, 1);
