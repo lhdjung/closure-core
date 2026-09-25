@@ -32,7 +32,8 @@ use std::collections::HashMap;
 ///
 /// # Returns
 /// The number of valid sorted combinations, or 0 for any input that
-/// `closure_parallel` rejects as invalid.
+/// `closure_parallel` rejects as invalid. Counts beyond `u64::MAX` (about
+/// 1.8e19) saturate there rather than wrapping around to a small number.
 pub fn closure_count(
     mean: f64,
     sd: f64,
@@ -121,9 +122,10 @@ pub fn closure_count(
             if is_last {
                 // All remaining items must take this value
                 let f = rem as i64;
-                *next_dp
+                let slot = next_dp
                     .entry((0, sum + f * v_i64, sum_sq + f * v_sq))
-                    .or_insert(0) += count;
+                    .or_insert(0);
+                *slot = slot.saturating_add(count);
                 continue;
             }
 
@@ -166,7 +168,8 @@ pub fn closure_count(
                     }
                 }
 
-                *next_dp.entry((new_rem, new_sum, new_sq)).or_insert(0) += count;
+                let slot = next_dp.entry((new_rem, new_sum, new_sq)).or_insert(0);
+                *slot = slot.saturating_add(count);
             }
         }
 
@@ -206,7 +209,7 @@ fn accumulate_if_valid(
     if m2n < bounds.m2n_lo || m2n > bounds.m2n_hi {
         return;
     }
-    *total += count;
+    *total = total.saturating_add(count);
 }
 
 #[cfg(test)]
