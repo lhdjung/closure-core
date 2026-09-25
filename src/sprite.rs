@@ -10,7 +10,6 @@ use core::f64;
 use num::NumCast;
 use rand::prelude::*;
 use rayon::prelude::*;
-use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,8 +41,12 @@ where
     mean_tolerance: f64,
     /// Likewise for `sd`.
     sd_tolerance: f64,
-    /// Scale factor used to convert floating-point values to integers
+    /// Internal units per scale point. Equal to `items`, so every grid value
+    /// `scale_min + j / items` is the whole number `scale_min * items + j`.
     scale_factor: u32,
+    /// `scale_min` in internal units: a value `v` sits at grid position
+    /// `v - scale_min_scaled`.
+    scale_min_scaled: i64,
     /// Scaled possible values (integers)
     possible_values_scaled: Vec<U>,
     /// Scaled fixed responses (integers)
@@ -52,50 +55,6 @@ where
     n_fixed: usize,
     /// Maps each scaled value (as i64) to its index in `possible_values_scaled` (O(1) lookup)
     value_to_index: HashMap<i64, usize>,
-}
-
-/// Infer precision (decimal places) from rounding error
-///
-/// Converts a rounding error value to the equivalent number of decimal places.
-/// This function inverts the relationship: rounding_error = 10^(-precision) / 2
-///
-/// # Examples
-/// ```ignore
-/// // Rounding error 0.05 means values rounded to 1 decimal place (±0.05)
-/// assert_eq!(precision_from_rounding_error(0.05), 1);
-/// // Rounding error 0.005 means values rounded to 2 decimal places (±0.005)
-/// assert_eq!(precision_from_rounding_error(0.005), 2);
-/// ```
-fn precision_from_rounding_error<T: FloatType>(rounding_error: T) -> i32 {
-    let re_f64 = T::to_f64(&rounding_error).unwrap();
-    if re_f64 <= 0.0 {
-        return 0; // Handle edge case of zero or negative rounding error
-    }
-    // precision = -log10(rounding_error * 2)
-    (-((re_f64 * 2.0).log10())).round() as i32
-}
-
-/// Calculate scale factor from mean and SD rounding errors
-///
-/// The scale factor determines the internal integer representation used by SPRITE.
-/// It is computed as 10^max(m_prec, sd_prec), where the precisions are inferred
-/// from the rounding errors.
-///
-/// # Examples
-/// ```ignore
-/// // If mean has rounding error 0.005 (prec 2) and SD has 0.0005 (prec 3),
-/// // max precision is 3, so scale_factor = 10^3 = 1000
-/// let scale = scale_factor_from_rounding_errors(0.005, 0.0005);
-/// assert_eq!(scale, 1000);
-/// ```
-fn scale_factor_from_rounding_errors<T: FloatType>(
-    rounding_error_mean: T,
-    rounding_error_sd: T,
-) -> u32 {
-    let m_prec = precision_from_rounding_error(rounding_error_mean);
-    let sd_prec = precision_from_rounding_error(rounding_error_sd);
-    let precision = max(m_prec, sd_prec);
-    10_u32.pow(precision as u32)
 }
 
 /// Internal function to build and validate SPRITE parameters
@@ -136,7 +95,16 @@ where
             "sd and the rounding errors must be finite and not negative".to_string(),
         ));
     }
-    let scale_factor = scale_factor_from_rounding_errors(rounding_error_mean, rounding_error_sd);
+    if items == 0 {
+        return Err(ParameterError::InputValidation(
+            "items must be at least 1".to_string(),
+        ));
+    }
+    // The internal grid is `1 / items` apart, so it represents every value a
+    // multi-item mean can take exactly. Deriving it from the rounding errors
+    // instead rounded 1.333 to 1.3 at `items = 3`, and samples accepted on the
+    // rounded values then missed the reported mean and SD on the real ones.
+    let scale_factor = items;
 
     // Check mean is in range
     let mean_f64 = T::to_f64(&mean).unwrap();
@@ -275,11 +243,27 @@ where
         mean_tolerance: re_mean + DUST,
         sd_tolerance: re_sd + DUST,
         scale_factor,
+        scale_min_scaled: scale_min_i32 as i64 * scale_factor as i64,
         possible_values_scaled: final_possible_values_scaled,
         fixed_responses_scaled,
         n_fixed,
         value_to_index,
     })
+}
+
+impl<T: FloatType, U: IntegerType> SpriteParams<T, U> {
+    /// Tabulate a sample in internal units onto a value grid `k` wide.
+    ///
+    /// Exact: internal units are grid steps, so a value's position is plain
+    /// integer arithmetic with no rounding through hundredths.
+    fn grid_counts(&self, sample: &[U], k: usize) -> Vec<u32> {
+        let mut counts = vec![0u32; k];
+        for v in sample {
+            let idx = U::to_i64(v).unwrap() - self.scale_min_scaled;
+            counts[usize::try_from(idx).expect("SPRITE values sit on the grid")] += 1;
+        }
+        counts
+    }
 }
 
 /// SPRITE technique: sample parameter reconstruction via iterative techniques
@@ -433,20 +417,11 @@ where
     // the grid's real resolution, which for a multi-item scale is finer than a
     // whole scale point.
     let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
-    let scale_factor_f64 = params.scale_factor as f64;
     let n_usize = U::to_usize(&n).unwrap();
 
     let mut counts = SampleCounts::with_capacity(grid.clone(), n_usize, results_scaled.len());
     for dist in &results_scaled {
-        let mut row = vec![0u32; grid.len()];
-        for &val in dist {
-            let hundredths =
-                ((U::to_i64(&val).unwrap() as f64 / scale_factor_f64) * 100.0).round() as i32;
-            if let Some(idx) = grid.index_of_hundredths(hundredths) {
-                row[idx] += 1;
-            }
-        }
-        counts.push_row(&row);
+        counts.push_row(&params.grid_counts(dist, grid.len()));
     }
 
     // Calculate all statistics using the shared function from lib.rs SPRITE
@@ -530,7 +505,6 @@ where
         restrictions_minimum,
     )?;
 
-    let _scale_factor = params.scale_factor;
     let n_usize = U::to_usize(&params.n).unwrap();
 
     // Setup channels for streaming results
@@ -712,15 +686,7 @@ fn find_distributions_all_streaming<T, U>(
                         // Tabulate onto the shared grid. The counts vector is
                         // both the frequency vector horns needs and the row
                         // that goes to disk, so it is built once.
-                        let scale_f = params.scale_factor as f64;
-                        let mut counts = vec![0u32; grid.len()];
-                        for &value in &distribution {
-                            let hundredths = ((U::to_i64(&value).unwrap() as f64 / scale_f) * 100.0)
-                                .round() as i32;
-                            if let Some(idx) = grid.index_of_hundredths(hundredths) {
-                                counts[idx] += 1;
-                            }
-                        }
+                        let counts = params.grid_counts(&distribution, grid.len());
 
                         let freqs: Vec<f64> = counts.iter().map(|&c| c as f64).collect();
                         let horns = horns_from_counts(&freqs);
@@ -1565,20 +1531,6 @@ pub mod tests {
         let expected_n = 20;
         let rounding_error_mean = 0.05;
         let rounding_error_sd = 0.05;
-
-        // Calculate scale_factor based on rounding errors (same as internal implementation)
-        fn precision_from_rounding_error(error: f64) -> i32 {
-            if error > 0.0 {
-                let log_error = (error * 2.0).log10();
-                -log_error.round() as i32
-            } else {
-                0
-            }
-        }
-
-        let m_prec = precision_from_rounding_error(rounding_error_mean);
-        let sd_prec = precision_from_rounding_error(rounding_error_sd);
-        let _precision = std::cmp::max(m_prec, sd_prec);
 
         let result = sprite_parallel_streaming::<f64, i32>(
             expected_mean,

@@ -212,3 +212,89 @@ fn sprite_takes_its_tolerances_literally() {
         assert!((sd - 1.3).abs() <= 0.02 + 1e-9, "sample {i}: sd {sd}");
     }
 }
+
+/// Mean and SD of a result row, computed on the real grid values.
+fn row_mean_sd(row: &[u32], values: &[f64]) -> (f64, f64) {
+    let n: f64 = row.iter().map(|&c| c as f64).sum();
+    let mean = row
+        .iter()
+        .zip(values)
+        .map(|(&c, &v)| c as f64 * v)
+        .sum::<f64>()
+        / n;
+    let ss: f64 = row
+        .iter()
+        .zip(values)
+        .map(|(&c, &v)| c as f64 * (v - mean).powi(2))
+        .sum();
+    (mean, (ss / (n - 1.0)).sqrt())
+}
+
+#[test]
+fn multi_item_sprite_samples_match_on_the_real_grid() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // SPRITE's internal grid used to be 10^decimals wide, which cannot hold
+    // 1/3 or 1/4 steps: 1.333 became 1.3, samples were accepted on the rounded
+    // values, and then missed the reported mean and SD on the real ones. At a
+    // tolerance of 0.5 the grid was whole numbers and half values never
+    // appeared at all.
+    for (items, re) in [(2, 0.5), (3, 0.05), (4, 0.05)] {
+        let results = sprite_parallel::<f64, i32>(
+            2.2,
+            1.3,
+            20,
+            1,
+            5,
+            re,
+            re,
+            items,
+            None,
+            RestrictionsOption::Default,
+            None,
+            Some(200),
+        )
+        .unwrap();
+        assert!(!results.results.is_empty(), "items={items}");
+        let values = results.results.counts.grid().values().to_vec();
+        let mut off_integer = 0;
+        for row in results.results.counts.rows() {
+            let (mean, sd) = row_mean_sd(row, &values);
+            assert!(
+                (mean - 2.2).abs() <= re + 1e-9,
+                "items={items}: mean {mean}"
+            );
+            assert!((sd - 1.3).abs() <= re + 1e-9, "items={items}: sd {sd}");
+            off_integer += row
+                .iter()
+                .zip(&values)
+                .filter(|&(&c, &v)| c > 0 && v.fract() != 0.0)
+                .count();
+        }
+        assert!(
+            off_integer > 0,
+            "items={items}: no fractional value ever used"
+        );
+    }
+
+    // An exact restriction on 1 1/3 is keyed as 133 hundredths.
+    let restricted = sprite_parallel::<f64, i32>(
+        2.2,
+        1.3,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        3,
+        Some([(133, 2)].into_iter().collect()),
+        RestrictionsOption::Default,
+        None,
+        Some(20),
+    )
+    .unwrap();
+    assert!(!restricted.results.is_empty());
+    for row in restricted.results.counts.rows() {
+        assert_eq!(row[1], 2, "1 1/3 must appear exactly twice");
+    }
+}
