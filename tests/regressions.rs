@@ -138,6 +138,17 @@ fn invalid_parameters_are_errors_not_panics() {
     assert!(closure_parallel::<f64, i32>(3.0, 1.0, 0, 1, 5, 0.0, 0.0, 1, None, None).is_err());
     assert!(closure_parallel::<f64, i32>(3.0, 1.0, 10, 5, 1, 0.0, 0.0, 1, None, None).is_err());
     assert!(closure_parallel::<f64, i32>(3.0, -1.0, 10, 1, 5, 0.0, 0.0, 1, None, None).is_err());
+    // A scale outside the output grid's range: this used to finish the search
+    // and then panic converting the bounds to i32.
+    let far = 3_000_000_000i64;
+    assert!(
+        closure_parallel::<f64, i64>(3e9, 1.0, 5, far, far + 4, 0.0, 0.0, 1, None, None).is_err()
+    );
+    // Within the grid's range, but n·Σx² would overflow i64.
+    assert!(closure_parallel::<f64, i64>(
+        2e7, 1.0, 1000, 20_000_000, 20_000_004, 0.0, 0.0, 1, None, None
+    )
+    .is_err());
 }
 
 #[test]

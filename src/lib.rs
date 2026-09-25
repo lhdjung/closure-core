@@ -771,6 +771,22 @@ impl ClosureSearchContext {
         if scale_min > scale_max {
             return invalid("scale_max must not be below scale_min");
         }
+        // The output grid holds each value in hundredths as an i32. Larger
+        // scales used to run the whole search and then panic building it.
+        let max_abs = i32::MAX as i64 / 100;
+        if scale_min < -max_abs || scale_max > max_abs {
+            return invalid("scale values must lie within ±21,474,836");
+        }
+        // The search computes `n·Σx² − (Σx)²` in i64; both terms are at most
+        // `(n·max|x|)²`.
+        let peak = scale_min.abs().max(scale_max.abs()) as i128;
+        let fits = (n_i64 as i128)
+            .checked_mul(peak)
+            .and_then(|x| x.checked_mul(x))
+            .is_some_and(|x| x <= i64::MAX as i128);
+        if !fits {
+            return invalid("n and the scale values are too large for exact integer arithmetic");
+        }
         let to_f64 = |x: T| T::to_f64(&x).filter(|v| v.is_finite());
         let (Some(mean), Some(sd), Some(re_mean), Some(re_sd)) = (
             to_f64(mean),
