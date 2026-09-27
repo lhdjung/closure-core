@@ -4,7 +4,7 @@ use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, Restrictio
 use crate::{
     counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
     ResultListFromMeanSdN, SampleCounts, SampleFormat, StreamingConfig, StreamingFrequencyState,
-    StreamingResult,
+    StreamingResult, ValueGrid,
 };
 use core::f64;
 use num::NumCast;
@@ -419,10 +419,6 @@ where
         restrictions_minimum,
     )?;
 
-    // Find distributions (scaled integer values)
-    let n_distributions = stop_after.unwrap_or(usize::MAX);
-    let results_scaled = find_distributions_all_internal(&params, n_distributions);
-
     // Tabulate onto the shared value grid. SPRITE searches on its own
     // `scale_factor` lattice; the grid is the same lattice expressed in
     // hundredths of a scale point, which is the unit SPRITE reports in.
@@ -432,12 +428,8 @@ where
     // the grid's real resolution, which for a multi-item scale is finer than a
     // whole scale point.
     let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
-    let n_usize = U::to_usize(&n).unwrap();
-
-    let mut counts = SampleCounts::with_capacity(grid.clone(), n_usize, results_scaled.len());
-    for dist in &results_scaled {
-        counts.push_row(&params.grid_counts(dist, grid.len()));
-    }
+    let n_distributions = stop_after.unwrap_or(usize::MAX);
+    let counts = find_distributions_all_internal(&params, grid, n_distributions);
 
     // Calculate all statistics using the shared function from lib.rs SPRITE
     // searches the solution space at random rather than enumerating it, so a
@@ -618,7 +610,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn find_distributions_all_streaming<T, U>(
     params: &SpriteParams<T, U>,
-    grid: &crate::ValueGrid,
+    grid: &ValueGrid,
     stop_after: Option<usize>,
     tx_results: std::sync::mpsc::Sender<Vec<(Vec<u32>, f64)>>,
     tx_stats: std::sync::mpsc::Sender<(Vec<f64>, HashMap<i32, i64>)>,
@@ -633,7 +625,8 @@ fn find_distributions_all_streaming<T, U>(
     use crate::horns_from_counts;
 
     let should_stop = Arc::new(AtomicBool::new(false));
-    let unique_distributions = Arc::new(Mutex::new(HashSet::<Vec<i64>>::new()));
+    // Keyed by grid counts, as in `find_distributions_all_internal`.
+    let unique_distributions = Arc::new(Mutex::new(HashSet::<Box<[u32]>>::new()));
     let total_failures = Arc::new(AtomicU32::new(0));
     let total_duplicates = Arc::new(AtomicU32::new(0));
     let cumulative_duplicates = Arc::new(AtomicU64::new(0));
@@ -673,11 +666,11 @@ fn find_distributions_all_streaming<T, U>(
             let mut thread_rng = rand::rng();
 
             match find_distribution_internal(params, &mut thread_rng) {
-                Ok(mut distribution) => {
-                    distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
-
-                    let hashable_values: Vec<i64> =
-                        distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
+                Ok(distribution) => {
+                    // Tabulate onto the shared grid. The counts vector is the
+                    // deduplication key, the frequency vector horns needs, and
+                    // the row that goes to disk, so it is built once.
+                    let counts = params.grid_counts(&distribution, grid.len());
 
                     // Checked under the same lock as the insert, so no more
                     // than `limit` samples are ever admitted, however many
@@ -687,13 +680,8 @@ fn find_distributions_all_streaming<T, U>(
                         should_stop.store(true, Ordering::Relaxed);
                         return;
                     }
-                    if unique.insert(hashable_values) {
+                    if unique.insert(counts.clone().into_boxed_slice()) {
                         drop(unique);
-
-                        // Tabulate onto the shared grid. The counts vector is
-                        // both the frequency vector horns needs and the row
-                        // that goes to disk, so it is built once.
-                        let counts = params.grid_counts(&distribution, grid.len());
 
                         let freqs: Vec<f64> = counts.iter().map(|&c| c as f64).collect();
                         let horns = horns_from_counts(&freqs);
@@ -759,15 +747,20 @@ fn find_distributions_all_streaming<T, U>(
 /// Internal function to find multiple distributions (parallelized with rayon)
 fn find_distributions_all_internal<T, U>(
     params: &SpriteParams<T, U>,
+    grid: ValueGrid,
     n_distributions: usize,
-) -> Vec<Vec<U>>
+) -> SampleCounts
 where
     T: FloatType,
     U: IntegerType,
 {
+    let k = grid.len();
     // All state lives on the main thread; only the early-exit signal is shared.
-    let mut unique_distributions = HashSet::<Vec<i64>>::new();
-    let mut results = Vec::<Vec<U>>::new();
+    // Distributions are deduplicated by their counts on the grid, not as
+    // sorted samples: the two identify a distribution equally, but counts take
+    // `k` values rather than `n`.
+    let mut unique_distributions = HashSet::<Box<[u32]>>::new();
+    let mut results = SampleCounts::new(grid, U::to_usize(&params.n).unwrap());
     let mut total_failures: u32 = 0;
     // Cumulative duplicates across all batches (never reset); used by LP estimator.
     let mut cumulative_duplicates: u64 = 0;
@@ -779,7 +772,7 @@ where
     let max_iterations = n_distributions.saturating_mul(MAX_DUP_LOOPS as usize);
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
-        if should_stop.load(Ordering::Relaxed) || results.len() >= n_distributions {
+        if should_stop.load(Ordering::Relaxed) || results.nrow() >= n_distributions {
             break;
         }
 
@@ -799,12 +792,10 @@ where
         // Serial phase: merge results into local state — no locking needed.
         for result in batch_results {
             match result {
-                Ok(mut distribution) => {
-                    distribution.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
-                    let hashable: Vec<i64> =
-                        distribution.iter().map(|v| U::to_i64(v).unwrap()).collect();
-                    if unique_distributions.insert(hashable) {
-                        results.push(distribution);
+                Ok(distribution) => {
+                    let counts = params.grid_counts(&distribution, k).into_boxed_slice();
+                    if unique_distributions.insert(counts.clone()) {
+                        results.push_row(&counts);
                         total_failures = 0;
                     } else {
                         cumulative_duplicates += 1;
@@ -814,7 +805,7 @@ where
                     total_failures += 1;
                 }
             }
-            if results.len() >= n_distributions {
+            if results.nrow() >= n_distributions {
                 should_stop.store(true, Ordering::Relaxed);
                 break;
             }
@@ -848,10 +839,10 @@ where
         }
     }
 
-    if results.len() < n_distributions {
+    if results.nrow() < n_distributions {
         eprintln!(
             "Only {} matching distributions could be found.",
-            results.len()
+            results.nrow()
         );
     }
 
