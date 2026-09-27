@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Time CLOSURE and SPRITE on two git revisions and print the speedup per case.
+# Time CLOSURE and SPRITE on two git revisions and print the speedup and the
+# change in peak heap use per case.
 #
 # Usage: scripts/compare_versions.sh <old_ref> [<new_ref>]   # new_ref defaults to HEAD
 #
@@ -28,16 +29,26 @@ run() { # <ref> <outfile>
 run "$old" "$tmp/old.tsv"
 run "$new" "$tmp/new.tsv"
 
-awk -F'\t' -v old="$(git rev-parse --short "$old")" -v new="$(git rev-parse --short "$new")" '
-    NR == FNR { if (FNR > 1) { c[$1] = $3; s[$1] = $5 } ; next }
-    FNR == 1 {
-        printf "%-15s %11s %11s %9s %11s %11s %9s\n", \
-            "Case", "clo " old, "clo " new, "speedup", "spr " old, "spr " new, "speedup"
-        next
-    }
-    {
-        printf "%-15s %11.3f %11.3f %8.2fx %11.3f %11.3f %8.2fx\n", \
-            $1, c[$1], $3, c[$1] / $3, s[$1], $5, s[$1] / $5
-    }
-' "$tmp/old.tsv" "$tmp/new.tsv"
-echo "(times in ms, median of 3; speedup > 1 means $new is faster)"
+# One table per metric: <closure column> <sprite column> <decimals>.
+table() {
+    awk -F'\t' -v old="$(git rev-parse --short "$old")" -v new="$(git rev-parse --short "$new")" \
+        -v cc="$1" -v sc="$2" -v d="$3" '
+        NR == FNR { if (FNR > 1) { c[$1] = $cc; s[$1] = $sc } ; next }
+        FNR == 1 {
+            printf "%-15s %11s %11s %9s %11s %11s %9s\n", \
+                "Case", "clo " old, "clo " new, "ratio", "spr " old, "spr " new, "ratio"
+            next
+        }
+        {
+            printf "%-15s %11." d "f %11." d "f %8.2fx %11." d "f %11." d "f %8.2fx\n", \
+                $1, c[$1], $cc, c[$1] / $cc, s[$1], $sc, s[$1] / $sc
+        }
+    ' "$tmp/old.tsv" "$tmp/new.tsv"
+}
+
+echo "Time (ms, median of 3)"
+table 3 5 3
+echo
+echo "Peak heap (KiB above what was live before the call, median of 3)"
+table 6 7 1
+echo "(ratio = old / new, so > 1 means $new is faster or leaner)"
