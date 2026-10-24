@@ -678,3 +678,117 @@ fn from_range_takes_scale_values() {
         assert!(row[0] >= 1 && row[4] >= 1, "both scale ends must appear");
     }
 }
+
+#[test]
+fn sprite_fills_the_value_below_an_exactly_restricted_one() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // Fixing the value 2 leaves a gap from 1 to 3. Every shift moved its
+    // first value up, so a 3 could only become a 1 alongside a 1 becoming a
+    // 3, the swap back. The 1s the start phase never placed stayed out of
+    // reach. CLOSURE and rsprite2 both find this sample.
+    let results = sprite_parallel::<f64, i32>(
+        3.25,
+        1.83,
+        8,
+        1,
+        6,
+        0.005,
+        0.005,
+        1,
+        Some([(200, 1)].into_iter().collect()),
+        RestrictionsOption::Null,
+        None,
+        Some(50),
+    )
+    .unwrap();
+    let samples: Vec<Vec<i32>> = (0..results.results.len())
+        .map(|i| results.results.sample(i))
+        .collect();
+    assert_eq!(samples, vec![vec![100, 100, 200, 300, 400, 400, 500, 600]]);
+}
+
+#[test]
+fn sprite_finds_a_sample_whose_every_value_is_fixed() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // With no value left free, the mean adjustment failed before checking
+    // whether the fixed responses already hit the mean.
+    let results = sprite_parallel::<f64, i32>(
+        1.5,
+        0.7071,
+        2,
+        1,
+        2,
+        0.005,
+        0.005,
+        1,
+        Some([(100, 1), (200, 1)].into_iter().collect()),
+        RestrictionsOption::Null,
+        None,
+        Some(5),
+    )
+    .unwrap();
+    assert_eq!(results.results.len(), 1);
+    assert_eq!(results.results.sample(0), vec![100, 200]);
+}
+
+#[test]
+fn sprite_gives_up_quickly_on_an_impossible_sd() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // No sample on 1..=5 with mean 3 has an SD near 3.5; the most is about
+    // 2.05. Every attempt used to run its full loop limit first, about ten
+    // seconds without `stop_after`.
+    let start = std::time::Instant::now();
+    let results = sprite_parallel::<f64, i32>(
+        3.0,
+        3.5,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(results.results.is_empty());
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn degenerate_grids_are_input_errors() {
+    use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
+
+    // A one-value scale made every CLOSURE sample `Flat`, so an exhaustive
+    // run "proved" the data was not unimodal. SPRITE already rejected it.
+    assert!(matches!(
+        closure_parallel::<f64, i32>(3.0, 0.0, 5, 3, 3, 0.05, 0.05, 1, None, None),
+        Err(ParameterError::InputValidation(_))
+    ));
+    assert!(closure_count(3.0, 0.0, 5, 3, 3, 0.05, 0.05).is_err());
+
+    // Past 100 items, neighbouring grid values share a key in hundredths:
+    // duplicate column names, and samples that did not round-trip.
+    assert!(matches!(
+        sprite_parallel::<f64, i32>(
+            1.5,
+            0.3,
+            10,
+            1,
+            2,
+            0.05,
+            0.05,
+            200,
+            None,
+            RestrictionsOption::Null,
+            None,
+            Some(3),
+        ),
+        Err(ParameterError::InputValidation(_))
+    ));
+}

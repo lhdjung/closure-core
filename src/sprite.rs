@@ -101,9 +101,11 @@ where
             "sd and the rounding errors must be finite and not negative".to_string(),
         ));
     }
-    if items == 0 {
+    // Grid values are keyed and reported in hundredths of a scale point, so
+    // more than 100 items would put neighbouring values on the same key.
+    if !(1..=100).contains(&items) {
         return Err(ParameterError::InputValidation(
-            "items must be at least 1".to_string(),
+            "items must be between 1 and 100".to_string(),
         ));
     }
     // The internal grid is `1 / items` apart, so it represents every value a
@@ -890,6 +892,27 @@ where
     if sum_lo > sum_hi {
         return Err("No total within the mean tolerance is reachable.".to_string());
     }
+    // Bhatia–Davis: values in `[lo, hi]` with mean `m` have a population
+    // variance of at most `(hi − m)(m − lo)`. An SD beyond that for every
+    // admissible mean used to run each attempt to its full loop limit.
+    let values = || {
+        pv.iter()
+            .chain(&params.fixed_responses_scaled)
+            .map(|v| U::to_i64(v).unwrap() as f64)
+    };
+    let lo = values().fold(f64::INFINITY, f64::min);
+    let hi = values().fold(f64::NEG_INFINITY, f64::max);
+    let m = ((lo + hi) / 2.0).clamp(
+        sum_lo as f64 / n_usize as f64,
+        sum_hi as f64 / n_usize as f64,
+    );
+    let sd_max = ((hi - m) * (m - lo) * n_usize as f64 / (n_usize as f64 - 1.0))
+        .max(0.0)
+        .sqrt()
+        / scale_f64;
+    if T::to_f64(&params.sd).unwrap() - params.sd_tolerance > sd_max + 1e-9 {
+        return Err("No sample on the scale reaches the SD.".to_string());
+    }
     let total_target_sum = rng.random_range(sum_lo..=sum_hi);
     let vec_target_sum = total_target_sum - fixed_sum_init;
 
@@ -995,6 +1018,10 @@ where
             full_vec.extend_from_slice(&params.fixed_responses_scaled);
             return Ok(full_vec);
         }
+        // Shifting needs two free values; with fewer the SD cannot move.
+        if vec.len() < 2 {
+            break;
+        }
 
         // Shift values to adjust SD (updates running sums in O(1))
         let increase_sd = current_sd < params.sd;
@@ -1039,7 +1066,10 @@ where
     T: FloatType,
     U: IntegerType,
 {
-    if params.possible_values_scaled.is_empty() {
+    // With no free values `vec` is empty too, and the loop below reports
+    // whether the fixed responses alone already hit the mean. Failing here
+    // first rejected every sample whose values are all exactly restricted.
+    if params.possible_values_scaled.is_empty() && !vec.is_empty() {
         return Err("Cannot adjust mean with no possible values.".to_string());
     }
 
@@ -1055,11 +1085,14 @@ where
     let n_total = vec.len() + params.fixed_responses_scaled.len();
 
     let target_mean_f64 = T::to_f64(&target_mean).unwrap();
+    let mean_of =
+        |running_sum: i64| mean_from_running(running_sum + fixed_sum, n_total, params.scale_factor);
+    let mean_ok =
+        |running_sum: i64| (mean_of(running_sum) - target_mean_f64).abs() <= params.mean_tolerance;
 
     for _ in 0..max_iter {
-        let current_mean_f64 =
-            mean_from_running(running_sum + fixed_sum, n_total, params.scale_factor);
-        if (current_mean_f64 - target_mean_f64).abs() <= params.mean_tolerance {
+        let current_mean_f64 = mean_of(running_sum);
+        if mean_ok(running_sum) {
             return Ok(());
         }
         // Every response is fixed by the restrictions: nothing can move.
@@ -1107,6 +1140,11 @@ where
         if !changed {
             break;
         }
+    }
+    // The loop checks before each bump, so the last bump is checked here, as
+    // is a vector with nothing free, whose limit `n * k` is 0.
+    if mean_ok(running_sum) {
+        return Ok(());
     }
 
     let err_msg = if !params.fixed_responses_scaled.is_empty() {
@@ -1157,20 +1195,32 @@ where
             None => continue,
         };
 
-        // Next larger for val1, next smaller for val2 (O(1))
-        let val1_new = match pv.get(val1_idx + 1) {
+        // Which way val1 moves; val2 and every compensating move go the other
+        // way. Picked at random, as rsprite2 does with `incFirst`. Always
+        // moving val1 up meant a gap left by an exact restriction could only
+        // be crossed downward together with an upward move just as wide,
+        // which is the swap back, so the value below the gap never filled.
+        let up = rng.random_bool(0.5);
+        let neighbour = |idx: usize, up: bool| {
+            if up {
+                pv.get(idx + 1)
+            } else {
+                idx.checked_sub(1).and_then(|k| pv.get(k))
+            }
+        };
+        let val1_new = match neighbour(val1_idx, up) {
             Some(&v) => v,
             None => continue,
         };
-        let val2_new = match val2_idx.checked_sub(1).and_then(|k| pv.get(k)) {
+        let val2_new = match neighbour(val2_idx, !up) {
             Some(&v) => v,
             None => continue,
         };
         let val1_new_i64 = U::to_i64(&val1_new).unwrap();
         let val2_new_i64 = U::to_i64(&val2_new).unwrap();
 
-        let delta1 = val1_new_i64 - val1_i64; // > 0
-        let delta2 = val2_i64 - val2_new_i64; // > 0
+        let delta1 = (val1_new_i64 - val1_i64).abs();
+        let delta2 = (val2_new_i64 - val2_i64).abs();
 
         // Helper: is a (before, after) pair SD-pointless?
         let is_pointless = |a_before: i64, a_after: i64, b_before: i64, b_after: i64| -> bool {
@@ -1198,43 +1248,48 @@ where
         } else {
             // Gap resolution: gaps differ (items>1 or restrictions with non-uniform spacing)
 
-            // Stage 1: find a single pair in pv with spacing == delta1 whose
-            // "high" member exists in vec at some position k != i.
-            let mut stage1_resolved = false;
-            'stage1: for p in 0..pv.len().saturating_sub(1) {
+            // Stage 1: find a single pair in pv with spacing == delta1 one of
+            // whose members exists in vec at some position k != i, and move
+            // that member to the other one, against val1's direction.
+            let (lo1, hi1) = (val1_i64.min(val1_new_i64), val1_i64.max(val1_new_i64));
+            for p in 0..pv.len().saturating_sub(1) {
                 let low_i64 = U::to_i64(&pv[p]).unwrap();
                 let high_i64 = U::to_i64(&pv[p + 1]).unwrap();
                 if high_i64 - low_i64 != delta1 {
                     continue;
                 }
-                // Don't undo step 1
-                if high_i64 == val1_i64 {
+                // The pair val1 just crossed: moving another value across it
+                // the other way would only swap the two back.
+                if (low_i64, high_i64) == (lo1, hi1) {
                     continue;
                 }
-                for k in 0..vec.len() {
-                    if k == i {
-                        continue;
-                    }
-                    if U::to_i64(&vec[k]).unwrap() == high_i64 {
-                        if !is_pointless(val1_i64, val1_new_i64, high_i64, low_i64) {
-                            vec[i] = val1_new;
-                            vec[k] = pv[p];
-                            // delta1 + (low - high) = delta1 - delta1 = 0 ✓
-                            *running_sum += (val1_new_i64 - val1_i64) + (low_i64 - high_i64);
-                            *running_sum_sq += (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
-                                + (low_i64 * low_i64 - high_i64 * high_i64);
-                            stage1_resolved = true;
-                        }
-                        break 'stage1;
-                    }
+                let (from, to, to_val) = if up {
+                    (high_i64, low_i64, pv[p])
+                } else {
+                    (low_i64, high_i64, pv[p + 1])
+                };
+                let Some(k) =
+                    (0..vec.len()).find(|&k| k != i && U::to_i64(&vec[k]).unwrap() == from)
+                else {
+                    continue;
+                };
+                // A pointless pair need not end the search: another pair
+                // with the same spacing may still help.
+                if is_pointless(val1_i64, val1_new_i64, from, to) {
+                    continue;
                 }
-            }
-            if stage1_resolved {
+                vec[i] = val1_new;
+                vec[k] = to_val;
+                // ±delta1 ∓ delta1 = 0: the total is unchanged.
+                *running_sum += (val1_new_i64 - val1_i64) + (to - from);
+                *running_sum_sq +=
+                    (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64) + (to * to - from * from);
                 return true;
             }
 
             // Stage 2: split delta1 into num_steps equal sub-steps.
-            // Find num_steps vec positions (all != i) each decrementable by sub_delta.
+            // Find num_steps vec positions (all != i) each movable by
+            // sub_delta against val1's direction.
             let min_step = (0..pv.len().saturating_sub(1))
                 .map(|p| U::to_i64(&pv[p + 1]).unwrap() - U::to_i64(&pv[p]).unwrap())
                 .min()
@@ -1263,7 +1318,9 @@ where
                     continue;
                 }
 
-                // Find num_steps distinct vec positions (all != i) whose value is a "high"
+                // Find num_steps distinct vec positions (all != i) whose value
+                // is the "from" end of such a pair: its high member when val1
+                // went up, its low member when val1 went down.
                 let mut positions: Vec<(usize, i64, i64)> = Vec::with_capacity(num_steps);
                 let mut excluded: Vec<usize> = vec![i];
                 for _ in 0..num_steps {
@@ -1274,8 +1331,13 @@ where
                         }
                         let vk = U::to_i64(&vec[k]).unwrap();
                         for &(low_i64, high_i64) in &highs {
-                            if vk == high_i64 {
-                                positions.push((k, low_i64, high_i64));
+                            let (from, to) = if up {
+                                (high_i64, low_i64)
+                            } else {
+                                (low_i64, high_i64)
+                            };
+                            if vk == from {
+                                positions.push((k, from, to));
                                 excluded.push(k);
                                 found = true;
                                 break 'find;
@@ -1291,15 +1353,15 @@ where
                 vec[i] = val1_new;
                 *running_sum += val1_new_i64 - val1_i64;
                 *running_sum_sq += val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64;
-                for (k, low_i64, high_i64) in positions {
+                for (k, from, to) in positions {
                     let new_val = *params
                         .value_to_index
-                        .get(&low_i64)
+                        .get(&to)
                         .and_then(|&idx| pv.get(idx))
                         .unwrap();
                     vec[k] = new_val;
-                    *running_sum += low_i64 - high_i64;
-                    *running_sum_sq += low_i64 * low_i64 - high_i64 * high_i64;
+                    *running_sum += to - from;
+                    *running_sum_sq += to * to - from * from;
                 }
                 return true;
             }

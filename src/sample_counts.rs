@@ -99,9 +99,19 @@ impl ValueGrid {
     /// points (CLOSURE), 1 for one that already emits hundredths (SPRITE).
     ///
     /// # Panics
-    /// Panics if `items` is zero or `scale_max < scale_min`.
+    /// Panics if `items` is not in `1..=100`, `scale_max < scale_min`, or a
+    /// scale value in hundredths does not fit in an `i32`. Beyond either
+    /// limit distinct grid values would share a key in hundredths.
     pub fn new(scale_min: i32, scale_max: i32, items: u32, sample_scale_factor: i32) -> Self {
-        assert!(items >= 1, "can't build a ValueGrid: `items` must be >= 1");
+        assert!(
+            (1..=100).contains(&items),
+            "can't build a ValueGrid: `items` must be between 1 and 100"
+        );
+        let max_abs = i32::MAX / 100;
+        assert!(
+            scale_min >= -max_abs && scale_max <= max_abs,
+            "can't build a ValueGrid: scale values must lie within ±{max_abs}"
+        );
         assert!(
             scale_max >= scale_min,
             "can't build a ValueGrid: `scale_max` ({}) is below `scale_min` ({})",

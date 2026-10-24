@@ -104,10 +104,12 @@ impl RestrictionsOption {
         RestrictionsOption::Opt(Some(RestrictionsMinimum::from_range(min, max)))
     }
 
-    pub fn extract(self) -> RestrictionsMinimum {
+    /// The explicit minimum counts, if any. `Default` has none to give: its
+    /// counts depend on the scale; see [`Self::construct_from_default`].
+    pub fn extract(self) -> Option<RestrictionsMinimum> {
         match self {
-            RestrictionsOption::Opt(s) => s.unwrap(),
-            _ => panic!(),
+            RestrictionsOption::Opt(s) => s,
+            RestrictionsOption::Default | RestrictionsOption::Null => None,
         }
     }
 }

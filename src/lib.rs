@@ -768,8 +768,12 @@ impl ClosureSearchContext {
         if n_i64 < 2 {
             return invalid("n must be at least 2");
         }
-        if scale_min > scale_max {
-            return invalid("scale_max must not be below scale_min");
+        // A one-value scale has a single possible sample, and its shape
+        // analysis contradicted itself: every sample was `Flat`, so an
+        // exhaustive run "proved" the data was not unimodal. SPRITE rejects it
+        // too.
+        if scale_min >= scale_max {
+            return invalid("scale_max must be greater than scale_min");
         }
         // The output grid holds each value in hundredths as an i32. Larger
         // scales used to run the whole search and then panic building it.
