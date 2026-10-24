@@ -202,7 +202,9 @@ fn runs_of(counts: &[u32]) -> Vec<Run> {
 ///   `min_prominence_counts` observations: its height minus the higher of its
 ///   two key cols, where a key col is the lowest point between the run and the
 ///   nearest strictly taller run on that side (a side with no taller run
-///   contributes a col of 0).
+///   contributes a col of 0). Equal lower peaks with nothing taller between
+///   them merge into one mode first, by the same rule as tied tallest runs
+///   below.
 /// - Runs *at* the tallest height have no taller peak to be measured against,
 ///   so they are measured against each other: consecutive tied tallest runs
 ///   merge into one broad mode when the valley between them dips less than
@@ -290,45 +292,74 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
         .map(|&(first, last)| (runs[first].start, runs[last].end))
         .collect();
 
-    for (i, run) in runs.iter().enumerate() {
-        if run.height == summit {
-            continue; // handled by the grouping above
+    // Local maxima below the summit (handled by the grouping above).
+    let is_lower_peak = |i: usize| {
+        let height = runs[i].height;
+        height < summit
+            && !(i > 0 && runs[i - 1].height > height)
+            && !(i + 1 < runs.len() && runs[i + 1].height > height)
+    };
+
+    let mut i = 0;
+    while i < runs.len() {
+        if !is_lower_peak(i) {
+            i += 1;
+            continue;
         }
-        let higher_left = i > 0 && runs[i - 1].height > run.height;
-        let higher_right = i + 1 < runs.len() && runs[i + 1].height > run.height;
-        if higher_left || higher_right {
-            continue; // not a local maximum
+        let height = runs[i].height;
+
+        // Group lower peaks the way the summit runs are grouped: consecutive
+        // ones of equal height, with nothing taller between them, merge when
+        // the dip between them is below the threshold. Measured one run at a
+        // time, both halves of a wobble like `(8, 7, 8, 2, 20)` stood out by
+        // 6 and read as two modes at every threshold, while the same wobble
+        // on the summit read as one.
+        let mut last = i;
+        let mut valley = u32::MAX;
+        for (j, run) in runs.iter().enumerate().skip(i + 1) {
+            let h = run.height;
+            if h > height {
+                break;
+            }
+            if h == height && is_lower_peak(j) {
+                // Equal runs are never adjacent, so `valley` is set here.
+                if height - valley >= min_prominence_counts {
+                    break;
+                }
+                last = j;
+                valley = u32::MAX;
+                continue;
+            }
+            valley = valley.min(h);
         }
 
-        // Key col on each side: the lowest run between here and the nearest
-        // strictly taller run. The summit is strictly taller than this run, so
+        // Key col on each side of the group: the lowest run between it and
+        // the nearest strictly taller run. The summit is strictly taller, so
         // at least one side has one; a side without one contributes 0.
-        let left_col = runs[..i]
+        let left_col = runs[..i].iter().rposition(|r| r.height > height).map(|j| {
+            runs[j + 1..i]
+                .iter()
+                .map(|r| r.height)
+                .min()
+                .unwrap_or(height)
+        });
+        let right_col = runs[last + 1..]
             .iter()
-            .rposition(|r| r.height > run.height)
-            .map(|j| {
-                runs[j + 1..i]
-                    .iter()
-                    .map(|r| r.height)
-                    .min()
-                    .unwrap_or(run.height)
-            });
-        let right_col = runs[i + 1..]
-            .iter()
-            .position(|r| r.height > run.height)
+            .position(|r| r.height > height)
             .map(|offset| {
-                let j = i + 1 + offset;
-                runs[i + 1..j]
+                let j = last + 1 + offset;
+                runs[last + 1..j]
                     .iter()
                     .map(|r| r.height)
                     .min()
-                    .unwrap_or(run.height)
+                    .unwrap_or(height)
             });
 
         let col = left_col.unwrap_or(0).max(right_col.unwrap_or(0));
-        if run.height - col >= min_prominence_counts {
-            out.push((run.start, run.end));
+        if height - col >= min_prominence_counts {
+            out.push((runs[i].start, runs[last].end));
         }
+        i = last + 1;
     }
     out.sort_unstable();
     out
@@ -1074,6 +1105,26 @@ mod tests {
         let shapes = acc.finish(true);
         assert_eq!(shapes.can_be_multimodal(), Some(false));
         assert_eq!(shapes.can_be_unimodal(), Some(false));
+    }
+
+    #[test]
+    fn a_wobble_on_a_lower_peak_merges_like_one_on_the_summit() {
+        // Both vectors carry a one-count wobble on one of two real peaks, and
+        // are mirror images in which peak is the taller. Lower peaks used to be
+        // measured one run at a time, so the left one read as three modes.
+        let lower = [8u32, 7, 8, 2, 20];
+        let summit = [20u32, 19, 20, 2, 8];
+        for t in 1..=8 {
+            assert_eq!(
+                mode_count(classify(&lower, t)),
+                mode_count(classify(&summit, t)),
+                "threshold {t}"
+            );
+        }
+        assert_eq!(classify(&lower, 2), ShapeClass::TwoModes);
+        assert_eq!(modes(&lower, 2), vec![0, 4]);
+        // Finer than the dip, the wobble's halves are separate modes again.
+        assert_eq!(classify(&lower, 1), ShapeClass::ThreeOrMoreModes);
     }
 
     #[test]
