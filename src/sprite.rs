@@ -27,6 +27,12 @@ const DUST: f64 = 1e-12;
 /// SPRITE's random walk is not uniform, so it only says that the part of the
 /// space SPRITE tends to reach looks exhausted.
 const LP_COVERAGE_THRESHOLD: f64 = 0.99;
+/// Fewest successful draws before the duplicate rate may stop a search. On a
+/// small space the rate passes the threshold after a few hundred draws: with
+/// two samples SPRITE reaches once in 200 draws, one run in five missed one.
+// ponytail: a sample rarer than about 1 in 1,000 draws can still be missed;
+// raise this if such samples matter more than the time on small spaces.
+const MIN_DRAWS: u64 = 5_000;
 
 // Internal struct to hold the final, validated parameters (generic version)
 #[derive(Debug)]
@@ -728,8 +734,8 @@ fn find_distributions_all_streaming<T, U>(
         // duplicate_rate = c_dup / total_draws converges to n_found / N_total under
         // uniform sampling, so it directly estimates the fraction of the space covered.
         let n_found = unique_distributions.lock().unwrap().len() as f64;
-        if n_found > 0.0 && cum_dup > 0 {
-            let total_draws = n_found + cum_dup as f64;
+        let total_draws = n_found + cum_dup as f64;
+        if n_found > 0.0 && total_draws >= MIN_DRAWS as f64 {
             let duplicate_rate = cum_dup as f64 / total_draws;
             if duplicate_rate >= LP_COVERAGE_THRESHOLD {
                 if config.show_progress {
@@ -770,8 +776,12 @@ where
 
     // Process in batches for better control and early termination
     let batch_size = 100;
-    // Saturating: `stop_after = None` arrives here as `usize::MAX`.
-    let max_iterations = n_distributions.saturating_mul(MAX_DUP_LOOPS as usize);
+    // Saturating: `stop_after = None` arrives here as `usize::MAX`. Never fewer
+    // than `MIN_DRAWS`, or a small `stop_after` would cut the search shorter
+    // than the duplicate rate may.
+    let max_iterations = n_distributions
+        .saturating_mul(MAX_DUP_LOOPS as usize)
+        .max(MIN_DRAWS as usize);
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
         if should_stop.load(Ordering::Relaxed) || results.nrow() >= n_distributions {
@@ -823,12 +833,12 @@ where
         // n_found / N_total, so it directly estimates the fraction of the space covered.
         // Stop when duplicate_rate >= LP_COVERAGE_THRESHOLD (default 0.99).
         let n_found = unique_distributions.len() as f64;
-        if n_found > 0.0 && cumulative_duplicates > 0 {
-            let total_draws = n_found + cumulative_duplicates as f64;
-            let duplicate_rate = cumulative_duplicates as f64 / total_draws;
-            if duplicate_rate >= LP_COVERAGE_THRESHOLD {
-                break;
-            }
+        let total_draws = n_found + cumulative_duplicates as f64;
+        if n_found > 0.0
+            && total_draws >= MIN_DRAWS as f64
+            && cumulative_duplicates as f64 / total_draws >= LP_COVERAGE_THRESHOLD
+        {
+            break;
         }
     }
 

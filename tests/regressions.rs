@@ -792,3 +792,34 @@ fn degenerate_grids_are_input_errors() {
         Err(ParameterError::InputValidation(_))
     ));
 }
+
+#[test]
+fn sprite_keeps_drawing_long_enough_to_find_rare_samples() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // Two of these five samples come up about once in 200 draws. The
+    // duplicate rate passed 99% after a few hundred, so one run in five
+    // missed one of them.
+    for stop_after in [None, Some(15)] {
+        let results = sprite_parallel::<f64, i32>(
+            3.0,
+            1.5,
+            9,
+            1,
+            5,
+            0.005,
+            0.005,
+            1,
+            None,
+            RestrictionsOption::Null,
+            None,
+            stop_after,
+        )
+        .unwrap();
+        assert_eq!(
+            results.results.len() as u64,
+            closure_count(3.0, 1.5, 9, 1, 5, 0.005, 0.005).unwrap(),
+            "stop_after {stop_after:?}"
+        );
+    }
+}
