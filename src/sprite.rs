@@ -815,10 +815,6 @@ where
 
         // Check early stopping conditions after each batch
         if total_failures >= 1000 {
-            eprintln!(
-                "Warning: Too many failed attempts ({}). Stopping search.",
-                total_failures
-            );
             break;
         }
 
@@ -831,21 +827,9 @@ where
             let total_draws = n_found + cumulative_duplicates as f64;
             let duplicate_rate = cumulative_duplicates as f64 / total_draws;
             if duplicate_rate >= LP_COVERAGE_THRESHOLD {
-                eprintln!(
-                    "Warning: Duplicate rate {:.1}%: the distributions SPRITE reaches look exhausted ({} unique). Stopping search.",
-                    duplicate_rate * 100.0,
-                    unique_distributions.len()
-                );
                 break;
             }
         }
-    }
-
-    if results.nrow() < n_distributions {
-        eprintln!(
-            "Only {} matching distributions could be found.",
-            results.nrow()
-        );
     }
 
     results
