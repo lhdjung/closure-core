@@ -794,6 +794,33 @@ fn degenerate_grids_are_input_errors() {
 }
 
 #[test]
+fn sprite_gives_up_quickly_on_an_sd_too_narrow_for_the_mean() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // n 20 with mean 3.5 needs half the values above the other half, an SD of
+    // at least about 0.51. Every attempt used to run its full loop limit
+    // first, about 16 seconds without `stop_after`.
+    let start = std::time::Instant::now();
+    let results = sprite_parallel::<f64, i32>(
+        3.5,
+        0.1,
+        20,
+        1,
+        5,
+        0.005,
+        0.005,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(results.results.is_empty());
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
 fn sprite_keeps_drawing_long_enough_to_find_rare_samples() {
     use closure_core::{sprite_parallel, RestrictionsOption};
 

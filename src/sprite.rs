@@ -907,6 +907,23 @@ where
     if T::to_f64(&params.sd).unwrap() - params.sd_tolerance > sd_max + 1e-9 {
         return Err("No sample on the scale reaches the SD.".to_string());
     }
+    // And the least: internal values are whole numbers, so at best they split
+    // between two neighbours, `r` of `n` one above the rest, for a population
+    // variance of `r (n − r) / n²`. Any `n` consecutive totals include a
+    // multiple of `n`, where that is 0. An SD below this also ran every
+    // attempt to its full loop limit: 16 s for mean 3.5, sd 0.1, n 20 on 1..=5.
+    let n_i64 = n_usize as i64;
+    let min_spread = (sum_lo..=sum_hi.min(sum_lo + n_i64))
+        .map(|total| {
+            let r = total.rem_euclid(n_i64);
+            r * (n_i64 - r)
+        })
+        .min()
+        .unwrap_or(0);
+    let sd_min = (min_spread as f64 / (n_i64 * (n_i64 - 1)) as f64).sqrt() / scale_f64;
+    if T::to_f64(&params.sd).unwrap() + params.sd_tolerance < sd_min - 1e-9 {
+        return Err("No sample on the scale is as narrow as the SD.".to_string());
+    }
     let total_target_sum = rng.random_range(sum_lo..=sum_hi);
     let vec_target_sum = total_target_sum - fixed_sum_init;
 
