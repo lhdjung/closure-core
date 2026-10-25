@@ -100,8 +100,9 @@ impl ValueGrid {
     ///
     /// # Panics
     /// Panics if `items` is not in `1..=100`, `scale_max < scale_min`, or a
-    /// scale value in hundredths does not fit in an `i32`. Beyond either
-    /// limit distinct grid values would share a key in hundredths.
+    /// scale value in hundredths does not fit in an `i32`. Past 100 items
+    /// distinct grid values would share a key in hundredths; past the scale
+    /// limit the keys would overflow.
     pub fn new(scale_min: i32, scale_max: i32, items: u32, sample_scale_factor: i32) -> Self {
         assert!(
             (1..=100).contains(&items),

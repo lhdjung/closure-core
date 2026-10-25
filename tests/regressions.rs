@@ -716,7 +716,7 @@ fn sprite_finds_a_sample_whose_every_value_is_fixed() {
     // whether the fixed responses already hit the mean.
     let results = sprite_parallel::<f64, i32>(
         1.5,
-        0.7071,
+        std::f64::consts::FRAC_1_SQRT_2,
         2,
         1,
         2,
