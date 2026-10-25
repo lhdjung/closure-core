@@ -1013,6 +1013,8 @@ where
         })
         .sum();
 
+    // Shifts in a row that found no move, each after `2 n` random tries.
+    let mut stuck = 0;
     for _ in 1..=max_loops_sd {
         // Check for success (O(1) using running sums)
         let current_sd: T = T::from(sd_from_running(
@@ -1036,14 +1038,24 @@ where
 
         // Shift values to adjust SD (updates running sums in O(1))
         let increase_sd = current_sd < params.sd;
-        shift_values_internal(
+        if shift_values_internal(
             &mut vec,
             params,
             increase_sd,
             &mut running_sum,
             &mut running_sum_sq,
             rng,
-        );
+        ) {
+            stuck = 0;
+        } else {
+            stuck += 1;
+            // Almost surely no move is left: give the attempt up rather than
+            // run out its loop limit, which made each trapped start cost
+            // ~20,000 fruitless shifts.
+            if stuck == 10 {
+                break;
+            }
+        }
 
         // Check for and correct mean drift (O(1) using running sum)
         let current_mean_f64 =
