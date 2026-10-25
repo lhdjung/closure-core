@@ -63,6 +63,9 @@ where
     n_fixed: usize,
     /// Maps each scaled value (as i64) to its index in `possible_values_scaled` (O(1) lookup)
     value_to_index: HashMap<i64, usize>,
+    /// The smallest spacing between neighbouring possible values; larger
+    /// only where an exact restriction left a gap.
+    min_step: i64,
 }
 
 /// Internal function to build and validate SPRITE parameters
@@ -256,6 +259,12 @@ where
         .map(|(i, v)| (U::to_i64(v).unwrap(), i))
         .collect();
 
+    let min_step = final_possible_values_scaled
+        .windows(2)
+        .map(|w| U::to_i64(&w[1]).unwrap() - U::to_i64(&w[0]).unwrap())
+        .min()
+        .unwrap_or(1);
+
     Ok(SpriteParams {
         mean,
         sd,
@@ -268,6 +277,7 @@ where
         fixed_responses_scaled,
         n_fixed,
         value_to_index,
+        min_step,
     })
 }
 
@@ -1003,8 +1013,9 @@ where
         })
         .sum();
 
-    // Running sums for the mutable part of the distribution
-    let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
+    // Running sums for the mutable part of the distribution. Shifts keep the
+    // total, so only the sum of squares runs.
+    let running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
     let mut running_sum_sq: i64 = vec
         .iter()
         .map(|v| {
@@ -1036,16 +1047,10 @@ where
             break;
         }
 
-        // Shift values to adjust SD (updates running sums in O(1))
+        // Shift values to adjust SD (updates running sums in O(1)). Every
+        // shift keeps the total, so the mean needs no correction afterwards.
         let increase_sd = current_sd < params.sd;
-        if shift_values_internal(
-            &mut vec,
-            params,
-            increase_sd,
-            &mut running_sum,
-            &mut running_sum_sq,
-            rng,
-        ) {
+        if shift_values_internal(&mut vec, params, increase_sd, &mut running_sum_sq, rng) {
             stuck = 0;
         } else {
             stuck += 1;
@@ -1055,22 +1060,6 @@ where
             if stuck == 10 {
                 break;
             }
-        }
-
-        // Check for and correct mean drift (O(1) using running sum)
-        let current_mean_f64 =
-            mean_from_running(running_sum + fixed_sum, n_usize, params.scale_factor);
-        if (current_mean_f64 - mean_f64).abs() > params.mean_tolerance {
-            adjust_mean_internal(&mut vec, params, 20, rng).unwrap_or(());
-            // Re-sync: adjust_mean modified vec (rare path, O(n) is acceptable here)
-            running_sum = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
-            running_sum_sq = vec
-                .iter()
-                .map(|v| {
-                    let v64 = U::to_i64(v).unwrap();
-                    v64 * v64
-                })
-                .sum();
         }
     }
 
@@ -1183,7 +1172,6 @@ fn shift_values_internal<T, U>(
     vec: &mut [U],
     params: &SpriteParams<T, U>,
     increase_sd: bool,
-    running_sum: &mut i64,
     running_sum_sq: &mut i64,
     rng: &mut impl Rng,
 ) -> bool
@@ -1193,256 +1181,102 @@ where
 {
     let max_attempts = vec.len() * 2;
     let pv = &params.possible_values_scaled;
-    let scale_f = params.scale_factor as f64;
+    let index_of = |v: i64| params.value_to_index.get(&v).copied();
+    // Every move keeps the total, so the SD goes the way the sum of squares
+    // does, and that is exact in integers.
+    let helps = |d_sq: i64| if increase_sd { d_sq > 0 } else { d_sq < 0 };
 
     for _ in 0..max_attempts {
         let i = rng.random_range(0..vec.len());
-        let mut j = rng.random_range(0..vec.len());
-        while i == j && vec.len() > 1 {
-            j = rng.random_range(0..vec.len());
-        }
-        if i == j {
-            continue;
-        }
-
         let val1_i64 = U::to_i64(&vec[i]).unwrap();
-        let val2_i64 = U::to_i64(&vec[j]).unwrap();
-
-        // O(1) index lookups
-        let val1_idx = match params.value_to_index.get(&val1_i64) {
-            Some(&idx) => idx,
-            None => continue,
-        };
-        let val2_idx = match params.value_to_index.get(&val2_i64) {
-            Some(&idx) => idx,
-            None => continue,
+        let Some(val1_idx) = index_of(val1_i64) else {
+            continue;
         };
 
-        // Which way val1 moves; val2 and every compensating move go the other
-        // way. Picked at random, as rsprite2 does with `incFirst`. Always
-        // moving val1 up meant a gap left by an exact restriction could only
-        // be crossed downward together with an upward move just as wide,
-        // which is the swap back, so the value below the gap never filled.
+        // Which way val1 moves to its neighbour on the grid; the compensating
+        // moves go the other way. Picked at random, as rsprite2 does with
+        // `incFirst`. Always moving val1 up meant a gap left by an exact
+        // restriction could only be crossed downward together with an upward
+        // move just as wide, which is the swap back, so the value below the
+        // gap never filled.
         let up = rng.random_bool(0.5);
-        let neighbour = |idx: usize, up: bool| {
-            if up {
-                pv.get(idx + 1)
-            } else {
-                idx.checked_sub(1).and_then(|k| pv.get(k))
-            }
+        let neighbour = if up {
+            pv.get(val1_idx + 1)
+        } else {
+            val1_idx.checked_sub(1).and_then(|k| pv.get(k))
         };
-        let val1_new = match neighbour(val1_idx, up) {
-            Some(&v) => v,
-            None => continue,
-        };
-        let val2_new = match neighbour(val2_idx, !up) {
-            Some(&v) => v,
-            None => continue,
+        let Some(&val1_new) = neighbour else {
+            continue;
         };
         let val1_new_i64 = U::to_i64(&val1_new).unwrap();
-        let val2_new_i64 = U::to_i64(&val2_new).unwrap();
+        let step = val1_new_i64 - val1_i64;
+        let d1_sq = val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64;
 
-        let delta1 = (val1_new_i64 - val1_i64).abs();
-        let delta2 = (val2_new_i64 - val2_i64).abs();
-
-        // Helper: is a (before, after) pair SD-pointless?
-        let is_pointless = |a_before: i64, a_after: i64, b_before: i64, b_after: i64| -> bool {
-            let sd_before =
-                std_dev(&[a_before as f64 / scale_f, b_before as f64 / scale_f]).unwrap_or(0.0);
-            let sd_after =
-                std_dev(&[a_after as f64 / scale_f, b_after as f64 / scale_f]).unwrap_or(0.0);
-            if increase_sd {
-                sd_after <= sd_before
-            } else {
-                sd_after >= sd_before
-            }
-        };
-
-        if delta1 == delta2 {
-            // Equal gaps — standard mean-preserving swap
-            if !is_pointless(val1_i64, val1_new_i64, val2_i64, val2_new_i64) {
+        // Stage 1: another value makes the whole compensating move, to any
+        // grid value however many grid steps away. On an even grid this is
+        // the plain mean-preserving swap. Only moving between neighbours, a
+        // gap from a restriction trapped the search: with 2 excluded on 1..=5,
+        // `3 3 5` could not become `1 5 5`.
+        let k = rng.random_range(0..vec.len() - 1);
+        let k = if k >= i { k + 1 } else { k };
+        let from = U::to_i64(&vec[k]).unwrap();
+        let to = from - step;
+        if let Some(to_idx) = index_of(to) {
+            let d_sq = d1_sq + to * to - from * from;
+            if helps(d_sq) {
                 vec[i] = val1_new;
-                vec[j] = val2_new;
-                *running_sum += (val1_new_i64 - val1_i64) + (val2_new_i64 - val2_i64);
-                *running_sum_sq += (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64)
-                    + (val2_new_i64 * val2_new_i64 - val2_i64 * val2_i64);
+                vec[k] = pv[to_idx];
+                *running_sum_sq += d_sq;
                 return true;
             }
-        } else {
-            // Gap resolution: gaps differ (items>1 or restrictions with non-uniform spacing)
+        }
+        if step.abs() < 2 * params.min_step {
+            continue; // too small to split
+        }
 
-            // Stage 1: find a single pair in pv with spacing == delta1 one of
-            // whose members exists in vec at some position k != i, and move
-            // that member to the other one, against val1's direction.
-            let (lo1, hi1) = (val1_i64.min(val1_new_i64), val1_i64.max(val1_new_i64));
-            for p in 0..pv.len().saturating_sub(1) {
-                let low_i64 = U::to_i64(&pv[p]).unwrap();
-                let high_i64 = U::to_i64(&pv[p + 1]).unwrap();
-                if high_i64 - low_i64 != delta1 {
-                    continue;
-                }
-                // The pair val1 just crossed: moving another value across it
-                // the other way would only swap the two back.
-                if (low_i64, high_i64) == (lo1, hi1) {
-                    continue;
-                }
-                let (from, to, to_val) = if up {
-                    (high_i64, low_i64, pv[p])
-                } else {
-                    (low_i64, high_i64, pv[p + 1])
-                };
-                let Some(k) =
-                    (0..vec.len()).find(|&k| k != i && U::to_i64(&vec[k]).unwrap() == from)
-                else {
-                    continue;
-                };
-                // A pointless pair need not end the search: another pair
-                // with the same spacing may still help.
-                if is_pointless(val1_i64, val1_new_i64, from, to) {
-                    continue;
-                }
-                vec[i] = val1_new;
-                vec[k] = to_val;
-                // ±delta1 ∓ delta1 = 0: the total is unchanged.
-                *running_sum += (val1_new_i64 - val1_i64) + (to - from);
-                *running_sum_sq +=
-                    (val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64) + (to * to - from * from);
-                return true;
+        // Stage 2: val1 crossed a gap. Split the compensation over `parts`
+        // other values, each moving `step / parts` the other way, scanning
+        // from a random position so no part of `vec` is favoured.
+        let start = rng.random_range(0..vec.len());
+        for parts in 2..=(step.abs() / params.min_step).min(10) {
+            if step % parts != 0 {
+                continue;
             }
-
-            // Stage 2: split delta1 into num_steps equal sub-steps.
-            // Find num_steps vec positions (all != i) each movable by
-            // sub_delta against val1's direction.
-            let min_step = (0..pv.len().saturating_sub(1))
-                .map(|p| U::to_i64(&pv[p + 1]).unwrap() - U::to_i64(&pv[p]).unwrap())
-                .min()
-                .unwrap_or(delta1);
-            let max_steps = ((delta1 / min_step).min(10)) as usize;
-
-            'stage2: for num_steps in 2..=max_steps {
-                if delta1 % num_steps as i64 != 0 {
+            let sub = step / parts;
+            let mut moves: Vec<(usize, usize)> = Vec::with_capacity(parts as usize);
+            let mut d_sq = d1_sq;
+            for k in (start..vec.len()).chain(0..start) {
+                if k == i {
                     continue;
                 }
-                let sub_delta = delta1 / num_steps as i64;
-
-                // Collect (low, high) pairs with gap == sub_delta
-                let highs: Vec<(i64, i64)> = (0..pv.len().saturating_sub(1))
-                    .filter_map(|p| {
-                        let l = U::to_i64(&pv[p]).unwrap();
-                        let h = U::to_i64(&pv[p + 1]).unwrap();
-                        if h - l == sub_delta {
-                            Some((l, h))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if highs.is_empty() {
-                    continue;
-                }
-
-                // Find num_steps distinct vec positions (all != i) whose value
-                // is the "from" end of such a pair: its high member when val1
-                // went up, its low member when val1 went down.
-                let mut positions: Vec<(usize, i64, i64)> = Vec::with_capacity(num_steps);
-                let mut excluded: Vec<usize> = vec![i];
-                for _ in 0..num_steps {
-                    let mut found = false;
-                    'find: for k in 0..vec.len() {
-                        if excluded.contains(&k) {
-                            continue;
-                        }
-                        let vk = U::to_i64(&vec[k]).unwrap();
-                        for &(low_i64, high_i64) in &highs {
-                            let (from, to) = if up {
-                                (high_i64, low_i64)
-                            } else {
-                                (low_i64, high_i64)
-                            };
-                            if vk == from {
-                                positions.push((k, from, to));
-                                excluded.push(k);
-                                found = true;
-                                break 'find;
-                            }
-                        }
-                    }
-                    if !found {
-                        continue 'stage2;
+                let from = U::to_i64(&vec[k]).unwrap();
+                let to = from - sub;
+                if let Some(to_idx) = index_of(to) {
+                    moves.push((k, to_idx));
+                    d_sq += to * to - from * from;
+                    if moves.len() == parts as usize {
+                        break;
                     }
                 }
-
-                // Apply all changes
-                vec[i] = val1_new;
-                *running_sum += val1_new_i64 - val1_i64;
-                *running_sum_sq += val1_new_i64 * val1_new_i64 - val1_i64 * val1_i64;
-                for (k, from, to) in positions {
-                    let new_val = *params
-                        .value_to_index
-                        .get(&to)
-                        .and_then(|&idx| pv.get(idx))
-                        .unwrap();
-                    vec[k] = new_val;
-                    *running_sum += to - from;
-                    *running_sum_sq += to * to - from * from;
-                }
-                return true;
             }
+            if moves.len() < parts as usize || !helps(d_sq) {
+                continue;
+            }
+            vec[i] = val1_new;
+            for (k, to_idx) in moves {
+                vec[k] = pv[to_idx];
+            }
+            // The total is unchanged: `step` one way, `parts` times `sub` back.
+            *running_sum_sq += d_sq;
+            return true;
         }
     }
 
     false
 }
 
-/// Compute mean from scaled integer values
-#[allow(dead_code)]
-fn compute_mean_scaled<T, U>(vec: &[U], fixed_vals: &[U], scale_factor: u32) -> T
-where
-    T: FloatType,
-    U: IntegerType,
-{
-    let sum_vec: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
-    let sum_fixed: i64 = fixed_vals.iter().map(|v| U::to_i64(v).unwrap()).sum();
-    let total_len = vec.len() + fixed_vals.len();
-    let total_sum = sum_vec + sum_fixed;
-
-    T::from((total_sum as f64) / (scale_factor as f64) / (total_len as f64)).unwrap()
-}
-
-/// Compute standard deviation from scaled integer values
-#[allow(dead_code)]
-fn compute_sd_scaled<T, U>(vec: &[U], fixed_vals: &[U], scale_factor: u32) -> T
-where
-    T: FloatType,
-    U: IntegerType,
-{
-    let scale_f = scale_factor as f64;
-    let combined_mean = compute_mean_scaled(vec, fixed_vals, scale_factor);
-    let combined_mean_f64 = T::to_f64(&combined_mean).unwrap();
-
-    let sum_sq_diff_vec: f64 = vec
-        .iter()
-        .map(|v| {
-            let val_f = U::to_i64(v).unwrap() as f64 / scale_f;
-            (val_f - combined_mean_f64).powi(2)
-        })
-        .sum();
-
-    let sum_sq_diff_fixed: f64 = fixed_vals
-        .iter()
-        .map(|v| {
-            let val_f = U::to_i64(v).unwrap() as f64 / scale_f;
-            (val_f - combined_mean_f64).powi(2)
-        })
-        .sum();
-
-    let total_len = vec.len() + fixed_vals.len();
-    let variance = (sum_sq_diff_vec + sum_sq_diff_fixed) / (total_len - 1) as f64;
-
-    T::from(variance.sqrt()).unwrap()
-}
-
 /// Calculate mean of a slice
+#[cfg(test)]
 fn mean(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -1451,6 +1285,7 @@ fn mean(data: &[f64]) -> f64 {
 }
 
 /// Calculate standard deviation of a slice
+#[cfg(test)]
 fn std_dev(data: &[f64]) -> Option<f64> {
     if data.len() < 2 {
         return None;
@@ -1847,5 +1682,40 @@ pub mod tests {
              (CLOSURE finds 24,907 for these inputs). \
              LP stopping criterion may be broken."
         );
+    }
+
+    #[test]
+    fn one_value_moving_several_grid_steps_can_compensate() {
+        // With 4 fixed once on 1..=5, the free values `3 3 5 5 5` have one
+        // move that raises the SD: a 3 to 1 and the other 3 to 5, two grid
+        // steps. Compensating only between neighbouring grid values, SPRITE
+        // had no move at all here.
+        let params = build_sprite_params::<f64, i32>(
+            4.17,
+            1.6,
+            6,
+            1,
+            5,
+            0.005,
+            0.005,
+            1,
+            Some([(400, 1)].into_iter().collect()),
+            RestrictionsOption::Null,
+        )
+        .unwrap();
+        let mut rng = rand::rng();
+        let mut vec = vec![3, 3, 5, 5, 5];
+        let mut sum_sq: i64 = vec.iter().map(|v| (v * v) as i64).sum();
+        let mut moved = false;
+        for _ in 0..100 {
+            if shift_values_internal(&mut vec, &params, true, &mut sum_sq, &mut rng) {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved, "no move found");
+        vec.sort();
+        assert_eq!(vec, vec![1, 5, 5, 5, 5]);
+        assert_eq!(sum_sq, vec.iter().map(|v| (v * v) as i64).sum::<i64>());
     }
 }

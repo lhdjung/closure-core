@@ -821,6 +821,65 @@ fn sprite_gives_up_quickly_on_an_sd_too_narrow_for_the_mean() {
 }
 
 #[test]
+fn sprite_reaches_samples_beyond_a_restriction_gap() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // Each case has a single sample, and every attempt used to fail on it:
+    // reaching it from SPRITE's start takes one value moving two grid steps
+    // to balance another's single step across the gap.
+    struct Case {
+        mean: f64,
+        sd: f64,
+        n: i32,
+        scale_max: i32,
+        items: u32,
+        exact: Vec<(i32, usize)>,
+        expected: Vec<i32>,
+    }
+    let cases = [
+        Case {
+            mean: 4.17,
+            sd: 1.6,
+            n: 6,
+            scale_max: 5,
+            items: 1,
+            exact: vec![(400, 1)],
+            expected: vec![100, 400, 500, 500, 500, 500],
+        },
+        Case {
+            mean: 1.5,
+            sd: 1.0,
+            n: 4,
+            scale_max: 5,
+            items: 2,
+            exact: vec![(150, 0)],
+            expected: vec![100, 100, 100, 300],
+        },
+    ];
+    for c in cases {
+        let results = sprite_parallel::<f64, i32>(
+            c.mean,
+            c.sd,
+            c.n,
+            1,
+            c.scale_max,
+            0.005,
+            0.005,
+            c.items,
+            Some(c.exact.into_iter().collect()),
+            RestrictionsOption::Null,
+            None,
+            Some(10),
+        )
+        .unwrap();
+        let samples: Vec<Vec<i32>> = (0..results.results.len())
+            .map(|i| results.results.sample(i))
+            .collect();
+        assert_eq!(samples, vec![c.expected], "mean {}, sd {}", c.mean, c.sd);
+    }
+}
+
+#[test]
 fn sprite_keeps_drawing_long_enough_to_find_rare_samples() {
     use closure_core::{sprite_parallel, RestrictionsOption};
 
