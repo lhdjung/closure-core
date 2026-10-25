@@ -824,9 +824,11 @@ fn sprite_gives_up_quickly_on_an_sd_too_narrow_for_the_mean() {
 fn sprite_reaches_samples_beyond_a_restriction_gap() {
     use closure_core::{sprite_parallel, RestrictionsOption};
 
-    // Each case has a single sample, and every attempt used to fail on it:
-    // reaching it from SPRITE's start takes one value moving two grid steps
-    // to balance another's single step across the gap.
+    // Each case has a single sample, and every attempt used to fail on it.
+    // In the first two, reaching it from SPRITE's start takes one value moving
+    // two grid steps to balance another's single step across the gap; in the
+    // third, no shift reaches it from that start at all, so it takes a
+    // different one.
     struct Case {
         mean: f64,
         sd: f64,
@@ -854,6 +856,15 @@ fn sprite_reaches_samples_beyond_a_restriction_gap() {
             items: 2,
             exact: vec![(150, 0)],
             expected: vec![100, 100, 100, 300],
+        },
+        Case {
+            mean: 2.0,
+            sd: 0.61,
+            n: 7,
+            scale_max: 3,
+            items: 3,
+            exact: vec![(167, 3), (200, 1)],
+            expected: vec![133, 167, 167, 167, 200, 267, 300],
         },
     ];
     for c in cases {

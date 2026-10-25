@@ -939,7 +939,13 @@ where
 
     // Direct mean initialization (O(n)): fill the r_n free slots with the
     // grid value just below their target mean and raise exactly enough of them
-    // to the next one that the total is hit exactly.
+    // to the next one that the total is hit exactly. One attempt in ten
+    // starts from a random fill instead. For a given total the direct start
+    // is always the same, and the shifts below cannot reach every sample
+    // from it: with 1.67 and 2 fixed on a three-item 1..=3 scale, free
+    // values `2.33 2.33 2.33` never become `1.33 2.67 3`. Not more often:
+    // walking a random fill to the SD costs up to ~50 direct starts on
+    // large samples (mean 3, sd 0.3, n 1000).
     let slot_mean = vec_target_sum as f64 / r_n.max(1) as f64;
     let floor_idx = pv
         .partition_point(|v| (U::to_i64(v).unwrap() as f64) <= slot_mean + 1e-9)
@@ -947,7 +953,9 @@ where
 
     let mut vec: Vec<U> = if !pv.is_empty() && r_n > 0 {
         let floor_i64 = U::to_i64(&pv[floor_idx]).unwrap();
-        let direct: Option<Vec<U>> = if floor_idx + 1 < pv.len() {
+        let direct: Option<Vec<U>> = if rng.random_bool(0.1) {
+            None
+        } else if floor_idx + 1 < pv.len() {
             let ceil_i64 = U::to_i64(&pv[floor_idx + 1]).unwrap();
             let step = ceil_i64 - floor_i64;
             let deficit = vec_target_sum - r_n as i64 * floor_i64;
@@ -976,15 +984,15 @@ where
             }
         };
         direct.unwrap_or_else(|| {
-            // Fallback: random fill (handles edge cases from restrictions)
+            // Random fill: also the fallback for edge cases from restrictions
             (0..r_n).map(|_| *pv.choose(rng).unwrap()).collect()
         })
     } else {
         Vec::new()
     };
 
-    // Mean correction: no-op on the direct path (sum is exact); recovers the
-    // fallback path or any floating-point edge case.
+    // Mean correction: no-op on the direct path (sum is exact); brings the
+    // random fill to an admissible total.
     // Both limits are computed in u64: n * k² overflows u32 on wide
     // multi-item grids (n = 50,000 on 0..=100 at items = 3 is 4.5e9).
     let n_u64 = n_usize as u64;
