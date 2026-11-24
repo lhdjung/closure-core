@@ -68,6 +68,7 @@
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
 use crate::modality::{ModalityShapes, ShapeAccumulator, ShapeClass, DEFAULT_MODE_PROMINENCE};
+use crate::sample_counts::MAX_ABS_SCALE;
 use arrow::array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray,
     UInt32Array, UInt64Array,
@@ -802,7 +803,7 @@ impl ClosureInputs {
         }
         // The output grid holds each value in hundredths as an i32. Larger
         // scales used to run the whole search and then panic building it.
-        let max_abs = i32::MAX as i64 / 100;
+        let max_abs = MAX_ABS_SCALE as i64;
         if scale_min < -max_abs || scale_max > max_abs {
             return invalid("scale values must lie within ±21,474,836");
         }

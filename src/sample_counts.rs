@@ -70,6 +70,11 @@ impl OutputFormat {
     }
 }
 
+/// Largest scale value, in absolute terms, that a [`ValueGrid`] can hold:
+/// grid keys are hundredths of a scale point in an `i32`. Both techniques
+/// reject wider scales up front rather than panic building the grid.
+pub(crate) const MAX_ABS_SCALE: i32 = i32::MAX / 100;
+
 /// The lattice of values a technique can emit.
 ///
 /// Values are `scale_min + j / items` for `j` in `0..=(scale_max - scale_min) *
@@ -108,7 +113,7 @@ impl ValueGrid {
             (1..=100).contains(&items),
             "can't build a ValueGrid: `items` must be between 1 and 100"
         );
-        let max_abs = i32::MAX / 100;
+        let max_abs = MAX_ABS_SCALE;
         assert!(
             scale_min >= -max_abs && scale_max <= max_abs,
             "can't build a ValueGrid: scale values must lie within ±{max_abs}"

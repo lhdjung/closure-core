@@ -1,5 +1,6 @@
 //! Creating a space to experiment with a Rust translation of SPRITE
 
+use crate::sample_counts::MAX_ABS_SCALE;
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
     counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
@@ -97,6 +98,13 @@ where
     if scale_min_i32 >= scale_max_i32 {
         return Err(ParameterError::InputValidation(
             "scale_max must be greater than scale_min".to_string(),
+        ));
+    }
+    // The output grid keys values in hundredths as an i32; past this a
+    // `U` wider than i32 passed every check below and the grid panicked.
+    if scale_min_i32 < -MAX_ABS_SCALE || scale_max_i32 > MAX_ABS_SCALE {
+        return Err(ParameterError::InputValidation(
+            "scale values must lie within ±21,474,836".to_string(),
         ));
     }
 

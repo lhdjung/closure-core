@@ -952,3 +952,27 @@ fn a_bound_hit_exactly_at_a_large_n_is_found() {
         1
     );
 }
+
+#[test]
+fn sprite_rejects_a_scale_too_wide_for_the_grid() {
+    use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
+
+    // An i64 sample type holds 3e7 easily, but the output grid keys values
+    // in hundredths as an i32. This used to panic building the grid.
+    let result = sprite_parallel::<f64, i64>(
+        15e6,
+        1.0,
+        10,
+        0,
+        30_000_000,
+        0.05,
+        0.05,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        Some(1),
+    );
+    assert!(matches!(result, Err(ParameterError::InputValidation(_))));
+
+}
