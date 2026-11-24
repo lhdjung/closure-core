@@ -2819,7 +2819,12 @@ fn closure_branch(
     let min_idx = seed.last().copied().unwrap_or(0);
     // The limit in buffer elements, so the hot loop compares lengths directly.
     let limit = stop_after.map_or(usize::MAX, |limit| limit.saturating_mul(counts.len()));
-    closure_branch_recurse(
+    let search: BranchSearch = if ctx.n - seed.len().min(ctx.n) > MAX_RECURSION_DEPTH {
+        closure_branch_deep
+    } else {
+        closure_branch_recurse
+    };
+    search(
         &mut counts,
         seed.len(),
         sum,
@@ -2830,6 +2835,64 @@ fn closure_branch(
         &mut results,
     );
     results
+}
+
+/// Deepest branch [`closure_branch`] searches by recursion. Below it the
+/// recursion needs a few hundred KB of stack, little enough for any thread
+/// that calls in; deeper branches run [`closure_branch_deep`].
+const MAX_RECURSION_DEPTH: usize = 4096;
+
+/// The signature [`closure_branch_recurse`] and [`closure_branch_deep`] share.
+type BranchSearch =
+    fn(&mut [u32], usize, i64, i64, usize, &ClosureSearchContext, usize, &mut Vec<u32>);
+
+/// What the search does with one candidate value at a level.
+enum Step {
+    /// Neither this value nor any larger one can complete the sample.
+    Stop,
+    /// This value cannot, but a larger one may.
+    Skip,
+    /// Choose it: the running sum and sum of squares with it added.
+    Take(i64, i64),
+}
+
+/// The pruning shared by both forms of the search: whether value index `idx`
+/// can extend a partial sample of `k` values with running `sum` and `ssq`.
+#[inline(always)]
+fn closure_step(ctx: &ClosureSearchContext, k: usize, sum: i64, ssq: i64, idx: usize) -> Step {
+    let n_left = (ctx.n - k - 1) as i64;
+    let v = ctx.scale_min + idx as i64;
+    let next_sum = sum + v;
+
+    // Remaining values are at least `v`, so the smallest reachable sum
+    // only grows from here.
+    if next_sum + v * n_left > ctx.sum_hi {
+        return Step::Stop;
+    }
+    if next_sum + ctx.scale_max * n_left < ctx.sum_lo {
+        return Step::Skip;
+    }
+
+    let next_ssq = ssq + v * v;
+    if (k + 1) as i64 * next_ssq - next_sum * next_sum > ctx.m2_hi[k + 1] {
+        // The partial M2 is a parabola in `v` with its minimum at the
+        // running mean, so once `v` is past the mean every larger value
+        // overshoots too.
+        if v * k as i64 >= sum {
+            return Step::Stop;
+        }
+        return Step::Skip;
+    }
+    Step::Take(next_sum, next_ssq)
+}
+
+/// Whether a complete sample with this sum and sum of squares is admissible.
+///
+/// Every bound is checked here rather than relying on the pruning in
+/// [`closure_step`], which a seed as long as `n` never passes through.
+fn closure_complete(ctx: &ClosureSearchContext, sum: i64, ssq: i64) -> bool {
+    let m2n = ctx.n as i64 * ssq - sum * sum;
+    sum >= ctx.sum_lo && sum <= ctx.sum_hi && m2n >= ctx.m2n_lo && m2n <= ctx.m2_hi[ctx.n]
 }
 
 /// Recursive backtracking core for [`closure_branch`].
@@ -2849,42 +2912,18 @@ fn closure_branch_recurse(
     results: &mut Vec<u32>,
 ) {
     if k >= ctx.n {
-        // Every bound is checked here rather than relying on the pruning
-        // below, which a seed as long as `n` never passes through.
-        let m2n = ctx.n as i64 * ssq - sum * sum;
-        if sum >= ctx.sum_lo && sum <= ctx.sum_hi && m2n >= ctx.m2n_lo && m2n <= ctx.m2_hi[ctx.n] {
+        if closure_complete(ctx, sum, ssq) {
             results.extend_from_slice(counts);
         }
         return;
     }
 
-    let n_left = (ctx.n - k - 1) as i64;
-    let next_k = (k + 1) as i64;
-    let m2_hi = ctx.m2_hi[k + 1];
-
     for idx in min_idx..counts.len() {
-        let v = ctx.scale_min + idx as i64;
-        let next_sum = sum + v;
-
-        // Remaining values are at least `v`, so the smallest reachable sum
-        // only grows from here.
-        if next_sum + v * n_left > ctx.sum_hi {
-            break;
-        }
-        if next_sum + ctx.scale_max * n_left < ctx.sum_lo {
-            continue;
-        }
-
-        let next_ssq = ssq + v * v;
-        if next_k * next_ssq - next_sum * next_sum > m2_hi {
-            // The partial M2 is a parabola in `v` with its minimum at the
-            // running mean, so once `v` is past the mean every larger value
-            // overshoots too.
-            if v * k as i64 >= sum {
-                break;
-            }
-            continue;
-        }
+        let (next_sum, next_ssq) = match closure_step(ctx, k, sum, ssq, idx) {
+            Step::Stop => break,
+            Step::Skip => continue,
+            Step::Take(next_sum, next_ssq) => (next_sum, next_ssq),
+        };
 
         counts[idx] += 1;
         closure_branch_recurse(counts, k + 1, next_sum, next_ssq, idx, ctx, limit, results);
@@ -2896,10 +2935,148 @@ fn closure_branch_recurse(
     }
 }
 
+/// [`closure_branch_recurse`] on an explicit stack, for branches deeper than
+/// [`MAX_RECURSION_DEPTH`]: the tree is `n` levels deep, and recursing
+/// overflowed the thread's stack and aborted the process from about
+/// n = 20,000. It visits the same samples in the same order, but about 20%
+/// slower, which is why it is not used throughout.
+#[allow(clippy::too_many_arguments)]
+fn closure_branch_deep(
+    counts: &mut [u32],
+    k0: usize,
+    sum: i64,
+    ssq: i64,
+    min_idx: usize,
+    ctx: &ClosureSearchContext,
+    limit: usize,
+    results: &mut Vec<u32>,
+) {
+    if k0 >= ctx.n {
+        if closure_complete(ctx, sum, ssq) {
+            results.extend_from_slice(counts);
+        }
+        return;
+    }
+
+    /// One level of the descent: the next index to try there, and the sum and
+    /// sum of squares of the values chosen above it.
+    struct Level {
+        idx: usize,
+        sum: i64,
+        ssq: i64,
+    }
+    let mut stack = Vec::with_capacity(ctx.n - k0);
+    stack.push(Level {
+        idx: min_idx,
+        sum,
+        ssq,
+    });
+    'levels: loop {
+        let k = k0 + stack.len() - 1;
+        let Some(level) = stack.last_mut() else {
+            return;
+        };
+        while level.idx < counts.len() {
+            let idx = level.idx;
+            match closure_step(ctx, k, level.sum, level.ssq, idx) {
+                Step::Stop => break,
+                Step::Skip => level.idx += 1,
+                Step::Take(next_sum, next_ssq) if k + 1 == ctx.n => {
+                    level.idx += 1;
+                    if closure_complete(ctx, next_sum, next_ssq) {
+                        counts[idx] += 1;
+                        results.extend_from_slice(counts);
+                        counts[idx] -= 1;
+                        if results.len() >= limit {
+                            return;
+                        }
+                    }
+                }
+                Step::Take(next_sum, next_ssq) => {
+                    // Values never decrease, so the level below starts here.
+                    counts[idx] += 1;
+                    stack.push(Level {
+                        idx,
+                        sum: next_sum,
+                        ssq: next_ssq,
+                    });
+                    continue 'levels;
+                }
+            }
+        }
+
+        // This level is done: back out of the value its parent chose.
+        stack.pop();
+        if let Some(parent) = stack.last_mut() {
+            counts[parent.idx] -= 1;
+            parent.idx += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    #[test]
+    fn the_deep_search_finds_what_the_recursive_one_finds() {
+        // Same samples, same order, over every seed of a sweep of small
+        // inputs, with and without a limit.
+        let mut checked = 0;
+        for (lo, hi) in [(1, 5), (1, 7), (-3, 3), (0, 1)] {
+            for n in 2..=9 {
+                for mean_x10 in (lo * 10..=hi * 10).step_by(3) {
+                    for sd_x10 in (0..=30).step_by(4) {
+                        let (mean, sd) = (mean_x10 as f64 / 10.0, sd_x10 as f64 / 10.0);
+                        let ctx =
+                            ClosureSearchContext::new::<f64, i32>(mean, sd, n, lo, hi, 0.05, 0.05)
+                                .unwrap();
+                        for seed in
+                            generate_initial_combinations(ctx.scale_range(), ctx.seed_depth())
+                        {
+                            for limit in [usize::MAX, 2 * ctx.scale_range()] {
+                                let run = |search: BranchSearch| {
+                                    let mut counts = vec![0u32; ctx.scale_range()];
+                                    let (mut sum, mut ssq) = (0, 0);
+                                    for &idx in &seed {
+                                        counts[idx] += 1;
+                                        let v = ctx.scale_min + idx as i64;
+                                        sum += v;
+                                        ssq += v * v;
+                                    }
+                                    let mut out = Vec::new();
+                                    let min_idx = seed.last().copied().unwrap_or(0);
+                                    search(
+                                        &mut counts,
+                                        seed.len(),
+                                        sum,
+                                        ssq,
+                                        min_idx,
+                                        &ctx,
+                                        limit,
+                                        &mut out,
+                                    );
+                                    out
+                                };
+                                let found = run(closure_branch_recurse);
+                                assert_eq!(
+                                    run(closure_branch_deep),
+                                    found,
+                                    "mean {mean} sd {sd} n {n} {lo}..{hi} seed {seed:?}"
+                                );
+                                checked += found.len();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 10_000,
+            "the sweep found too few samples to mean much: {checked}"
+        );
+    }
 
     #[test]
     fn an_empty_output_path_is_the_current_directory() {

@@ -249,9 +249,31 @@ fn a_cutoff_given_as_a_percentage_is_an_error() {
     // Fractions are fine, and are what the run reports at.
     let shapes = run(0.04, vec![0.03, 0.06]).unwrap().modality_shapes;
     assert_eq!(shapes.min_prominence, 0.04);
-    let rungs: Vec<u32> = shapes.ladder.iter().map(|r| r.min_prominence_counts).collect();
+    let rungs: Vec<u32> = shapes
+        .ladder
+        .iter()
+        .map(|r| r.min_prominence_counts)
+        .collect();
     assert_eq!(rungs, vec![3, 4, 6]);
-    assert_eq!(shapes.must_be(|c| c == closure_core::modality::ShapeClass::Flat), Some(false));
+    assert_eq!(
+        shapes.must_be(|c| c == closure_core::modality::ShapeClass::Flat),
+        Some(false)
+    );
+}
+
+#[test]
+fn a_deep_search_does_not_overflow_the_stack() {
+    // The search recursed once per value, so from about n = 20,000 it
+    // overflowed the thread's stack and aborted the whole process, which
+    // nothing can catch. Deep branches now run on an explicit stack.
+    let n = 20_000;
+    let results =
+        closure_parallel::<f64, i32>(0.5, 0.5, n, 0, 1, 0.005, 0.005, 1, None, None, None).unwrap();
+    assert_eq!(
+        results.results.len() as u64,
+        closure_count(0.5, 0.5, n, 0, 1, 0.005, 0.005).unwrap()
+    );
+    assert_eq!(results.results.len(), 201);
 }
 
 #[test]
