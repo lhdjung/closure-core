@@ -40,25 +40,42 @@
 //!
 //! # Reading the shape output
 //!
-//! [`modality::ModalityShapes`] answers what the raw data could have looked
-//! like. Three points decide how much its answers are worth:
+//! Two kinds of conclusion come out of a CLOSURE run, and they rest on
+//! opposite outcomes:
 //!
-//! - A shape class with **zero** members means the raw data did not have that
-//!   shape — but only if the search was exhaustive. A truncated run
-//!   (`stop_after`) and SPRITE both see part of the space, so
-//!   [`modality::ModalityShapes::can_be`] returns `None` for them rather than
-//!   claiming a proof. It is also only a proof relative to a threshold for what
-//!   counts as a mode, so `can_be` requires the class to be empty across a band
-//!   of thresholds rather than at one. `band_n_*` in `modality_summary` counts
-//!   over every whole-observation threshold in that band, and
-//!   `modality_prominence` shows its rungs.
-//! - A class with **many** members means very little on its own. Since one
-//!   admissible dataset is enough for an author to point at, the useful output
-//!   is the class's *conditional bounds*: what every dataset of that shape would
-//!   also have to look like. Those are in `modality_shapes`.
+//! - **Consistency.** No samples at all means the reported mean, SD and `n`
+//!   cannot all be true of one dataset on this scale, much like a failed GRIM
+//!   test. This is the only sense in which the crate calls anything
+//!   impossible, and it is about the reported numbers, not about any shape.
+//!   Every shape query then answers `None`.
+//! - **Shape inference.** If samples exist and the search found all of them,
+//!   the original data is one of them (provided the reported statistics are
+//!   right). So if every sample is flat, the original data was flat; if none
+//!   is bell-shaped, it was not bell-shaped.
+//!   [`modality::ModalityShapes::must_be`] and
+//!   [`modality::ModalityShapes::can_be`] answer these. A truncated run
+//!   (`stop_after`) or SPRITE sees only part of the samples, so for them only
+//!   "some sample has this shape" counts, and the rest is `None`.
+//!
+//! Shape inference is only as good as the shape categories. They rest on a
+//! cutoff for how far a bump must stand out to count as a peak, and how
+//! uneven the bars must be before a histogram stops counting as flat. That
+//! cutoff is a convention. The defaults (5% of `n`, and a band from 2% to 10%
+//! that the shape queries check throughout) are choices, not derived values,
+//! and [`ProminenceThresholds`] sets others. Where a verdict depends on the
+//! cutoff, the output also reports the number behind it, so a reader can judge
+//! directly: `bar_gap_*` in `modality_summary`, for example, says how close
+//! together every sample's bars are.
+//!
+//! Two more points on reading the output:
+//!
+//! - A class with **many** members means little on its own, since one
+//!   admissible dataset is enough for an author to point at. The useful output
+//!   is the class's *conditional bounds*: what every dataset of that shape
+//!   would also have to look like. Those are in `modality_shapes`.
 //! - Class **proportions** weight admissible datasets equally, the same
-//!   weighting `metrics_horns` already uses. That is a sensitivity analysis, not
-//!   a posterior probability.
+//!   weighting `metrics_horns` already uses. That is a sensitivity analysis,
+//!   not a posterior probability.
 //!
 //! Set [`OutputFormat::Samples`] or [`OutputFormat::Both`] on the config to
 //! also write the older per-position layout (`sample.parquet` /
@@ -1343,8 +1360,8 @@ where
             resolved: Vec::new(),
             a_greater: Vec::new(),
         },
-        // Nothing was scanned, so nothing is ruled out: every `can_be` query on
-        // this returns `None`, not `false`.
+        // No samples: every `can_be` query on this returns `None`. With an
+        // exhaustive search that is the consistency finding, not a shape one.
         modality_shapes: modality::empty_shapes(thresholds),
         results: ResultsTable::new(Vec::new(), SampleCounts::new(grid, n), Vec::new()),
     }
@@ -1359,7 +1376,7 @@ const STATS_CHUNK_ROWS: usize = 4096;
 /// the reported statistics. It is false for a truncated CLOSURE search and for
 /// SPRITE, which samples the solution space rather than enumerating it. Only
 /// [`ModalityShapes`] uses it, and only to decide whether an empty shape class
-/// is a proof of impossibility or merely an absence of evidence.
+/// says something about the original data or merely that no sample was seen.
 fn counts_to_result_list<U>(
     counts: SampleCounts,
     exhaustive: bool,
@@ -1866,7 +1883,8 @@ where
         results,
     );
     // When `stop_after` truncates the enumeration, the result set is only
-    // part of the solution space and an unseen shape is not an impossible one.
+    // part of the solution space, and an unseen shape says nothing about the
+    // original data.
     let closure_results: ResultListFromMeanSdN<U> =
         counts_to_result_list(counts, exhaustive, &thresholds);
 
@@ -2203,7 +2221,7 @@ fn write_modality_to_parquet<U>(
     )?;
 
     // Long format: one row per (class, value). Classes with no members
-    // contribute no rows, which is how "impossible under this shape" reads.
+    // contribute no rows.
     let shapes = &results.modality_shapes;
     let grid_values = &results.modality_counts.value;
     let mut s_class = Vec::new();
@@ -2239,7 +2257,8 @@ fn write_modality_to_parquet<U>(
     )?;
 
     // One row: per-class totals plus the scan's own provenance. `exhaustive` is
-    // what tells a reader whether a zero count is a proof or just an absence.
+    // what tells a reader whether a zero count says something about the
+    // original data or only that no sample of that shape was seen.
     let mut fields = vec![
         Field::new("exhaustive", DataType::Boolean, false),
         Field::new("n_scanned", DataType::UInt64, false),
@@ -2273,7 +2292,8 @@ fn write_modality_to_parquet<U>(
         columns.push(Arc::new(UInt64Array::from(vec![shapes.n_of(class)])));
     }
     // Samples taking each class at some threshold in the band. A zero here,
-    // with `exhaustive` true, is the proof of impossibility `can_be` reports.
+    // with `exhaustive` true and samples found, is what `can_be` reports as
+    // `Some(false)`: the original data did not have that shape.
     for class in ShapeClass::all() {
         fields.push(Field::new(
             format!("band_n_{}", class.as_str()),
@@ -2292,7 +2312,7 @@ fn write_modality_to_parquet<U>(
 
     // The prominence envelope: per-class counts at each rung of the band, one
     // row per (threshold, class). A class can appear only between rungs, so
-    // the proof of impossibility is `band_n_*` in `modality_summary`, not a
+    // whether any sample takes it is `band_n_*` in `modality_summary`, not a
     // zero on every row here.
     let mut p_prom = Vec::new();
     let mut p_counts = Vec::new();

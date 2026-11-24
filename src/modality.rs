@@ -29,6 +29,25 @@
 //! The classes partition: every sample lands in exactly one, so the per-class
 //! counts always sum to the number of samples scanned.
 //!
+//! # Consistency versus shape inference
+//!
+//! A CLOSURE run supports two different kinds of conclusion. They must not be
+//! confused, because they rest on opposite outcomes:
+//!
+//! - **Consistency.** If CLOSURE finds no sample at all, the reported mean, SD
+//!   and `n` cannot all be true of one dataset on this scale. This is a test of
+//!   the reported statistics themselves, like GRIM, and it is the only case in
+//!   which this crate calls anything impossible. There is then nothing to
+//!   classify, and every shape query answers `None`.
+//! - **Shape inference.** If CLOSURE finds samples, then, provided the reported
+//!   statistics are right, the original data is one of them. So when every
+//!   sample has some shape, the original data had it too; when none has some
+//!   shape, the original data did not. This needs samples to exist, and it needs
+//!   every one of them: the search must have been exhaustive. A truncated run
+//!   (`stop_after`) or SPRITE, which draws samples at random, supports only the
+//!   weaker "some sample has this shape". And the inference is only as good as
+//!   the shape categories, which rest on cutoffs that are conventions.
+//!
 //! # Cutoffs are conventions
 //!
 //! Integer histograms rarely have a clean shape: a difference of one
@@ -456,12 +475,12 @@ pub fn unimodality_deficit(counts: &[u32]) -> u32 {
 /// This is the conditional-bounds table: `count_lo` / `count_hi` are the minimum
 /// and maximum count of each grid value **among samples of this class alone**.
 ///
-/// Read a row as a conditional, not as a statement about the data: *if* the raw
-/// data had this shape, then the count of each value lies in this range. When
-/// the underlying search was exhaustive that conditional is deductive, which
-/// makes it the one form of shape claim a single atypical sample cannot defeat —
-/// it quantifies over the whole class rather than asserting that some member
-/// exists.
+/// Read a row as a conditional, not as a statement about the data: *if* the
+/// original data had this shape, then the count of each value lies in this
+/// range. That holds for the original data when the search was exhaustive, and
+/// unlike "some sample has this shape" it covers the whole class, so a single
+/// atypical sample cannot defeat it. Like every class, it rests on the cutoffs;
+/// see [the module docs](self).
 #[derive(Clone, Debug)]
 pub struct ShapeBounds {
     pub class: ShapeClass,
@@ -505,14 +524,15 @@ impl LadderRung {
 ///
 /// Every field here is produced by an actual scan over samples — there is no
 /// default value and no placeholder, which is what keeps a path that forgot to
-/// compute the shapes from silently reporting the strongest possible claim.
+/// compute the shapes from silently reporting a shape inference.
 #[derive(Clone, Debug)]
 pub struct ModalityShapes {
     /// True when every sample satisfying the reported statistics was scanned.
     ///
     /// False for a truncated search (`stop_after`) and for SPRITE, which samples
     /// the solution space at random rather than enumerating it. When false, a
-    /// class with zero members proves nothing: see [`ModalityShapes::can_be`].
+    /// class with zero members says nothing about the original data: see
+    /// [`ModalityShapes::can_be`].
     pub exhaustive: bool,
     /// Number of samples scanned.
     pub n_scanned: u64,
@@ -579,10 +599,9 @@ impl ModalityShapes {
     /// has no least element, so it is reported as `t / n`, capped at the top
     /// rung. Either way the answer lies in the band and rounds to `t`.
     ///
-    /// This is the robustness number behind a `Some(false)`: it says how far the
-    /// prominence rule would have to be relaxed or tightened before the shape
-    /// became admissible at all. `None` means no threshold in the defensible
-    /// band admits it.
+    /// This is the margin behind a `Some(false)` from [`Self::can_be`]: how
+    /// far the cutoff would have to move before some sample took the shape.
+    /// `None` means no cutoff in the band gives any sample this shape.
     pub fn min_prominence_admitting(&self, class: ShapeClass) -> Option<f64> {
         self.band_min_prominence
             .get(class as usize)
@@ -602,33 +621,34 @@ impl ModalityShapes {
         self.n_of(class) as f64 / self.n_scanned as f64
     }
 
-    /// Whether the raw data could have had a shape satisfying `predicate`.
+    /// Whether the original data could have had a shape satisfying
+    /// `predicate`, judging by the samples.
     ///
-    /// - `Some(true)`: a scanned sample has such a shape at *some* threshold in
-    ///   the prominence envelope, rung or not, so it is possible. Sound whether or not the
-    ///   search was exhaustive — a witness is a witness.
-    /// - `Some(false)`: **no** admissible sample has such a shape at *any*
-    ///   threshold in the envelope, so the raw data did not either. Only ever
-    ///   returned for an exhaustive search.
-    /// - `None`: none were found, but the search was partial, so nothing follows.
+    /// - `Some(true)`: some scanned sample has such a shape at *some* cutoff in
+    ///   the band, rung or not. This holds whether or not the search was
+    ///   exhaustive: one sample is enough.
+    /// - `Some(false)`: samples exist, the search found all of them, and **no**
+    ///   sample has such a shape at *any* cutoff in the band. Since the original
+    ///   data is one of the samples (if the reported statistics are right), it
+    ///   did not have such a shape either, under any of these cutoffs.
+    /// - `None`: nothing follows. Either the search was partial (a truncated
+    ///   run or SPRITE), so an unseen shape may still exist, or there are no
+    ///   samples at all.
     ///
-    /// The `None` case is why this returns an `Option`. A truncated CLOSURE run
-    /// and a SPRITE run both fail to see most of the space; reporting their
-    /// silence as `false` would turn "we did not look" into "we proved it
-    /// impossible".
+    /// No samples is a different finding altogether: the reported statistics
+    /// are inconsistent with each other, a GRIM-like result about the numbers
+    /// rather than about the shape of any data. Reporting it as `Some(false)`
+    /// for every shape would dress it up as a shape inference, so it is `None`.
     ///
-    /// # Why this quantifies over the envelope
+    /// # Why this looks at the whole band
     ///
-    /// Mode detection needs a prominence threshold and no single value of it is
-    /// validated. Answering from one threshold would make the crate's strongest
-    /// output — a proof of impossibility — contingent on that constant, in both
-    /// directions: lowering the threshold splits modes and manufactures
-    /// `Some(false)` for unimodal shapes, raising it merges modes and
-    /// manufactures `Some(false)` for multimodal ones. Requiring the class to be
-    /// empty across the whole band of [`DEFAULT_PROMINENCE_LADDER`] makes the
-    /// answer conservative in its free parameter. Use
+    /// The cutoff for what counts as a mode is a convention, and the answer can
+    /// depend on it in both directions: a lower cutoff splits modes, so fewer
+    /// samples are unimodal; a higher one merges them, so fewer are multimodal.
+    /// Requiring the class to be empty at every cutoff in the band keeps a
+    /// `Some(false)` from resting on one particular value. Use
     /// [`Self::min_prominence_admitting`] to see the margin, and
-    /// [`Self::can_be_at_primary`] for the single-threshold answer.
+    /// [`Self::can_be_at_primary`] for the answer at the primary cutoff alone.
     pub fn can_be(&self, predicate: impl Fn(ShapeClass) -> bool) -> Option<bool> {
         let found = ShapeClass::all().any(|c| {
             predicate(c)
@@ -637,11 +657,7 @@ impl ModalityShapes {
                     .get(c as usize)
                     .is_some_and(|&n| n > 0)
         });
-        match (found, self.exhaustive) {
-            (true, _) => Some(true),
-            (false, true) => Some(false),
-            (false, false) => None,
-        }
+        self.answer(found)
     }
 
     /// Whether the original data must have had a shape satisfying `predicate`:
@@ -655,30 +671,37 @@ impl ModalityShapes {
         self.can_be(|c| !predicate(c)).map(|other| !other)
     }
 
-    /// [`Self::can_be`], answered from the primary threshold alone.
-    ///
-    /// Reported for continuity with the per-class counts and conditional bounds,
-    /// which are also computed at that threshold. Prefer [`Self::can_be`] for
-    /// any claim that leaves the process: a `Some(false)` here is only as good
-    /// as [`Self::min_prominence`].
-    pub fn can_be_at_primary(&self, predicate: impl Fn(ShapeClass) -> bool) -> Option<bool> {
-        let found = self
-            .bounds
-            .iter()
-            .any(|b| b.n_samples > 0 && predicate(b.class));
-        match (found, self.exhaustive) {
+    /// `Some(found)` for a witness, `Some(false)` for an absence only when the
+    /// scan was exhaustive and saw at least one sample, else `None`.
+    fn answer(&self, found: bool) -> Option<bool> {
+        match (found, self.exhaustive && self.n_scanned > 0) {
             (true, _) => Some(true),
             (false, true) => Some(false),
             (false, false) => None,
         }
     }
 
-    /// Could the raw data have had exactly one mode, anywhere on the scale?
+    /// [`Self::can_be`], answered from the primary threshold alone.
+    ///
+    /// Reported for continuity with the per-class counts and conditional bounds,
+    /// which are also computed at that cutoff. Prefer [`Self::can_be`] for
+    /// any claim that leaves the process: a `Some(false)` here rests on
+    /// [`Self::min_prominence`] alone.
+    pub fn can_be_at_primary(&self, predicate: impl Fn(ShapeClass) -> bool) -> Option<bool> {
+        let found = self
+            .bounds
+            .iter()
+            .any(|b| b.n_samples > 0 && predicate(b.class));
+        self.answer(found)
+    }
+
+    /// Could the original data have had exactly one mode, anywhere on the scale?
     pub fn can_be_unimodal(&self) -> Option<bool> {
         self.can_be(|c| c.is_unimodal())
     }
 
-    /// Could the raw data have had exactly one mode away from both scale ends?
+    /// Could the original data have had exactly one mode away from both scale
+    /// ends?
     ///
     /// This is the claim papers make when they describe responses as bell-shaped
     /// or approximately normal, and it is strictly stronger than
@@ -688,17 +711,17 @@ impl ModalityShapes {
         self.can_be(|c| c.is_bell())
     }
 
-    /// Could the raw data have had two or more modes?
+    /// Could the original data have had two or more modes?
     pub fn can_be_multimodal(&self) -> Option<bool> {
         self.can_be(|c| c.is_multimodal())
     }
 
-    /// Could the raw data have piled up at the bottom of the scale?
+    /// Could the original data have piled up at the bottom of the scale?
     pub fn can_be_j_shape_low(&self) -> Option<bool> {
         self.can_be(|c| c == ShapeClass::OneModeLowEdge)
     }
 
-    /// Could the raw data have piled up at the top of the scale?
+    /// Could the original data have piled up at the top of the scale?
     pub fn can_be_j_shape_high(&self) -> Option<bool> {
         self.can_be(|c| c == ShapeClass::OneModeHighEdge)
     }
@@ -984,8 +1007,9 @@ impl ShapeAccumulator {
     /// Finish, declaring whether the scan covered the whole solution space.
     ///
     /// Pass `false` for a truncated search or for SPRITE. That does not weaken
-    /// the counts or the conditional bounds — it only stops
-    /// [`ModalityShapes::can_be`] from reporting an absence as a proof.
+    /// the counts or the conditional bounds; it only stops
+    /// [`ModalityShapes::can_be`] from reading an absence as a fact about the
+    /// original data.
     pub fn finish(self, exhaustive: bool) -> ModalityShapes {
         let n = self.n_scanned;
         let primary = self.primary;
@@ -1052,8 +1076,8 @@ impl ShapeAccumulator {
 
 /// The shapes of a result set with nothing in it.
 ///
-/// `exhaustive` is false: an empty scan has seen nothing, so every `can_be`
-/// query is `None` rather than a claim of impossibility.
+/// Every `can_be` query on it is `None`: with no samples there is no shape to
+/// infer anything about.
 pub fn empty_shapes(thresholds: &ProminenceThresholds) -> ModalityShapes {
     ShapeAccumulator::new(0, 0, thresholds).finish(false)
 }
@@ -1196,6 +1220,19 @@ mod tests {
     }
 
     #[test]
+    fn no_samples_is_not_a_shape_inference() {
+        // An exhaustive search that found nothing means the reported
+        // statistics are inconsistent. That says nothing about a shape, so
+        // every shape query is `None`, not `Some(false)`.
+        let shapes = ShapeAccumulator::new(5, 20, &ProminenceThresholds::default()).finish(true);
+        assert_eq!(shapes.can_be_unimodal(), None);
+        assert_eq!(shapes.can_be_flat(), None);
+        assert_eq!(shapes.must_be(|c| c.is_bell()), None);
+        assert_eq!(shapes.can_be_at_primary(|c| c.is_bell()), None);
+        assert!(shapes.bar_gap_max_share.is_nan());
+    }
+
+    #[test]
     fn must_be_needs_every_sample_at_every_cutoff() {
         let mut acc = ShapeAccumulator::new(5, 100, &ProminenceThresholds::default());
         acc.update(&[5, 15, 60, 15, 5]);
@@ -1248,9 +1285,8 @@ mod tests {
         // The module doc's motivating example with its unique maximum removed:
         // a one-count wobble around a tied maximum. Exempting every tallest run
         // from the threshold would make this `ThreeOrMoreModes` at *any*
-        // threshold — a multimodality witness, and a threshold-immune proof
-        // that the data could not have been unimodal, both manufactured by a
-        // ±1-count wobble that no rung of the prominence band could veto.
+        // threshold, so a ±1-count wobble would rule out a unimodal original
+        // at every cutoff in the band.
         let wobble = [30u32, 29, 30, 29, 30];
         let n: u32 = wobble.iter().sum();
         let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
@@ -1446,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_of_impossibility_must_survive_the_whole_prominence_band() {
+    fn a_shape_excluded_at_one_cutoff_must_stay_excluded_across_the_band() {
         // `[10, 40, 30, 38, 10]`: the second peak stands 8 above the valley
         // separating it from the taller one. That clears the 0.02 and 0.05
         // rungs (3 and 7 observations at n=128) but not the 0.10 rung (13), so
@@ -1459,9 +1495,9 @@ mod tests {
         assert_eq!(shapes.n_of(ShapeClass::TwoModes), 1, "primary threshold");
         assert_eq!(shapes.n_of(ShapeClass::OneModeInterior), 0);
 
-        // Answering from the primary threshold alone would call a bell shape
-        // impossible. It is not — it is impossible *at that threshold*, and the
-        // threshold is a judgement call, so the deductive claim is not available.
+        // Answering from the primary cutoff alone would rule out a bell shape.
+        // It is ruled out only *at that cutoff*, which is a convention, so the
+        // band answer does not rule it out.
         assert_eq!(shapes.can_be_at_primary(|c| c.is_bell()), Some(false));
         assert_eq!(shapes.can_be_bell_shaped(), Some(true));
         // The valley is 8 deep, so 9 observations is where it stops counting.
@@ -1615,7 +1651,7 @@ mod tests {
 
         // Found: still sound, a witness is a witness even in a partial scan.
         assert_eq!(shapes.can_be_unimodal(), Some(true));
-        // Not found, and we did not look everywhere: not a proof.
+        // Not found, and we did not look everywhere: nothing follows.
         assert_eq!(shapes.can_be_bell_shaped(), None);
         assert_eq!(shapes.can_be_multimodal(), None);
     }

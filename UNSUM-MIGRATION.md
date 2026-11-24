@@ -143,12 +143,15 @@ classifies every sample into one of six shape classes and answers
 
 - `Some(true)`: some sample has that shape. This holds whether or not the
   search was exhaustive.
-- `Some(false)`: no sample has that shape at any cutoff in the band, so the
-  original data did not have it either. This is only returned
+- `Some(false)`: samples exist, and none has that shape at any cutoff in the
+  band, so the original data did not have it either. This is only returned
   when the search was **exhaustive**: CLOSURE without `stop_after`, or with a
   limit it did not reach.
 - `None`: none was found, but the search was partial, so nothing follows. That
-  covers SPRITE always, and CLOSURE that reached its `stop_after`.
+  covers SPRITE always, and CLOSURE that reached its `stop_after`. It also
+  covers a run with **no samples at all**: that is the consistency finding
+  (the reported statistics cannot all be true), not a statement about shape,
+  so every column is `NA` rather than `FALSE`.
 
 The patch keeps the four column names so that R-side code stays stable, and
 maps `None` to `NA`:
