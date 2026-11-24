@@ -119,7 +119,11 @@ where
     let re_mean = T::to_f64(&rounding_error_mean).unwrap_or(f64::NAN);
     let re_sd = T::to_f64(&rounding_error_sd).unwrap_or(f64::NAN);
     let sd_f64 = T::to_f64(&sd).unwrap_or(f64::NAN);
-    if !(re_mean >= 0.0 && re_sd >= 0.0 && sd_f64 >= 0.0) {
+    // `>= 0.0` alone let an infinite SD or tolerance through.
+    if ![re_mean, re_sd, sd_f64]
+        .iter()
+        .all(|x| x.is_finite() && *x >= 0.0)
+    {
         return Err(ParameterError::InputValidation(
             "sd and the rounding errors must be finite and not negative".to_string(),
         ));

@@ -1214,6 +1214,36 @@ fn sprite_samples_far_from_zero_match_their_sd() {
 }
 
 #[test]
+fn sprite_rejects_an_infinite_sd_or_tolerance() {
+    use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
+
+    // The check said "must be finite" but only tested `>= 0.0`, which
+    // infinity passes.
+    let inf = f64::INFINITY;
+    for (sd, re_mean, re_sd) in [(inf, 0.05, 0.05), (1.3, inf, 0.05), (1.3, 0.05, inf)] {
+        let result = sprite_parallel::<f64, i32>(
+            2.2,
+            sd,
+            20,
+            1,
+            5,
+            re_mean,
+            re_sd,
+            1,
+            None,
+            RestrictionsOption::Null,
+            None,
+            Some(5),
+            None,
+        );
+        assert!(
+            matches!(result, Err(ParameterError::InputValidation(_))),
+            "sd {sd}, tolerances {re_mean} and {re_sd}"
+        );
+    }
+}
+
+#[test]
 fn a_limited_run_that_saw_everything_is_exhaustive() {
     // `stop_after` used to mark every limited run as partial, so `can_be`
     // answered `None` even when the limit was never reached.
