@@ -299,7 +299,7 @@ mod tests {
         let re_sd = 0.05;
 
         let results = closure_parallel::<f64, i32>(
-            mean, sd, n, scale_min, scale_max, re_mean, re_sd, 1, None, None,
+            mean, sd, n, scale_min, scale_max, re_mean, re_sd, 1, None, None, None,
         )
         .unwrap();
         let expected = results.results.len() as u64;
@@ -324,7 +324,7 @@ mod tests {
         let re_sd = 0.1_f64;
 
         let results = closure_parallel::<f64, i32>(
-            mean, sd, n, scale_min, scale_max, re_mean, re_sd, 1, None, None,
+            mean, sd, n, scale_min, scale_max, re_mean, re_sd, 1, None, None, None,
         )
         .unwrap();
         let expected = results.results.len() as u64;
@@ -360,7 +360,7 @@ mod tests {
         let counted = closure_count(mean, sd, n, smin, smax, re_m, re_s).unwrap();
 
         let results =
-            closure_parallel::<f64, i32>(mean, sd, n, smin, smax, re_m, re_s, 1, None, None)
+            closure_parallel::<f64, i32>(mean, sd, n, smin, smax, re_m, re_s, 1, None, None, None)
                 .unwrap();
         let enumerated = results.results.len() as u64;
 

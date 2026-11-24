@@ -12,8 +12,9 @@ fn main() {
         1,    // items
         None, // restrictions_exact
         RestrictionsOption::Default,
-        None,    // parquet_config
-        Some(5), // stop_after
+        None, // parquet_config
+        Some(5),
+        None, // stop_after
     )
     .unwrap();
 

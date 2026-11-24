@@ -7,9 +7,10 @@ and says exactly what to change in unsum for each one.
   commit (branch `frequency-details`), and `src/rust/vendor/closure-core` is
   byte-identical to it.
 - **To:** branch `optimize` as of `7054029`, 43 commits later, plus the
-  review fixes that follow it. Sections 5, 6 and 9 cover everything after
-  `9448030`; the binding patch was built and verified against `9448030`, and
-  no API it uses has changed since.
+  review fixes and the cutoff and flatness changes that follow it. Sections 5,
+  6 and 9 cover everything after `9448030`. The binding patch was built and
+  verified against `9448030`; since then the four entry points have gained an
+  argument, which 3.7 adds on top of it.
 - **unsum state:** line numbers refer to unsum's working tree on 2026-09-25,
   including its uncommitted changes.
 
@@ -48,6 +49,7 @@ skipped.
 | 5 | `ResultsTable.sample` field was removed | compile | Use `results.sample(i)` | `lib.rs` `results_table_to_robj` |
 | 6 | Error messages come through `Display` | readable errors | `format!("{}", e)`, not `{:?}` | `lib.rs`, 3 places |
 | 7 | `closure_count` returns `Result<u64, ParameterError>` | nothing at compile time; see 3.6 | Match on the result | `lib.rs` `count_closure_combinations`, `R/count.R` |
+| 7a | The four entry points take a `prominence` argument | compile | Pass `None` (3.7) | `lib.rs`, 4 calls |
 | 8 | `frequency` columns: `f_count` → `f_expected` + `f_representative`; `value` is now double | every generator call | Update the schema check and every `f_count` use | `R/utils.R`, plots, predicates, docs |
 | 9 | `value` columns of `frequency_dist`, `modality_counts`, `modality_pairs` are now double | every generator call | Update the schema check | `R/utils.R` |
 | 10 | `modality_conclusion` can be `NA`, and its columns mean different things | results, docs | Handle `NA` and update the docs | `R/s7-result.R`, docs |
@@ -57,7 +59,8 @@ skipped.
 | 14 | Numbers differ: CLOSURE boundaries, SPRITE coverage, and more | tests, NEWS | Update snapshots and NEWS | `tests/`, `NEWS.md` |
 
 Rows 1–7 are all in the binding patch in [Appendix A](#appendix-a-full-binding-patch),
-which compiles and is verified end to end. Rows 8–13 are R changes, set out
+which compiles and is verified end to end. Row 7a came later and goes on top
+of it; see 3.7. Rows 8–13 are R changes, set out
 in [section 4](#4-step-3-the-r-code).
 
 ---
@@ -140,11 +143,12 @@ classifies every sample into one of six shape classes and answers
 
 - `Some(true)`: some sample has that shape. This holds whether or not the
   search was exhaustive.
-- `Some(false)`: no admissible sample has that shape at any mode threshold in
-  the prominence band. This is only returned when the search was
-  **exhaustive**: CLOSURE without `stop_after`.
-- `None`: none was found, but the search was partial. That covers SPRITE
-  always, and CLOSURE with `stop_after`. Absence is not proof here.
+- `Some(false)`: no sample has that shape at any cutoff in the band, so the
+  original data did not have it either. This is only returned
+  when the search was **exhaustive**: CLOSURE without `stop_after`, or with a
+  limit it did not reach.
+- `None`: none was found, but the search was partial, so nothing follows. That
+  covers SPRITE always, and CLOSURE that reached its `stop_after`.
 
 The patch keeps the four column names so that R-side code stays stable, and
 maps `None` to `NA`:
@@ -243,6 +247,17 @@ On the R side, `closure_count_all()` (`R/count.R`) should then treat a
 character result the way `generate-basic.R` does: abort with the message.
 Normally unsum's own argument checks catch invalid input before it gets that
 far.
+
+### 3.7 Cutoffs are a parameter
+
+`closure_parallel`, `closure_parallel_streaming`, `sprite_parallel` and
+`sprite_parallel_streaming` take a last argument,
+`prominence: Option<ProminenceThresholds>`: the cutoffs for the shape
+classification, as fractions of `n`. `None` keeps the defaults (5% of `n`,
+band 2%–10%). Add `None` to the four calls in `src/rust/src/lib.rs` (lines
+421, 434, 468 and 481). Exposing the cutoffs to R would mean building a
+`ProminenceThresholds { primary, band }` from two R arguments instead. Not
+built against unsum.
 
 ---
 
@@ -570,7 +585,7 @@ the same values in memory mode and in streaming.
 | `modality_pairs` | `value_a` dbl, `value_b` dbl, `resolved` lgl, `a_greater` lgl: whether each adjacent ordering is fixed |
 | `modality_shapes` | `class` chr, `n_samples` dbl, `value` dbl, `count_lo` int, `count_hi` int: per-value count range **within each shape class**. Classes with no samples have no rows. |
 | `modality_summary` | one row: `exhaustive` lgl, `n_scanned` dbl, `min_prominence` dbl, `deficit_min` int, `deficit_mean` dbl, `deficit_max` int, `n_<class>` dbl ×6 (at the primary threshold), `band_n_<class>` dbl ×6 (anywhere in the band) |
-| `modality_prominence` | `min_prominence` dbl, `min_prominence_counts` int, `primary` lgl, `class` chr, `n_samples` dbl: class counts at each rung of the threshold band (0.02, 0.05, 0.10 of n) |
+| `modality_prominence` | `min_prominence` dbl, `min_prominence_counts` int, `primary` lgl, `class` chr, `n_samples` dbl: class counts at each rung of the threshold band (by default 0.02, 0.05, 0.10 of n) |
 | `sample` (Samples layout) | `pos1..posN` int. Unchanged; SPRITE values in hundredths. |
 | `horns` (Samples layout) | `horns` dbl. Unchanged. |
 | `counts`, `scale_values`, `format` (Counts layout) | see [section 7](#7-optional-switch-to-the-counts-layout) |
@@ -612,6 +627,7 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 | `df52c88` | No stderr warnings from in-memory SPRITE |
 | `33bb164` | At least 5,000 SPRITE draws before the duplicate rate may stop |
 | `15d2f6c`, `abae5c7` | SPRITE gives up fast on impossible SDs and trapped attempts |
+| cutoff and flatness changes after `4c8969d` | `prominence` argument on all four entry points (3.7) |
 | review fixes after `7054029` | Exact `closure_count` pruning; bound slack grows with the bound; limited runs below their limit are exhaustive; SPRITE accepts with CLOSURE's integer rule, keeps searching while moves are left, and rejects scales too wide for the grid or for exact arithmetic; `file_path = ""` means the current directory |
 
 ---
@@ -619,8 +635,8 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 ## Appendix A: full binding patch
 
 This is a patch against unsum's `src/rust/src/lib.rs`. It compiles against
-closure-core `9448030` without warnings, and uses no API that has changed since
-(not rebuilt against the later commits). The verification in this document was
+closure-core `9448030` without warnings. Against the current closure-core it
+also needs the changes in 3.7 (not rebuilt). The verification in this document was
 run on a package built with exactly this file.
 
 ```diff

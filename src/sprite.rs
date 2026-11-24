@@ -4,8 +4,8 @@ use crate::sample_counts::MAX_ABS_SCALE;
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
     counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
-    ResultListFromMeanSdN, SampleCounts, SampleFormat, SearchBounds, StreamingConfig,
-    StreamingFrequencyState, StreamingResult, ValueGrid,
+    ProminenceThresholds, ResultListFromMeanSdN, SampleCounts, SampleFormat, SearchBounds,
+    StreamingConfig, StreamingFrequencyState, StreamingResult, ValueGrid,
 };
 use core::f64;
 use num::NumCast;
@@ -447,6 +447,7 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
+        prominence: Option<ProminenceThresholds>,
     ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
         sprite_parallel(
             mean,
@@ -461,6 +462,7 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
             self.restrictions_minimum.clone(),
             parquet_config,
             stop_after,
+            prominence,
         )
     }
 
@@ -476,6 +478,7 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
+        prominence: Option<ProminenceThresholds>,
     ) -> Result<StreamingResult, ParameterError> {
         sprite_parallel_streaming(
             mean,
@@ -490,6 +493,7 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
             self.restrictions_minimum.clone(),
             config,
             stop_after,
+            prominence,
         )
     }
 }
@@ -516,6 +520,9 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 ///   of the scale; pass [`RestrictionsOption::Null`] for no minimum
 /// * `parquet_config` - Optional configuration for writing results to Parquet files
 /// * `stop_after` - Optional maximum number of distributions to find
+/// * `prominence` - Cutoffs for the shape classification, as fractions of `n`.
+///   `None` uses the defaults, which are conventions; see
+///   [`ProminenceThresholds`]
 ///
 /// # Returns
 /// A `ResultListFromMeanSdN<U>` containing all distributions and comprehensive statistics
@@ -546,11 +553,13 @@ pub fn sprite_parallel<T, U>(
     restrictions_minimum: RestrictionsOption,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
+    prominence: Option<ProminenceThresholds>,
 ) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
 {
+    let thresholds = crate::checked_thresholds(prominence)?;
     // Build and validate parameters
     let params = build_sprite_params(
         mean,
@@ -580,7 +589,8 @@ where
     // Calculate all statistics using the shared function from lib.rs SPRITE
     // searches the solution space at random rather than enumerating it, so a
     // shape it never generated has not been ruled out.
-    let sprite_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts, false);
+    let sprite_results: ResultListFromMeanSdN<U> =
+        counts_to_result_list(counts, false, &thresholds);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -623,6 +633,9 @@ where
 ///   of the scale; pass [`RestrictionsOption::Null`] for no minimum
 /// * `config` - Streaming configuration (file path, batch size, progress reporting)
 /// * `stop_after` - Optional limit on number of distributions to find
+/// * `prominence` - Cutoffs for the shape classification, as fractions of `n`.
+///   `None` uses the defaults, which are conventions; see
+///   [`ProminenceThresholds`]
 ///
 /// # Returns
 /// A `Result<StreamingResult, ParameterError>` with the total count and file path.
@@ -640,11 +653,13 @@ pub fn sprite_parallel_streaming<T, U>(
     restrictions_minimum: RestrictionsOption,
     config: StreamingConfig,
     stop_after: Option<usize>,
+    prominence: Option<ProminenceThresholds>,
 ) -> Result<StreamingResult, ParameterError>
 where
     T: FloatType,
     U: IntegerType + 'static,
 {
+    let thresholds = crate::checked_thresholds(prominence)?;
     use crate::write_streaming_statistics;
     use std::collections::HashMap;
 
@@ -683,6 +698,7 @@ where
     let freq_state = Arc::new(Mutex::new(StreamingFrequencyState::new(
         grid.len(),
         n_usize,
+        &thresholds,
     )));
     let freq_state_for_thread = freq_state.clone();
 
@@ -744,6 +760,7 @@ where
         &grid,
         final_freq_state,
         false,
+        &thresholds,
     )?;
 
     Ok(StreamingResult {
@@ -1522,8 +1539,9 @@ pub mod tests {
             1,       // items
             None,    // restrictions_exact
             RestrictionsOption::Default,
-            None,    // parquet_config
-            Some(5), // stop_after (was n_distributions)
+            None, // parquet_config
+            Some(5),
+            None, // stop_after (was n_distributions)
         )
         .unwrap();
 
@@ -1547,8 +1565,9 @@ pub mod tests {
             1,       // items
             None,    // restrictions_exact
             RestrictionsOption::Default,
-            None,    // parquet_config
-            Some(5), // stop_after
+            None, // parquet_config
+            Some(5),
+            None, // stop_after
         )
         .unwrap();
 
@@ -1593,8 +1612,9 @@ pub mod tests {
             1,
             None,
             RestrictionsOption::Default,
-            None,              // parquet_config
-            Some(target_runs), // stop_after
+            None, // parquet_config
+            Some(target_runs),
+            None, // stop_after
         )
         .unwrap();
 
@@ -1652,7 +1672,8 @@ pub mod tests {
             None, // restrictions_exact
             RestrictionsOption::Default,
             config,
-            Some(3), // stop_after - only generate 3 samples for faster testing
+            Some(3),
+            None, // stop_after - only generate 3 samples for faster testing
         )
         .unwrap();
 
@@ -1771,7 +1792,8 @@ pub mod tests {
             None,    // restrictions_exact
             RestrictionsOption::Default,
             Some(config), // parquet_config
-            Some(5),      // stop_after
+            Some(5),
+            None, // stop_after
         )
         .unwrap();
 
@@ -1829,6 +1851,7 @@ pub mod tests {
             RestrictionsOption::Default,
             None,
             Some(10_000),
+            None,
         )
         .unwrap();
 

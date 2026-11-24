@@ -42,6 +42,7 @@ fn main() {
             1,
             None,
             None,
+            None,
         )
         .unwrap();
         let t_parallel = start.elapsed();

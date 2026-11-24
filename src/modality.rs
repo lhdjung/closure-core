@@ -29,37 +29,21 @@
 //! The classes partition: every sample lands in exactly one, so the per-class
 //! counts always sum to the number of samples scanned.
 //!
-//! # Why modes need a prominence threshold
+//! # Cutoffs are conventions
 //!
-//! Modality of an integer count vector is not well defined on its own. Ties are
-//! common and one count of difference creates or destroys a "strict local
-//! maximum": `(30, 29, 30, 29, 30)` has three of them and is, by any reasonable
-//! reading, flat. Mode detection here therefore requires *topographic
-//! prominence* — a candidate peak must rise by at least
-//! [`DEFAULT_MODE_PROMINENCE`] of the sample above the higher of the two
-//! valleys separating it from any taller peak. The threshold is a fraction of
-//! `n`, so it does not silently change meaning with the length of the scale.
-//! The tallest runs of a sample have no taller peak to be measured against, so
-//! they are measured against each other: tied tallest runs separated by a
-//! qualifying valley are distinct modes, and ones separated only by
-//! sub-threshold dips merge into one broad mode. A unique tallest run is
-//! therefore a mode at every threshold, which keeps a textbook-unimodal
-//! histogram out of [`ShapeClass::Flat`] even on a grid too wide for any single
-//! bar to clear the threshold outright.
+//! Integer histograms rarely have a clean shape: a difference of one
+//! observation creates or destroys a "peak". So a bump counts as a mode only if
+//! it stands out by at least a cutoff, measured in observations: its height
+//! above the dip that separates it from any taller bar (its *prominence*). The
+//! tallest runs of a sample have no taller peak to be measured against, so they
+//! are measured against each other; see [`modes`].
 //!
-//! # Why one threshold is not enough
-//!
-//! No value of that threshold is validated, and the crate's strongest output —
-//! an empty shape class, i.e. a proof that the raw data did not have that shape
-//! — would otherwise rest entirely on it, and in both directions: lowering the
-//! threshold splits modes and manufactures proofs that the data could not have
-//! been unimodal, raising it merges modes and manufactures proofs that the data
-//! could not have been multimodal. Every sample is therefore classified at
-//! each threshold in [`DEFAULT_PROMINENCE_LADDER`] and at every
-//! whole-observation threshold between its ends, and
-//! [`ModalityShapes::can_be`] answers `Some(false)` only when the class is empty
-//! across all of them. [`ModalityShapes::min_prominence_admitting`] reports the
-//! margin.
+//! Nothing derives the cutoff. The defaults, 5% of `n` for the per-class counts
+//! and every whole-observation cutoff from 2% to 10% of `n` for the shape
+//! queries, are conventional choices; other values would be as defensible.
+//! [`ProminenceThresholds`] sets others. [`ModalityShapes::can_be`] looks at
+//! every cutoff in the band, so a shape counts as seen if any of them shows it,
+//! and [`ModalityShapes::min_prominence_admitting`] reports the margin.
 //!
 //! # The graded companion
 //!
@@ -70,43 +54,64 @@
 
 use strum_macros::{EnumCount as EnumCountMacro, EnumIter, IntoStaticStr};
 
-/// Default minimum prominence for a local maximum to count as a mode,
-/// as a fraction of the sample size.
+/// Default cutoff for a mode, as a fraction of the sample size: a peak must
+/// rise 5% of `n` above the dip separating it from any taller bar.
 ///
-/// A peak must rise 5% of the sample above its key col. The value is a
-/// judgement call, exposed here so it is visible and overridable rather than
-/// buried in a predicate; [`unimodality_deficit`] is the threshold-free
-/// alternative.
+/// A convention, not a derived value; see [the module docs](self). Pass
+/// [`ProminenceThresholds`] for another. [`unimodality_deficit`] is a
+/// cutoff-free alternative.
 pub const DEFAULT_MODE_PROMINENCE: f64 = 0.05;
 
-/// The band of prominence thresholds every result set is classified over.
+/// Default band of cutoffs the shape queries consider, as fractions of `n`.
+/// Every whole-observation cutoff between the lowest and the highest counts,
+/// not only these rungs.
 ///
-/// A shape class being empty is the strongest thing this crate says — it is the
-/// deductive claim that the raw data did not have that shape. That claim must
-/// not rest on one tuning constant, so [`ShapeAccumulator`] classifies each
-/// sample at every threshold in this band as well as at the configured one, and
-/// [`ModalityShapes::can_be`] only answers `Some(false)` when the class is
-/// empty across all of them. A reader sees the whole envelope in
-/// `modality_prominence.parquet` rather than one point from it.
-///
-/// # Why the band ends where it does
-///
-/// The lower end is a noise floor: below about 2% of `n` a one- or two-count
-/// wobble creates a mode, which is the failure a prominence rule exists to
-/// prevent.
-///
-/// The upper end is set by where the classification stops meaning what its name
-/// says. Prominence suppresses a peak by comparing it to a *taller* peak, and it
-/// does not care how much of the sample the suppressed peak holds. At 15% of `n`
-/// on a 1-5 scale, `(20, 7, 8, 33, 32)` classifies as [`OneModeInterior`] — the
-/// floor spike of 20 responses is erased because it stands only 13 above the
-/// valley beside it, and a distribution with a fifth of the sample at the bottom
-/// of the scale is then reported as a candidate bell. Past roughly 10% the rule
-/// is no longer measuring modality, so extending the band further would weaken
-/// every `Some(false)` for no gain in honesty.
-///
-/// [`OneModeInterior`]: ShapeClass::OneModeInterior
+/// A convention, like [`DEFAULT_MODE_PROMINENCE`]. What motivated the ends,
+/// without deriving them: below about 2% of `n`, a one- or two-observation
+/// wobble becomes a mode, which is what a cutoff is there to prevent. Above
+/// about 10%, a peak holding a large share of the sample can be erased because
+/// it stands only a little above the dip beside it: at 15% on a 1-5 scale,
+/// `(20, 7, 8, 33, 32)` reads as one interior mode although a fifth of the
+/// sample sits at the bottom of the scale.
 pub const DEFAULT_PROMINENCE_LADDER: [f64; 3] = [0.02, 0.05, 0.10];
+
+/// Cutoffs for shape classification, as fractions of the sample size `n`.
+///
+/// Both are conventions; see [the module docs](self). The defaults are
+/// [`DEFAULT_MODE_PROMINENCE`] and [`DEFAULT_PROMINENCE_LADDER`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProminenceThresholds {
+    /// The cutoff the per-class counts and conditional bounds are reported at.
+    pub primary: f64,
+    /// Rungs of the band the shape queries consider: every whole-observation
+    /// cutoff between the lowest and the highest counts, and the per-rung
+    /// counts are reported. `primary` is added if it is not among them.
+    pub band: Vec<f64>,
+}
+
+impl Default for ProminenceThresholds {
+    fn default() -> Self {
+        Self {
+            primary: DEFAULT_MODE_PROMINENCE,
+            band: DEFAULT_PROMINENCE_LADDER.to_vec(),
+        }
+    }
+}
+
+impl ProminenceThresholds {
+    /// Why these cutoffs cannot be used, if they cannot: every one must be a
+    /// finite fraction above 0, and the band must not be empty.
+    pub fn check(&self) -> Result<(), String> {
+        let ok = |p: f64| p.is_finite() && p > 0.0;
+        if self.band.is_empty() {
+            return Err("the prominence band needs at least one cutoff".to_string());
+        }
+        if !ok(self.primary) || !self.band.iter().all(|&p| ok(p)) {
+            return Err("prominence cutoffs must be finite and above 0".to_string());
+        }
+        Ok(())
+    }
+}
 
 /// Where a sample's mass sits, crossing mode count with mode location.
 ///
@@ -460,7 +465,7 @@ pub struct ShapeBounds {
 
 /// Per-class sample counts at one prominence threshold.
 ///
-/// One rung of the envelope described on [`DEFAULT_PROMINENCE_LADDER`]. The
+/// One rung of the band described on [`ProminenceThresholds`]. The
 /// conditional bounds in [`ModalityShapes::bounds`] are computed only at the
 /// primary rung; these counts exist so a reader can see how far the threshold
 /// would have to move before a class stops being empty.
@@ -660,9 +665,6 @@ impl ModalityShapes {
     }
 }
 
-/// Most rungs a ladder can have: the default band plus a configured threshold.
-const MAX_RUNGS: usize = DEFAULT_PROMINENCE_LADDER.len() + 1;
-
 /// Modes a class stands for, with three or more counted as 3.
 fn mode_count(class: ShapeClass) -> u8 {
     match class {
@@ -692,6 +694,8 @@ pub struct ShapeAccumulator {
     band_counts: Vec<u64>,
     /// `[class]` lowest threshold, in observations, at which a sample took it.
     band_min: Vec<Option<u32>>,
+    /// Scratch space for one sample's class at each rung.
+    rung_classes: Vec<ShapeClass>,
     n_scanned: u64,
     per_class: Vec<ShapeBounds>,
     deficit_min: u32,
@@ -701,25 +705,32 @@ pub struct ShapeAccumulator {
 
 impl ShapeAccumulator {
     /// Start accumulating over count vectors of width `k` from samples of size
-    /// `n`, requiring `min_prominence` (a fraction of `n`) for a mode.
+    /// `n`, classified at `thresholds`.
     ///
-    /// Per-class counts and conditional bounds are reported at
-    /// `min_prominence`. Class counts are additionally tracked across
-    /// [`DEFAULT_PROMINENCE_LADDER`], which is what lets
-    /// [`ModalityShapes::can_be`] be conservative in the threshold.
-    pub fn new(k: usize, n: usize, min_prominence: f64) -> Self {
+    /// Per-class counts and conditional bounds are reported at the primary
+    /// cutoff. Class counts are additionally tracked across the band, which is
+    /// what [`ModalityShapes::can_be`] reads.
+    ///
+    /// # Panics
+    /// Panics if `thresholds` fails [`ProminenceThresholds::check`].
+    pub fn new(k: usize, n: usize, thresholds: &ProminenceThresholds) -> Self {
+        if let Err(e) = thresholds.check() {
+            panic!("can't classify shapes: {e}");
+        }
+        let min_prominence = thresholds.primary;
         // At least one observation, so a threshold of 0 does not admit ties as
         // separate modes. The slack keeps an exact product from rounding up a
         // whole observation: 0.07 * 100 is 7.000000000000001 in f64.
         let to_counts = |p: f64| ((p * n as f64 - 1e-9).ceil() as u32).max(1);
 
-        let mut fractions: Vec<f64> = DEFAULT_PROMINENCE_LADDER.to_vec();
+        let mut fractions: Vec<f64> = thresholds.band.clone();
         // The configured threshold is always a rung, so `can_be` can never
         // disagree with `can_be_at_primary` about a witness.
         if !fractions.contains(&min_prominence) {
             fractions.push(min_prominence);
         }
         fractions.sort_by(|a, b| a.partial_cmp(b).expect("prominences are finite"));
+        fractions.dedup();
         let ladder: Vec<(f64, u32)> = fractions.iter().map(|&p| (p, to_counts(p))).collect();
         let primary = ladder
             .iter()
@@ -734,6 +745,7 @@ impl ShapeAccumulator {
             ladder_counts: vec![vec![0u64; n_classes]; ladder.len()],
             band_counts: vec![0; n_classes],
             band_min: vec![None; n_classes],
+            rung_classes: vec![ShapeClass::Flat; ladder.len()],
             ladder,
             primary,
             n_scanned: 0,
@@ -756,17 +768,17 @@ impl ShapeAccumulator {
         debug_assert_eq!(counts.len(), self.k);
         // One run decomposition serves every threshold in the envelope.
         let runs = runs_of(counts);
-        let mut rung_classes = [ShapeClass::Flat; MAX_RUNGS];
-        let rung_classes = &mut rung_classes[..self.ladder.len()];
+        let mut rung_classes = std::mem::take(&mut self.rung_classes);
         for (rung, &(_, threshold)) in self.ladder.iter().enumerate() {
             let class = classify_from_runs(&runs, counts.len(), threshold);
             self.ladder_counts[rung][class as usize] += 1;
             rung_classes[rung] = class;
         }
 
-        self.update_band(&runs, counts.len(), rung_classes);
+        self.update_band(&runs, counts.len(), &rung_classes);
 
         let class = rung_classes[self.primary];
+        self.rung_classes = rung_classes;
         let slot = &mut self.per_class[class as usize];
 
         if slot.n_samples == 0 {
@@ -970,13 +982,21 @@ impl ShapeAccumulator {
 ///
 /// `exhaustive` is false: an empty scan has seen nothing, so every `can_be`
 /// query is `None` rather than a claim of impossibility.
-pub fn empty_shapes(min_prominence: f64) -> ModalityShapes {
-    ShapeAccumulator::new(0, 0, min_prominence).finish(false)
+pub fn empty_shapes(thresholds: &ProminenceThresholds) -> ModalityShapes {
+    ShapeAccumulator::new(0, 0, thresholds).finish(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default band with `primary` as the primary cutoff.
+    fn at(primary: f64) -> ProminenceThresholds {
+        ProminenceThresholds {
+            primary,
+            ..Default::default()
+        }
+    }
 
     /// Prominence threshold of 1 observation: the loosest setting that still
     /// refuses to treat a tie as two modes. Used where the test is about the
@@ -1080,11 +1100,43 @@ mod tests {
         // a `Flat` verdict here demonstrably wrong rather than a judgement call.
         assert_eq!(unimodality_deficit(&hump), 0);
 
-        let mut acc = ShapeAccumulator::new(41, n as usize, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(41, n as usize, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&hump);
         let shapes = acc.finish(true);
         assert_eq!(shapes.can_be_unimodal(), Some(true));
         assert_eq!(shapes.can_be_bell_shaped(), Some(true));
+    }
+
+    #[test]
+    fn custom_cutoffs_are_used_and_checked() {
+        let strict = ProminenceThresholds {
+            primary: 0.2,
+            band: vec![0.2, 0.3],
+        };
+        let mut acc = ShapeAccumulator::new(5, 100, &strict);
+        // A 15-observation second peak: two modes at the defaults, one at 20%.
+        acc.update(&[5, 40, 10, 25, 20]);
+        let shapes = acc.finish(true);
+        assert_eq!(shapes.min_prominence, 0.2);
+        assert_eq!(shapes.can_be_multimodal(), Some(false));
+        assert_eq!(shapes.can_be_bell_shaped(), Some(true));
+
+        for bad in [
+            ProminenceThresholds {
+                primary: 0.0,
+                band: vec![0.05],
+            },
+            ProminenceThresholds {
+                primary: 0.05,
+                band: vec![],
+            },
+            ProminenceThresholds {
+                primary: 0.05,
+                band: vec![f64::NAN],
+            },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1106,7 +1158,7 @@ mod tests {
         assert_eq!(classify(&wobble, 1), ShapeClass::ThreeOrMoreModes);
 
         // Through the accumulator it witnesses nothing anywhere in the band.
-        let mut acc = ShapeAccumulator::new(5, n as usize, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(5, n as usize, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&wobble);
         let shapes = acc.finish(true);
         assert_eq!(shapes.can_be_multimodal(), Some(false));
@@ -1263,7 +1315,7 @@ mod tests {
 
     #[test]
     fn accumulator_counts_and_bounds_are_conditional_on_the_class() {
-        let mut acc = ShapeAccumulator::new(5, 100, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(5, 100, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&[15, 15, 15, 15, 40]); // high edge
         acc.update(&[15, 15, 15, 16, 39]); // high edge
         acc.update(&[0, 49, 0, 2, 49]); // two modes
@@ -1296,7 +1348,7 @@ mod tests {
         // rungs (3 and 7 observations at n=128) but not the 0.10 rung (13), so
         // the sample reads as two modes at the primary threshold and as one
         // interior mode at the top of the band.
-        let mut acc = ShapeAccumulator::new(5, 128, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(5, 128, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&[10, 40, 30, 38, 10]);
         let shapes = acc.finish(true);
 
@@ -1316,7 +1368,7 @@ mod tests {
 
         // The same guard in the other direction: a shape visible only at the
         // bottom of the band is still a witness.
-        let mut acc = ShapeAccumulator::new(5, 133, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(5, 133, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&[10, 40, 35, 38, 10]);
         let shapes = acc.finish(true);
         assert_eq!(shapes.n_of(ShapeClass::OneModeInterior), 1, "primary");
@@ -1333,7 +1385,7 @@ mod tests {
         // At n = 128 the 0.10 rung is 13 observations, and this sample is a
         // bell only from 13 on. Reported as 13 / 128, that read 0.1016 for a
         // band ending at 0.10.
-        let mut acc = ShapeAccumulator::new(5, 128, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(5, 128, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&[10, 40, 26, 38, 10]);
         let shapes = acc.finish(true);
         assert_eq!(
@@ -1352,7 +1404,7 @@ mod tests {
         assert_eq!(classify(&row, 4), ShapeClass::TwoModes);
         assert_eq!(classify(&row, 5), ShapeClass::OneModeLowEdge);
 
-        let mut acc = ShapeAccumulator::new(6, 100, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(6, 100, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&row);
         let shapes = acc.finish(true);
         assert!(shapes
@@ -1388,7 +1440,7 @@ mod tests {
         for (k, n) in [(4, 100), (6, 30)] {
             let mut rows = Vec::new();
             compositions(k, n, &mut Vec::new(), &mut rows);
-            let mut acc = ShapeAccumulator::new(k, n as usize, DEFAULT_MODE_PROMINENCE);
+            let mut acc = ShapeAccumulator::new(k, n as usize, &at(DEFAULT_MODE_PROMINENCE));
             let (lo, hi) = (acc.ladder[0].1, acc.ladder[acc.ladder.len() - 1].1);
             let mut expected = [0u64; 6];
             let mut expected_min: [Option<u32>; 6] = [None; 6];
@@ -1413,7 +1465,7 @@ mod tests {
     fn the_band_always_contains_the_configured_threshold() {
         // Otherwise `can_be` could miss a witness that `can_be_at_primary` sees.
         for prominence in [0.01, 0.05, 0.07, 0.25] {
-            let acc = ShapeAccumulator::new(5, 100, prominence);
+            let acc = ShapeAccumulator::new(5, 100, &at(prominence));
             let shapes = acc.finish(true);
             let primary: Vec<&LadderRung> = shapes.ladder.iter().filter(|r| r.primary).collect();
             assert_eq!(primary.len(), 1, "exactly one primary rung");
@@ -1430,7 +1482,7 @@ mod tests {
 
     #[test]
     fn a_threshold_that_is_a_whole_number_of_observations_is_not_rounded_up() {
-        let acc = ShapeAccumulator::new(5, 100, 0.07);
+        let acc = ShapeAccumulator::new(5, 100, &at(0.07));
         let primary = acc.ladder[acc.primary];
         assert_eq!(primary, (0.07, 7));
     }
@@ -1441,7 +1493,7 @@ mod tests {
         // so the envelope is narrower than its three entries suggest. The
         // per-rung observation count is what makes that visible rather than
         // implied.
-        let acc = ShapeAccumulator::new(5, 20, DEFAULT_MODE_PROMINENCE);
+        let acc = ShapeAccumulator::new(5, 20, &at(DEFAULT_MODE_PROMINENCE));
         let shapes = acc.finish(true);
         let counts: Vec<u32> = shapes
             .ladder
@@ -1453,7 +1505,7 @@ mod tests {
 
     #[test]
     fn a_partial_search_reports_absence_as_unknown() {
-        let mut acc = ShapeAccumulator::new(5, 100, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(5, 100, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&[15, 15, 15, 15, 40]);
         let shapes = acc.finish(false);
 
@@ -1466,7 +1518,7 @@ mod tests {
 
     #[test]
     fn class_counts_always_sum_to_the_number_scanned() {
-        let mut acc = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+        let mut acc = ShapeAccumulator::new(4, 9, &at(DEFAULT_MODE_PROMINENCE));
         for a in 0..=9u32 {
             for b in 0..=(9 - a) {
                 for c in 0..=(9 - a - b) {
@@ -1488,20 +1540,20 @@ mod tests {
                     .flat_map(move |b| (0..=(9 - a - b)).map(move |c| [a, b, c, 9 - a - b - c]))
             })
             .collect();
-        let mut whole = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+        let mut whole = ShapeAccumulator::new(4, 9, &at(DEFAULT_MODE_PROMINENCE));
         for row in &rows {
             whole.update(row);
         }
-        let mut merged = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+        let mut merged = ShapeAccumulator::new(4, 9, &at(DEFAULT_MODE_PROMINENCE));
         for chunk in rows.chunks(37) {
-            let mut part = ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE);
+            let mut part = ShapeAccumulator::new(4, 9, &at(DEFAULT_MODE_PROMINENCE));
             for row in chunk {
                 part.update(row);
             }
             merged.merge(part);
         }
         // An empty accumulator is an identity.
-        merged.merge(ShapeAccumulator::new(4, 9, DEFAULT_MODE_PROMINENCE));
+        merged.merge(ShapeAccumulator::new(4, 9, &at(DEFAULT_MODE_PROMINENCE)));
 
         let (whole, merged) = (whole.finish(true), merged.finish(true));
         assert_eq!(whole.n_scanned, merged.n_scanned);
@@ -1522,14 +1574,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "different grids or thresholds")]
     fn accumulators_at_different_primary_thresholds_do_not_merge() {
-        let mut a = ShapeAccumulator::new(5, 128, 0.05);
-        let b = ShapeAccumulator::new(5, 128, 0.10);
+        let mut a = ShapeAccumulator::new(5, 128, &at(0.05));
+        let b = ShapeAccumulator::new(5, 128, &at(0.10));
         a.merge(b);
     }
 
     #[test]
     fn empty_scan_claims_nothing() {
-        let shapes = empty_shapes(DEFAULT_MODE_PROMINENCE);
+        let shapes = empty_shapes(&ProminenceThresholds::default());
         assert_eq!(shapes.n_scanned, 0);
         assert_eq!(shapes.can_be_unimodal(), None);
         assert_eq!(shapes.can_be_bell_shaped(), None);

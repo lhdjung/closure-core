@@ -33,6 +33,7 @@ fn main() {
             1,
             None,
             None,
+            None,
         )
         .unwrap();
         let t_parallel = start.elapsed();
@@ -55,6 +56,7 @@ fn main() {
             c.re_sd,
             1,
             config,
+            None,
             None,
         )
         .unwrap();

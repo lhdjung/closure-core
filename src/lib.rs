@@ -67,7 +67,8 @@
 //!
 //! Most of the code was written by Claude 3.5, translating Python code by Nathanael Larigaldie.
 
-use crate::modality::{ModalityShapes, ShapeAccumulator, ShapeClass, DEFAULT_MODE_PROMINENCE};
+pub use crate::modality::ProminenceThresholds;
+use crate::modality::{ModalityShapes, ShapeAccumulator, ShapeClass};
 use crate::sample_counts::MAX_ABS_SCALE;
 use arrow::array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int32Builder, ListBuilder, StringArray,
@@ -148,6 +149,7 @@ pub trait Technique<T: FloatType, U: IntegerType + 'static>: SampleFormat<U> {
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
+        prominence: Option<ProminenceThresholds>,
     ) -> Result<ResultListFromMeanSdN<U>, ParameterError>;
 
     fn run_streaming(
@@ -162,6 +164,7 @@ pub trait Technique<T: FloatType, U: IntegerType + 'static>: SampleFormat<U> {
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
+        prominence: Option<ProminenceThresholds>,
     ) -> Result<StreamingResult, ParameterError>;
 }
 
@@ -187,6 +190,7 @@ impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
         items: u32,
         parquet_config: Option<ParquetConfig>,
         stop_after: Option<usize>,
+        prominence: Option<ProminenceThresholds>,
     ) -> Result<ResultListFromMeanSdN<U>, ParameterError> {
         closure_parallel(
             mean,
@@ -199,6 +203,7 @@ impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
             items,
             parquet_config,
             stop_after,
+            prominence,
         )
     }
 
@@ -214,6 +219,7 @@ impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
         items: u32,
         config: StreamingConfig,
         stop_after: Option<usize>,
+        prominence: Option<ProminenceThresholds>,
     ) -> Result<StreamingResult, ParameterError> {
         closure_parallel_streaming(
             mean,
@@ -226,6 +232,7 @@ impl<T: FloatType, U: IntegerType + 'static> Technique<T, U> for Closure {
             items,
             config,
             stop_after,
+            prominence,
         )
     }
 }
@@ -681,12 +688,12 @@ impl<U: IntegerType> ResultListFromMeanSdN<U> {
             1,
             100,
         );
-        empty_result_list(grid, 0)
+        empty_result_list(grid, 0, &ProminenceThresholds::default())
     }
 
     /// Create an empty result list over an explicit value grid.
     pub fn empty_on_grid(grid: ValueGrid, n: usize) -> Self {
-        empty_result_list(grid, n)
+        empty_result_list(grid, n, &ProminenceThresholds::default())
     }
 }
 
@@ -1279,7 +1286,11 @@ fn mad(values: &[f64], median_val: f64) -> f64 {
 }
 
 /// Used by `ResultListFromMeanSdN::empty()`
-pub(crate) fn empty_result_list<U>(grid: ValueGrid, n: usize) -> ResultListFromMeanSdN<U>
+pub(crate) fn empty_result_list<U>(
+    grid: ValueGrid,
+    n: usize,
+    thresholds: &ProminenceThresholds,
+) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
 {
@@ -1334,7 +1345,7 @@ where
         },
         // Nothing was scanned, so nothing is ruled out: every `can_be` query on
         // this returns `None`, not `false`.
-        modality_shapes: modality::empty_shapes(DEFAULT_MODE_PROMINENCE),
+        modality_shapes: modality::empty_shapes(thresholds),
         results: ResultsTable::new(Vec::new(), SampleCounts::new(grid, n), Vec::new()),
     }
 }
@@ -1349,7 +1360,11 @@ const STATS_CHUNK_ROWS: usize = 4096;
 /// SPRITE, which samples the solution space rather than enumerating it. Only
 /// [`ModalityShapes`] uses it, and only to decide whether an empty shape class
 /// is a proof of impossibility or merely an absence of evidence.
-fn counts_to_result_list<U>(counts: SampleCounts, exhaustive: bool) -> ResultListFromMeanSdN<U>
+fn counts_to_result_list<U>(
+    counts: SampleCounts,
+    exhaustive: bool,
+    thresholds: &ProminenceThresholds,
+) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
 {
@@ -1359,7 +1374,7 @@ where
     // Handle empty samples case
     if counts.is_empty() {
         let n = counts.n();
-        return empty_result_list(grid, n);
+        return empty_result_list(grid, n, thresholds);
     }
 
     let n = counts.n();
@@ -1374,7 +1389,7 @@ where
         .as_flat()
         .par_chunks(k * STATS_CHUNK_ROWS)
         .map(|chunk| {
-            let mut shapes = ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE);
+            let mut shapes = ShapeAccumulator::new(k, n, thresholds);
             let mut horns = Vec::with_capacity(chunk.len() / k);
             let mut freqs = vec![0.0f64; k];
             for row in chunk.chunks_exact(k) {
@@ -1388,7 +1403,7 @@ where
         })
         .collect();
     let mut horns_values = Vec::with_capacity(samples_all);
-    let mut shapes = ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE);
+    let mut shapes = ShapeAccumulator::new(k, n, thresholds);
     for (horns, part) in chunks {
         horns_values.extend(horns);
         shapes.merge(part);
@@ -1752,6 +1767,9 @@ fn generate_initial_combinations(scale_range: usize, depth: usize) -> Vec<Vec<us
 /// # Parameters
 /// - `items`: Number of items averaged (must be 1 for CLOSURE)
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds all samples.
+/// - `prominence`: Cutoffs for the shape classification, as fractions of `n`.
+///   `None` uses the defaults, which are conventions; see
+///   [`ProminenceThresholds`].
 #[allow(clippy::too_many_arguments)]
 pub fn closure_parallel<T, U>(
     mean: T,
@@ -1764,6 +1782,7 @@ pub fn closure_parallel<T, U>(
     items: u32,
     parquet_config: Option<ParquetConfig>,
     stop_after: Option<usize>,
+    prominence: Option<ProminenceThresholds>,
 ) -> Result<ResultListFromMeanSdN<U>, ParameterError>
 where
     T: FloatType,
@@ -1774,6 +1793,7 @@ where
             "CLOSURE requires items == 1".to_string(),
         ));
     }
+    let thresholds = checked_thresholds(prominence)?;
     let ctx = ClosureSearchContext::new(
         mean,
         sd,
@@ -1847,7 +1867,8 @@ where
     );
     // When `stop_after` truncates the enumeration, the result set is only
     // part of the solution space and an unseen shape is not an impossible one.
-    let closure_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts, exhaustive);
+    let closure_results: ResultListFromMeanSdN<U> =
+        counts_to_result_list(counts, exhaustive, &thresholds);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -1860,6 +1881,18 @@ where
     }
 
     Ok(closure_results)
+}
+
+/// The caller's cutoffs, or the defaults, once they have passed
+/// [`ProminenceThresholds::check`].
+pub(crate) fn checked_thresholds(
+    prominence: Option<ProminenceThresholds>,
+) -> Result<ProminenceThresholds, ParameterError> {
+    let thresholds = prominence.unwrap_or_default();
+    thresholds
+        .check()
+        .map_err(ParameterError::InputValidation)?;
+    Ok(thresholds)
 }
 
 /// The directory a streaming run writes into, created if missing, with the
@@ -1985,7 +2018,7 @@ pub(crate) struct StreamingFrequencyState {
 
 impl StreamingFrequencyState {
     /// Start tracking a run over `k` grid values with samples of size `n`.
-    pub(crate) fn new(k: usize, n: usize) -> Self {
+    pub(crate) fn new(k: usize, n: usize, thresholds: &ProminenceThresholds) -> Self {
         Self {
             current_min_horns: f64::INFINITY,
             current_max_horns: f64::NEG_INFINITY,
@@ -1995,7 +2028,7 @@ impl StreamingFrequencyState {
             min_count: 0,
             max_count: 0,
             freq_dist: vec![0u32; k * (n + 1)],
-            shapes: ShapeAccumulator::new(k, n, DEFAULT_MODE_PROMINENCE),
+            shapes: ShapeAccumulator::new(k, n, thresholds),
             k,
             n,
         }
@@ -2299,11 +2332,13 @@ pub(crate) fn write_streaming_statistics(
     grid: &ValueGrid,
     final_freq_state: Arc<Mutex<StreamingFrequencyState>>,
     exhaustive: bool,
+    thresholds: &ProminenceThresholds,
 ) -> Result<(), ParameterError> {
     let samples_all = all_horns.len();
     if samples_all == 0 {
         // Still create the files so a reader finds a complete, empty result set.
-        let results: ResultListFromMeanSdN<i32> = empty_result_list(grid.clone(), n_usize);
+        let results: ResultListFromMeanSdN<i32> =
+            empty_result_list(grid.clone(), n_usize, thresholds);
         return write_statistics_files(base_path, &results).map_err(output_error);
     }
 
@@ -2374,10 +2409,7 @@ pub(crate) fn write_streaming_statistics(
     }
     // Take the accumulator out so it can be finished; the state is discarded
     // immediately afterwards.
-    let shapes = std::mem::replace(
-        &mut state.shapes,
-        ShapeAccumulator::new(0, 0, DEFAULT_MODE_PROMINENCE),
-    );
+    let shapes = std::mem::replace(&mut state.shapes, ShapeAccumulator::new(0, 0, thresholds));
     drop(state);
     let modality_shapes = shapes.finish(exhaustive);
 
@@ -2459,6 +2491,9 @@ pub(crate) fn join_writer(
 /// - `items`: Number of items averaged (must be 1 for CLOSURE)
 /// - `stop_after`: Optional limit on number of samples to find. If None, finds
 ///   all samples.
+/// - `prominence`: Cutoffs for the shape classification, as fractions of `n`.
+///   `None` uses the defaults, which are conventions; see
+///   [`ProminenceThresholds`].
 #[allow(clippy::too_many_arguments)]
 pub fn closure_parallel_streaming<T, U>(
     mean: T,
@@ -2471,6 +2506,7 @@ pub fn closure_parallel_streaming<T, U>(
     items: u32,
     config: StreamingConfig,
     stop_after: Option<usize>,
+    prominence: Option<ProminenceThresholds>,
 ) -> Result<StreamingResult, ParameterError>
 where
     T: FloatType,
@@ -2481,6 +2517,7 @@ where
             "CLOSURE requires items == 1".to_string(),
         ));
     }
+    let thresholds = checked_thresholds(prominence)?;
     let ctx = ClosureSearchContext::new(
         mean,
         sd,
@@ -2515,7 +2552,11 @@ where
     let grid_len = grid.len();
 
     // Shared state for tracking min/max horns frequencies
-    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState::new(grid_len, n_usize)));
+    let freq_state = Arc::new(Mutex::new(StreamingFrequencyState::new(
+        grid_len,
+        n_usize,
+        &thresholds,
+    )));
     let freq_state_for_thread = freq_state.clone();
 
     // One directory per run, as in memory mode.
@@ -2601,6 +2642,7 @@ where
                 // A search that reached its limit may have seen only part of
                 // the space.
                 found_count < limit,
+                &thresholds,
             )?;
 
             return Ok(StreamingResult {
@@ -2677,7 +2719,7 @@ where
 
         // Accumulate locally and take the shared lock once per branch; the
         // per-sample shape classification is the expensive part.
-        let mut local = StreamingFrequencyState::new(grid_len, n_usize);
+        let mut local = StreamingFrequencyState::new(grid_len, n_usize, &thresholds);
         for (counts, horns) in &results_with_horns {
             local.update(counts, *horns);
         }
@@ -2711,6 +2753,7 @@ where
         // Every branch adds all it found to the counter, so a total below the
         // limit means no branch was skipped or cut short.
         stop_after.is_none_or(|limit| total_counter.load(Ordering::Relaxed) < limit),
+        &thresholds,
     )?;
 
     Ok(StreamingResult {
@@ -2878,7 +2921,8 @@ mod tests {
         // is a shortcut for, on real result sets.
         for (mean, sd, n) in [(3.0, 1.13, 60), (3.5, 1.0, 52), (2.2, 1.3, 40)] {
             let results =
-                closure_parallel(mean, sd, n, 1i32, 5i32, 0.005, 0.005, 1, None, None).unwrap();
+                closure_parallel(mean, sd, n, 1i32, 5i32, 0.005, 0.005, 1, None, None, None)
+                    .unwrap();
             let rows: Vec<Vec<u32>> = results.results.counts.rows().map(|r| r.to_vec()).collect();
             if rows.is_empty() {
                 continue;
@@ -2921,7 +2965,7 @@ mod tests {
         let base = format!("{}/", dir.display());
 
         let results =
-            closure_parallel(3.5, 1.5, 100, 1i32, 5i32, 0.01, 0.01, 1, None, None).unwrap();
+            closure_parallel(3.5, 1.5, 100, 1i32, 5i32, 0.01, 0.01, 1, None, None, None).unwrap();
         write_statistics_files(&base, &results).unwrap();
 
         assert_eq!(
@@ -2973,7 +3017,8 @@ mod tests {
     #[test]
     fn counts_are_a_lossless_encoding_of_closure_samples() {
         let results =
-            closure_parallel::<f64, i32>(3.0, 1.0, 5, 1, 5, 0.05, 0.05, 1, None, None).unwrap();
+            closure_parallel::<f64, i32>(3.0, 1.0, 5, 1, 5, 0.05, 0.05, 1, None, None, None)
+                .unwrap();
         assert!(!results.results.is_empty());
 
         for i in 0..results.results.len() {
@@ -3017,6 +3062,7 @@ mod tests {
             1,
             Some(ParquetConfig::new(format!("{closure_dir}/"), 100)),
             Some(20),
+            None,
         )
         .unwrap();
 
@@ -3033,6 +3079,7 @@ mod tests {
             RestrictionsOption::Default,
             Some(ParquetConfig::new(format!("{sprite_dir}/"), 100)),
             Some(20),
+            None,
         )
         .unwrap();
 
@@ -3078,6 +3125,7 @@ mod tests {
             RestrictionsOption::Null,
             None,
             Some(5),
+            None,
         )
         .unwrap();
 
@@ -3112,6 +3160,7 @@ mod tests {
                 batch_size: 100,
                 format: OutputFormat::Both,
             }),
+            None,
             None,
         )
         .unwrap();
@@ -3264,7 +3313,7 @@ mod tests {
             0.05, // rounding_error_sd
             1,    // items
             None, // no parquet config
-            None, // no stop_after limit
+            None, None, // no stop_after limit
         )
         .unwrap();
 
@@ -3334,6 +3383,7 @@ mod tests {
             0.05, // rounding_error_sd
             1,    // items
             Some(config),
+            None,
             None, // no stop_after limit
         )
         .unwrap();
@@ -3387,7 +3437,7 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             1,    // items
-            config, None, // no stop_after limit
+            config, None, None, // no stop_after limit
         )
         .unwrap();
 
@@ -3439,7 +3489,8 @@ mod tests {
             0.05, // rounding_error_sd
             1,    // items
             config,
-            Some(5), // stop_after = 5
+            Some(5),
+            None, // stop_after = 5
         )
         .unwrap();
 
@@ -3489,7 +3540,7 @@ mod tests {
             0.05, // rounding_error_mean
             0.05, // rounding_error_sd
             1,    // items
-            config, None, // no stop_after → main parallel path
+            config, None, None, // no stop_after → main parallel path
         )
         .unwrap();
 
@@ -3531,7 +3582,7 @@ mod tests {
             0.05, // rounding_error_sd
             1,    // items
             None, // no parquet config
-            None, // no stop_after limit
+            None, None, // no stop_after limit
         )
         .unwrap();
 
@@ -3540,16 +3591,17 @@ mod tests {
 
         // Test with limit of 10
         let results_limited = closure_parallel::<f64, i32>(
-            3.0,      // mean
-            1.0,      // sd
-            80,       // n (increased sample size)
-            1,        // scale_min
-            5,        // scale_max
-            0.05,     // rounding_error_mean
-            0.05,     // rounding_error_sd
-            1,        // items
-            None,     // no parquet config
-            Some(10), // stop after 10 samples
+            3.0,  // mean
+            1.0,  // sd
+            80,   // n (increased sample size)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            1,    // items
+            None, // no parquet config
+            Some(10),
+            None, // stop after 10 samples
         )
         .unwrap();
 
@@ -3559,16 +3611,17 @@ mod tests {
 
         // Test with limit of 1
         let results_one = closure_parallel::<f64, i32>(
-            3.0,     // mean
-            1.0,     // sd
-            80,      // n (increased sample size)
-            1,       // scale_min
-            5,       // scale_max
-            0.05,    // rounding_error_mean
-            0.05,    // rounding_error_sd
-            1,       // items
-            None,    // no parquet config
-            Some(1), // stop after 1 sample
+            3.0,  // mean
+            1.0,  // sd
+            80,   // n (increased sample size)
+            1,    // scale_min
+            5,    // scale_max
+            0.05, // rounding_error_mean
+            0.05, // rounding_error_sd
+            1,    // items
+            None, // no parquet config
+            Some(1),
+            None, // stop after 1 sample
         )
         .unwrap();
 

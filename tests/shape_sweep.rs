@@ -31,8 +31,10 @@ const SCALE_MIN: i32 = 1;
 const SCALE_MAX: i32 = 5;
 
 fn run(mean: f64, sd: f64, n: i32, rem: f64) -> closure_core::ResultListFromMeanSdN<i32> {
-    closure_parallel(mean, sd, n, SCALE_MIN, SCALE_MAX, rem, rem, 1, None, None)
-        .expect("valid parameters")
+    closure_parallel(
+        mean, sd, n, SCALE_MIN, SCALE_MAX, rem, rem, 1, None, None, None,
+    )
+    .expect("valid parameters")
 }
 
 /// Every count vector of `n` observations over the scale whose mean and sample
@@ -287,6 +289,7 @@ fn a_truncated_search_never_reports_a_proof() {
         1,
         None,
         Some(5),
+        None,
     )
     .unwrap();
     let shapes = &results.modality_shapes;
@@ -499,6 +502,7 @@ fn streaming_reports_the_same_shapes_as_memory_mode() {
         1,
         closure_core::StreamingConfig::new(base.clone(), 1000, false),
         None,
+        None,
     )
     .unwrap();
 
@@ -540,6 +544,7 @@ fn streaming_marks_a_truncated_run_as_not_exhaustive() {
         1,
         closure_core::StreamingConfig::new(base.clone(), 100, false),
         Some(20),
+        None,
     )
     .unwrap();
 

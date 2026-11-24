@@ -66,6 +66,7 @@ fn write_closure_csv(
         1,
         None,
         None,
+        None,
     )
     .unwrap();
 

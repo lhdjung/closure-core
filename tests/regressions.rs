@@ -24,7 +24,8 @@ fn f64_cell(path: &str, column: &str) -> f64 {
 fn a_sample_size_equal_to_the_seed_depth_is_still_checked() {
     // n = 2 is exactly the DFS seed depth, so the search never enters the loop
     // that checks the sum and upper SD bounds. The terminal check has to.
-    let results = closure_parallel::<f64, i32>(3.0, 0.0, 2, 1, 5, 0.0, 0.0, 1, None, None).unwrap();
+    let results =
+        closure_parallel::<f64, i32>(3.0, 0.0, 2, 1, 5, 0.0, 0.0, 1, None, None, None).unwrap();
     let samples: Vec<Vec<i32>> = (0..results.results.len())
         .map(|i| results.results.sample(i))
         .collect();
@@ -35,9 +36,20 @@ fn a_sample_size_equal_to_the_seed_depth_is_still_checked() {
 #[test]
 fn stop_after_is_an_upper_bound_in_every_path() {
     for limit in [5, 150] {
-        let results =
-            closure_parallel::<f64, i32>(3.0, 1.0, 40, 1, 5, 0.05, 0.05, 1, None, Some(limit))
-                .unwrap();
+        let results = closure_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            40,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            Some(limit),
+            None,
+        )
+        .unwrap();
         assert_eq!(results.results.len(), limit, "stop_after = {limit}");
     }
 }
@@ -48,7 +60,7 @@ fn a_sample_exactly_on_a_bound_is_found() {
     // exactly 81 used to fall outside the target interval in both the DFS and
     // the DP counter.
     let results =
-        closure_parallel::<f64, i32>(3.24, 1.0, 25, 1, 5, 0.0, 0.05, 1, None, None).unwrap();
+        closure_parallel::<f64, i32>(3.24, 1.0, 25, 1, 5, 0.0, 0.05, 1, None, None, None).unwrap();
     assert!(!results.results.is_empty());
     assert_eq!(
         results.results.len() as u64,
@@ -60,7 +72,8 @@ fn a_sample_exactly_on_a_bound_is_found() {
 fn the_counter_agrees_with_the_search_on_negative_scales() {
     for (mean, sd, n, lo, hi) in [(0.0, 1.5, 10, -3, 3), (-1.0, 1.0, 8, -3, 1)] {
         let results =
-            closure_parallel::<f64, i32>(mean, sd, n, lo, hi, 0.05, 0.05, 1, None, None).unwrap();
+            closure_parallel::<f64, i32>(mean, sd, n, lo, hi, 0.05, 0.05, 1, None, None, None)
+                .unwrap();
         assert_eq!(
             closure_count(mean, sd, n, lo, hi, 0.05, 0.05).unwrap(),
             results.results.len() as u64,
@@ -90,6 +103,7 @@ fn streaming_statistics_describe_the_samples_written() {
         1,
         StreamingConfig::new(base.clone(), 50, false),
         Some(150),
+        None,
     )
     .unwrap();
     assert_eq!(result.total_combinations, 150);
@@ -121,6 +135,7 @@ fn an_empty_streaming_run_still_writes_its_statistics() {
         1,
         StreamingConfig::new(base.clone(), 50, false),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(result.total_combinations, 0);
@@ -134,19 +149,28 @@ fn an_empty_streaming_run_still_writes_its_statistics() {
 
 #[test]
 fn invalid_parameters_are_errors_not_panics() {
-    assert!(closure_parallel::<f64, i32>(3.0, 1.0, 1, 1, 5, 0.0, 0.0, 1, None, None).is_err());
-    assert!(closure_parallel::<f64, i32>(3.0, 1.0, 0, 1, 5, 0.0, 0.0, 1, None, None).is_err());
-    assert!(closure_parallel::<f64, i32>(3.0, 1.0, 10, 5, 1, 0.0, 0.0, 1, None, None).is_err());
-    assert!(closure_parallel::<f64, i32>(3.0, -1.0, 10, 1, 5, 0.0, 0.0, 1, None, None).is_err());
+    assert!(
+        closure_parallel::<f64, i32>(3.0, 1.0, 1, 1, 5, 0.0, 0.0, 1, None, None, None).is_err()
+    );
+    assert!(
+        closure_parallel::<f64, i32>(3.0, 1.0, 0, 1, 5, 0.0, 0.0, 1, None, None, None).is_err()
+    );
+    assert!(
+        closure_parallel::<f64, i32>(3.0, 1.0, 10, 5, 1, 0.0, 0.0, 1, None, None, None).is_err()
+    );
+    assert!(
+        closure_parallel::<f64, i32>(3.0, -1.0, 10, 1, 5, 0.0, 0.0, 1, None, None, None).is_err()
+    );
     // A scale outside the output grid's range: this used to finish the search
     // and then panic converting the bounds to i32.
     let far = 3_000_000_000i64;
     assert!(
-        closure_parallel::<f64, i64>(3e9, 1.0, 5, far, far + 4, 0.0, 0.0, 1, None, None).is_err()
+        closure_parallel::<f64, i64>(3e9, 1.0, 5, far, far + 4, 0.0, 0.0, 1, None, None, None)
+            .is_err()
     );
     // Within the grid's range, but n·Σx² would overflow i64.
     assert!(closure_parallel::<f64, i64>(
-        2e7, 1.0, 1000, 20_000_000, 20_000_004, 0.0, 0.0, 1, None, None
+        2e7, 1.0, 1000, 20_000_000, 20_000_004, 0.0, 0.0, 1, None, None, None
     )
     .is_err());
 }
@@ -163,10 +187,10 @@ fn the_counter_rejects_what_the_search_rejects() {
         (f64::NAN, 1.0, 0.05, 0.05),
         (3.0, f64::INFINITY, 0.05, 0.05),
     ] {
-        assert!(
-            closure_parallel::<f64, i32>(mean, sd, 10, 1, 5, re_mean, re_sd, 1, None, None)
-                .is_err()
-        );
+        assert!(closure_parallel::<f64, i32>(
+            mean, sd, 10, 1, 5, re_mean, re_sd, 1, None, None, None
+        )
+        .is_err());
         assert!(closure_count(mean, sd, 10, 1, 5, re_mean, re_sd).is_err());
     }
 }
@@ -194,7 +218,8 @@ fn a_sample_is_found_from_its_own_exact_statistics() {
         let sd = ((n as i64 * ssq - sum * sum) as f64 / (n_f * (n_f - 1.0))).sqrt();
 
         let results =
-            closure_parallel::<f64, i32>(mean, sd, n, lo, hi, 0.0, 0.0, 1, None, None).unwrap();
+            closure_parallel::<f64, i32>(mean, sd, n, lo, hi, 0.0, 0.0, 1, None, None, None)
+                .unwrap();
         let found = (0..results.results.len()).any(|i| results.results.sample(i) == sample);
         assert!(found, "{sample:?} not found from mean={mean} sd={sd}");
         assert_eq!(
@@ -224,6 +249,7 @@ fn sprite_takes_its_tolerances_literally() {
         RestrictionsOption::Default,
         None,
         Some(200),
+        None,
     )
     .unwrap();
     assert!(!results.results.is_empty());
@@ -284,6 +310,7 @@ fn multi_item_sprite_samples_match_on_the_real_grid() {
             RestrictionsOption::Default,
             None,
             Some(200),
+            None,
         )
         .unwrap();
         assert!(!results.results.is_empty(), "items={items}");
@@ -322,6 +349,7 @@ fn multi_item_sprite_samples_match_on_the_real_grid() {
         RestrictionsOption::Default,
         None,
         Some(20),
+        None,
     )
     .unwrap();
     assert!(!restricted.results.is_empty());
@@ -350,6 +378,7 @@ fn sprite_reaches_every_total_the_mean_tolerance_allows() {
         RestrictionsOption::Default,
         None,
         Some(2000),
+        None,
     )
     .unwrap();
     let values = results.results.counts.grid().values().to_vec();
@@ -384,6 +413,7 @@ fn sprite_with_every_response_fixed_does_not_panic() {
             RestrictionsOption::Default,
             None,
             Some(1),
+            None,
         )
         .unwrap()
         .results
@@ -417,6 +447,7 @@ fn streaming_writes_into_the_named_directory_and_creates_it() {
             1,
             StreamingConfig::new(path, 100, false),
             None,
+            None,
         )
         .unwrap();
         assert!(result.total_combinations > 0);
@@ -441,6 +472,7 @@ fn streaming_writes_into_the_named_directory_and_creates_it() {
             RestrictionsOption::Default,
             StreamingConfig::new(path, 100, false),
             Some(5),
+            None,
         )
         .unwrap();
         assert!(sprite_dir.join("counts.parquet").exists(), "{suffix:?}");
@@ -474,6 +506,7 @@ fn a_failed_write_is_an_error_not_an_empty_result() {
         1,
         StreamingConfig::new(path.clone(), 100, false),
         None,
+        None,
     );
     assert!(matches!(streamed, Err(ParameterError::Output(_))));
 
@@ -488,6 +521,7 @@ fn a_failed_write_is_an_error_not_an_empty_result() {
         1,
         StreamingConfig::new(path.clone(), 100, false),
         Some(5),
+        None,
     );
     assert!(matches!(limited, Err(ParameterError::Output(_))));
 
@@ -504,6 +538,7 @@ fn a_failed_write_is_an_error_not_an_empty_result() {
         RestrictionsOption::Default,
         StreamingConfig::new(path.clone(), 100, false),
         Some(5),
+        None,
     );
     assert!(matches!(sprite, Err(ParameterError::Output(_))));
 
@@ -517,6 +552,7 @@ fn a_failed_write_is_an_error_not_an_empty_result() {
         0.05,
         1,
         Some(ParquetConfig::new(path, 100)),
+        None,
         None,
     );
     assert!(matches!(in_memory, Err(ParameterError::Output(_))));
@@ -547,6 +583,7 @@ fn sprite_streaming_honours_stop_after() {
             RestrictionsOption::Default,
             StreamingConfig::new(dir.display().to_string(), 100, false),
             Some(3),
+            None,
         )
         .unwrap();
         assert_eq!(result.total_combinations, 3);
@@ -579,6 +616,7 @@ fn sprite_without_a_limit_does_not_overflow() {
         RestrictionsOption::Null,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(!results.results.is_empty());
@@ -604,6 +642,7 @@ fn sprite_rejects_a_scale_its_integer_type_cannot_hold() {
             RestrictionsOption::Default,
             None,
             Some(5),
+            None,
         )
     };
     assert!(matches!(
@@ -643,6 +682,7 @@ fn a_sprite_keeps_its_restrictions_across_runs() {
             1,
             None,
             Some(20),
+            None,
         )
         .unwrap();
         assert!(!results.results.is_empty());
@@ -671,6 +711,7 @@ fn from_range_takes_scale_values() {
         RestrictionsOption::new(RestrictionsMinimum::from_range(1, 5)),
         None,
         Some(20),
+        None,
     )
     .unwrap();
     assert!(!results.results.is_empty());
@@ -700,6 +741,7 @@ fn sprite_fills_the_value_below_an_exactly_restricted_one() {
         RestrictionsOption::Null,
         None,
         Some(50),
+        None,
     )
     .unwrap();
     let samples: Vec<Vec<i32>> = (0..results.results.len())
@@ -727,6 +769,7 @@ fn sprite_finds_a_sample_whose_every_value_is_fixed() {
         RestrictionsOption::Null,
         None,
         Some(5),
+        None,
     )
     .unwrap();
     assert_eq!(results.results.len(), 1);
@@ -754,6 +797,7 @@ fn sprite_gives_up_quickly_on_an_impossible_sd() {
         RestrictionsOption::Null,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(results.results.is_empty());
@@ -767,7 +811,7 @@ fn degenerate_grids_are_input_errors() {
     // A one-value scale made every CLOSURE sample `Flat`, so an exhaustive
     // run "proved" the data was not unimodal. SPRITE already rejected it.
     assert!(matches!(
-        closure_parallel::<f64, i32>(3.0, 0.0, 5, 3, 3, 0.05, 0.05, 1, None, None),
+        closure_parallel::<f64, i32>(3.0, 0.0, 5, 3, 3, 0.05, 0.05, 1, None, None, None),
         Err(ParameterError::InputValidation(_))
     ));
     assert!(closure_count(3.0, 0.0, 5, 3, 3, 0.05, 0.05).is_err());
@@ -788,6 +832,7 @@ fn degenerate_grids_are_input_errors() {
             RestrictionsOption::Null,
             None,
             Some(3),
+            None,
         ),
         Err(ParameterError::InputValidation(_))
     ));
@@ -812,6 +857,7 @@ fn sprite_gives_up_quickly_on_an_sd_too_narrow_for_the_mean() {
         1,
         None,
         RestrictionsOption::Null,
+        None,
         None,
         None,
     )
@@ -881,6 +927,7 @@ fn sprite_reaches_samples_beyond_a_restriction_gap() {
             RestrictionsOption::Null,
             None,
             Some(10),
+            None,
         )
         .unwrap();
         let samples: Vec<Vec<i32>> = (0..results.results.len())
@@ -911,6 +958,7 @@ fn sprite_keeps_drawing_long_enough_to_find_rare_samples() {
             RestrictionsOption::Null,
             None,
             stop_after,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -930,7 +978,7 @@ fn the_counter_agrees_with_the_search_far_from_zero() {
     let mean = ((n - 1) * low + low + 1) as f64 / n as f64;
     let sd = (1.0 / n as f64).sqrt();
     let found = closure_parallel::<f64, i32>(
-        mean, sd, 141, 21_000_000, 21_000_001, 0.0, 0.0, 1, None, None,
+        mean, sd, 141, 21_000_000, 21_000_001, 0.0, 0.0, 1, None, None, None,
     )
     .unwrap()
     .results
@@ -972,6 +1020,7 @@ fn sprite_rejects_a_scale_too_wide_for_the_grid() {
         RestrictionsOption::Null,
         None,
         Some(1),
+        None,
     );
     assert!(matches!(result, Err(ParameterError::InputValidation(_))));
 
@@ -990,6 +1039,7 @@ fn sprite_rejects_a_scale_too_wide_for_the_grid() {
         RestrictionsOption::Null,
         None,
         Some(5),
+        None,
     );
     assert!(matches!(result, Err(ParameterError::InputValidation(_))));
 }
@@ -1013,6 +1063,7 @@ fn sprite_samples_far_from_zero_match_their_sd() {
         RestrictionsOption::Null,
         None,
         Some(50),
+        None,
     )
     .unwrap()
     .results;
@@ -1039,14 +1090,26 @@ fn a_limited_run_that_saw_everything_is_exhaustive() {
     let total = closure_count(3.0, 1.2, 20, 1, 5, 0.05, 0.05).unwrap() as usize;
     assert!(total > 0);
     for limit in [total + 1, 1_000_000] {
-        let results =
-            closure_parallel::<f64, i32>(3.0, 1.2, 20, 1, 5, 0.05, 0.05, 1, None, Some(limit))
-                .unwrap();
+        let results = closure_parallel::<f64, i32>(
+            3.0,
+            1.2,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            None,
+            Some(limit),
+            None,
+        )
+        .unwrap();
         assert_eq!(results.results.len(), total);
         assert!(results.modality_shapes.exhaustive, "stop_after = {limit}");
     }
     let results =
-        closure_parallel::<f64, i32>(3.0, 1.2, 20, 1, 5, 0.05, 0.05, 1, None, Some(total)).unwrap();
+        closure_parallel::<f64, i32>(3.0, 1.2, 20, 1, 5, 0.05, 0.05, 1, None, Some(total), None)
+            .unwrap();
     assert!(
         !results.modality_shapes.exhaustive,
         "reaching the limit proves nothing"
