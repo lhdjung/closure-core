@@ -705,12 +705,12 @@ impl<U: IntegerType> ResultListFromMeanSdN<U> {
             1,
             100,
         );
-        empty_result_list(grid, 0, &ProminenceThresholds::default())
+        empty_result_list(grid, 0, &ProminenceThresholds::default(), false)
     }
 
     /// Create an empty result list over an explicit value grid.
     pub fn empty_on_grid(grid: ValueGrid, n: usize) -> Self {
-        empty_result_list(grid, n, &ProminenceThresholds::default())
+        empty_result_list(grid, n, &ProminenceThresholds::default(), false)
     }
 }
 
@@ -1307,6 +1307,7 @@ pub(crate) fn empty_result_list<U>(
     grid: ValueGrid,
     n: usize,
     thresholds: &ProminenceThresholds,
+    exhaustive: bool,
 ) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
@@ -1362,7 +1363,7 @@ where
         },
         // No samples: every `can_be` query on this returns `None`. With an
         // exhaustive search that is the consistency finding, not a shape one.
-        modality_shapes: modality::empty_shapes(thresholds),
+        modality_shapes: modality::empty_shapes(group_size, n, thresholds, exhaustive),
         results: ResultsTable::new(Vec::new(), SampleCounts::new(grid, n), Vec::new()),
     }
 }
@@ -1391,7 +1392,7 @@ where
     // Handle empty samples case
     if counts.is_empty() {
         let n = counts.n();
-        return empty_result_list(grid, n, thresholds);
+        return empty_result_list(grid, n, thresholds, exhaustive);
     }
 
     let n = counts.n();
@@ -2366,7 +2367,7 @@ pub(crate) fn write_streaming_statistics(
     if samples_all == 0 {
         // Still create the files so a reader finds a complete, empty result set.
         let results: ResultListFromMeanSdN<i32> =
-            empty_result_list(grid.clone(), n_usize, thresholds);
+            empty_result_list(grid.clone(), n_usize, thresholds, exhaustive);
         return write_statistics_files(base_path, &results).map_err(output_error);
     }
 

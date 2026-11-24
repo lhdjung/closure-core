@@ -20,6 +20,22 @@ fn f64_cell(path: &str, column: &str) -> f64 {
         .value(0)
 }
 
+fn bool_cell(path: &str, column: &str) -> bool {
+    let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    let idx = batch.schema().index_of(column).unwrap();
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap()
+        .value(0)
+}
+
 #[test]
 fn a_sample_size_equal_to_the_seed_depth_is_still_checked() {
     // n = 2 is exactly the DFS seed depth, so the search never enters the loop
@@ -143,8 +159,38 @@ fn an_empty_streaming_run_still_writes_its_statistics() {
         f64_cell(&format!("{base}metrics_main.parquet"), "samples_all"),
         0.0
     );
+    // The search was complete; it found nothing. That used to be written as
+    // `exhaustive = false`.
+    assert!(bool_cell(
+        &format!("{base}modality_summary.parquet"),
+        "exhaustive"
+    ));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_complete_search_that_finds_nothing_is_exhaustive() {
+    // Mean 1.5 with n = 3 needs a sum of 4.5: no sample exists. The empty
+    // result used to say `exhaustive = false` and list every cutoff as one
+    // observation, as if n were 0.
+    let results =
+        closure_parallel::<f64, i32>(1.5, 0.5, 3, 1, 3, 0.0, 0.0, 1, None, None, None).unwrap();
+    assert_eq!(results.results.len(), 0);
+    let shapes = &results.modality_shapes;
+    assert!(shapes.exhaustive);
+    assert_eq!(shapes.can_be_unimodal(), None, "no samples, no shape inference");
+
+    let results =
+        closure_parallel::<f64, i32>(3.0, 5.0, 100, 1, 5, 0.05, 0.05, 1, None, None, None)
+            .unwrap();
+    let rungs: Vec<u32> = results
+        .modality_shapes
+        .ladder
+        .iter()
+        .map(|r| r.min_prominence_counts)
+        .collect();
+    assert_eq!(rungs, vec![2, 5, 10]);
 }
 
 #[test]

@@ -1077,9 +1077,16 @@ impl ShapeAccumulator {
 /// The shapes of a result set with nothing in it.
 ///
 /// Every `can_be` query on it is `None`: with no samples there is no shape to
-/// infer anything about.
-pub fn empty_shapes(thresholds: &ProminenceThresholds) -> ModalityShapes {
-    ShapeAccumulator::new(0, 0, thresholds).finish(false)
+/// infer anything about. `k`, `n` and `exhaustive` are still those of the run,
+/// so the cutoffs come out in observations of the real sample size, and a
+/// complete search that found nothing says it was complete.
+pub fn empty_shapes(
+    k: usize,
+    n: usize,
+    thresholds: &ProminenceThresholds,
+    exhaustive: bool,
+) -> ModalityShapes {
+    ShapeAccumulator::new(k, n, thresholds).finish(exhaustive)
 }
 
 #[cfg(test)]
@@ -1721,8 +1728,12 @@ mod tests {
 
     #[test]
     fn empty_scan_claims_nothing() {
-        let shapes = empty_shapes(&ProminenceThresholds::default());
+        let shapes = empty_shapes(5, 100, &ProminenceThresholds::default(), true);
         assert_eq!(shapes.n_scanned, 0);
+        assert!(shapes.exhaustive);
+        // The rungs are in observations of the run's n, not of n = 0.
+        let rungs: Vec<u32> = shapes.ladder.iter().map(|r| r.min_prominence_counts).collect();
+        assert_eq!(rungs, vec![2, 5, 10]);
         assert_eq!(shapes.can_be_unimodal(), None);
         assert_eq!(shapes.can_be_bell_shaped(), None);
         assert!(shapes.proportion_of(ShapeClass::Flat).is_nan());
