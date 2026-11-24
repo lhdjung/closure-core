@@ -35,6 +35,14 @@ const LP_COVERAGE_THRESHOLD: f64 = 0.99;
 // ponytail: a sample rarer than about 1 in 1,000 draws can still be missed;
 // raise this if such samples matter more than the time on small spaces.
 const MIN_DRAWS: u64 = 5_000;
+/// Most grid values a SPRITE scale may have, counting
+/// `(scale_max - scale_min) * items + 1`. Every sample is stored as one `u32`
+/// count per grid value, twice (once to deduplicate, once in the results), so
+/// this caps a sample at 400 KB.
+/// Without it, 0..=10,000,000 passed every check and each sample took 40 MB
+/// however small n was. Covers any Likert scale at 100 items, and scales of
+/// up to 99,999 points at one item.
+const MAX_GRID_WIDTH: usize = 100_000;
 
 // Internal struct to hold the final, validated parameters (generic version)
 #[derive(Debug)]
@@ -133,6 +141,14 @@ where
         return Err(ParameterError::InputValidation(
             "items must be between 1 and 100".to_string(),
         ));
+    }
+    let k = (scale_max_i32 as i64 - scale_min_i32 as i64) * items as i64 + 1;
+    if k > MAX_GRID_WIDTH as i64 {
+        return Err(ParameterError::InputValidation(format!(
+            "The scale has {k} grid values, (scale_max - scale_min) * items + 1, but SPRITE \
+             allows at most {MAX_GRID_WIDTH}: it stores every sample as one count per grid \
+             value, 400 KB per sample at that limit"
+        )));
     }
     // The internal grid is `1 / items` apart, so it represents every value a
     // multi-item mean can take exactly. Deriving it from the rounding errors
@@ -518,7 +534,10 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 /// * `sd` - The target standard deviation
 /// * `n` - The number of observations (generic integer type)
 /// * `scale_min` - The minimum value on the scale (generic integer type)
-/// * `scale_max` - The maximum value on the scale (generic integer type)
+/// * `scale_max` - The maximum value on the scale (generic integer type).
+///   The scale may have at most 100,000 grid values, counting
+///   `(scale_max - scale_min) * items + 1`, because every sample is stored as
+///   one count per grid value
 /// * `rounding_error_mean` - A sample is accepted when its mean is within this
 ///   distance of `mean`, inclusive — the same rule CLOSURE applies
 /// * `rounding_error_sd` - Likewise for the sample SD
@@ -633,7 +652,10 @@ where
 /// * `sd` - The target standard deviation
 /// * `n` - The number of observations (generic integer type)
 /// * `scale_min` - The minimum value on the scale (generic integer type)
-/// * `scale_max` - The maximum value on the scale (generic integer type)
+/// * `scale_max` - The maximum value on the scale (generic integer type).
+///   The scale may have at most 100,000 grid values, counting
+///   `(scale_max - scale_min) * items + 1`, because every sample is stored as
+///   one count per grid value
 /// * `rounding_error_mean` - A sample is accepted when its mean is within this
 ///   distance of `mean`, inclusive — the same rule CLOSURE applies
 /// * `rounding_error_sd` - Likewise for the sample SD

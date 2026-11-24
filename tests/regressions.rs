@@ -1292,6 +1292,43 @@ fn sprite_rejects_huge_restriction_counts_without_building_them() {
 }
 
 #[test]
+fn sprite_rejects_a_grid_too_wide_to_store() {
+    use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
+
+    // 0..=10,000,000 fits the output grid's keys, so it passed, and every
+    // sample row held ten million counts, 40 MB, even at n = 2.
+    // An SD no sample reaches, so an accepted grid returns at once, without
+    // shape statistics over 100,000 grid values.
+    let run = |scale_max: i32, items: u32| {
+        sprite_parallel::<f64, i32>(
+            scale_max as f64 / 2.0,
+            1e9,
+            2,
+            0,
+            scale_max,
+            0.05,
+            0.05,
+            items,
+            None,
+            RestrictionsOption::Null,
+            None,
+            Some(1),
+            None,
+        )
+    };
+    match run(10_000_000, 1) {
+        Err(ParameterError::InputValidation(msg)) => {
+            assert!(msg.contains("at most 100000"), "{msg}")
+        }
+        other => panic!("expected an input error, got {:?}", other.map(|r| r.results.len())),
+    }
+    // The limit counts grid values, items included: 99,999 at one item fits,
+    // 1,000 at 100 items does not.
+    assert!(run(99_998, 1).is_ok());
+    assert!(run(1_000, 100).is_err());
+}
+
+#[test]
 fn a_limited_run_that_saw_everything_is_exhaustive() {
     // `stop_after` used to mark every limited run as partial, so `can_be`
     // answered `None` even when the limit was never reached.
