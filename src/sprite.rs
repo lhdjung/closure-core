@@ -341,6 +341,7 @@ where
         .sum();
     let mean_f64 = T::to_f64(&mean).unwrap_or(f64::NAN);
     let units = scale_factor as f64;
+    let (re_mean, re_sd) = crate::widened_for_precision::<T>(mean_f64, sd_f64, re_mean, re_sd);
     let bounds = SearchBounds::new(
         mean_f64 * units,
         sd_f64 * units,

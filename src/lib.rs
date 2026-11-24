@@ -740,6 +740,29 @@ fn with_slack(x: f64, up: bool) -> f64 {
     }
 }
 
+/// The rounding errors, widened by how precisely `T` holds the inputs.
+///
+/// An input is the decimal the caller typed only to within its type's
+/// precision: `3.13_f32` is 3.1300001, and `0.005_f32` is 0.0049999999. For
+/// f32 that error is far above the slack in [`with_slack`], so a sample whose
+/// statistic sits exactly on a bound was dropped: n = 16, mean 3.13 ± 0.005
+/// on 1..=5 admits 174 samples, all with mean 3.125, and f32 found none.
+/// Rounding to `T` moves each input by at most half its relative precision,
+/// so widening by twice that covers it. For f64 inputs the widening is about
+/// 1e-15 of the inputs and changes nothing.
+pub(crate) fn widened_for_precision<T: FloatType>(
+    mean: f64,
+    sd: f64,
+    re_mean: f64,
+    re_sd: f64,
+) -> (f64, f64) {
+    let eps = T::epsilon().to_f64().unwrap_or(0.0);
+    (
+        re_mean + 2.0 * eps * (mean.abs() + re_mean),
+        re_sd + 2.0 * eps * (sd + re_sd),
+    )
+}
+
 /// Integer-exact acceptance bounds for a CLOSURE search.
 ///
 /// Shared by the DFS in this file and the DP counter in [`count`], so the two
@@ -861,6 +884,7 @@ impl ClosureInputs {
             return invalid("sd and the rounding errors must not be negative");
         }
         let n = n_i64 as usize;
+        let (re_mean, re_sd) = widened_for_precision::<T>(mean, sd, re_mean, re_sd);
         Ok(Self {
             n,
             scale_min,

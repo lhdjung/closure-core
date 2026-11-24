@@ -306,6 +306,42 @@ fn a_huge_stop_after_means_no_limit() {
 }
 
 #[test]
+fn f32_inputs_find_samples_exactly_on_a_bound() {
+    // n = 16, mean 3.13 ± 0.005: the lowest admissible mean is 3.125, a sum
+    // of exactly 50, and every sample here has it. In f32, 3.13 - 0.005 is a
+    // little above 3.125, which put the bound past 50 and lost all of them.
+    let f64_count = closure_count(3.13, 1.0, 16, 1, 5, 0.005, 5.0).unwrap();
+    assert_eq!(f64_count, 174);
+    let found = closure_parallel::<f32, i32>(3.13, 1.0, 16, 1, 5, 0.005, 5.0, 1, None, None, None)
+        .unwrap()
+        .results
+        .len();
+    assert_eq!(found as u64, f64_count);
+
+    let sprite = closure_core::sprite_parallel::<f32, i32>(
+        3.13,
+        1.0,
+        16,
+        1,
+        5,
+        0.005,
+        5.0,
+        1,
+        None,
+        closure_core::RestrictionsOption::Null,
+        None,
+        Some(20),
+        None,
+    )
+    .unwrap();
+    assert!(sprite.results.len() > 0, "SPRITE found nothing in f32");
+    for i in 0..sprite.results.len() {
+        let total: i32 = sprite.results.sample(i).iter().sum();
+        assert_eq!(total, 5000, "sample {i} in hundredths");
+    }
+}
+
+#[test]
 fn the_counter_rejects_what_the_search_rejects() {
     // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
     // read as "SD between 0 and 0.95" and counted 10 samples. It now returns
