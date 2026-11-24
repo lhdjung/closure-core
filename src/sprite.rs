@@ -7,7 +7,6 @@ use crate::{
     ProminenceThresholds, ResultListFromMeanSdN, SampleCounts, SampleFormat, SearchBounds,
     StreamingConfig, StreamingFrequencyState, StreamingResult, ValueGrid,
 };
-use core::f64;
 use num::NumCast;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -535,12 +534,14 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 /// does not divide 100; see [`crate::ResultsTable::sample`].
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// use closure_core::{sprite_parallel, RestrictionsOption};
+///
 /// let results = sprite_parallel(
 ///     2.2_f64, 1.3_f64, 20, 1, 5,
 ///     0.05, 0.05, 1,
 ///     None, RestrictionsOption::Default,
-///     None, Some(5),
+///     None, Some(5), None,
 /// ).unwrap();
 /// ```
 #[allow(clippy::too_many_arguments)]
