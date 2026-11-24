@@ -1874,7 +1874,7 @@ where
     // was skipped or cut, since either takes `limit` samples found.
     let exhaustive = stop_after.is_none_or(|limit| results.len() / k < limit);
     if let Some(limit) = stop_after {
-        results.truncate(limit * k);
+        results.truncate(limit.saturating_mul(k));
     }
 
     // Calculate all statistics

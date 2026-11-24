@@ -277,6 +277,35 @@ fn a_deep_search_does_not_overflow_the_stack() {
 }
 
 #[test]
+fn a_huge_stop_after_means_no_limit() {
+    // `limit * k` wrapped: 2^62 times 4 values is 0 in release builds, so the
+    // result was truncated to nothing; debug builds panicked.
+    let all = closure_parallel::<f64, i32>(2.5, 1.0, 10, 1, 4, 0.05, 0.05, 1, None, None, None)
+        .unwrap()
+        .results
+        .len();
+    assert!(all > 0);
+    for limit in [1usize << 62, usize::MAX] {
+        let results = closure_parallel::<f64, i32>(
+            2.5,
+            1.0,
+            10,
+            1,
+            4,
+            0.05,
+            0.05,
+            1,
+            None,
+            Some(limit),
+            None,
+        )
+        .unwrap();
+        assert_eq!(results.results.len(), all, "stop_after = {limit}");
+        assert!(results.modality_shapes.exhaustive);
+    }
+}
+
+#[test]
 fn the_counter_rejects_what_the_search_rejects() {
     // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
     // read as "SD between 0 and 0.95" and counted 10 samples. It now returns
