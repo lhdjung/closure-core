@@ -1071,7 +1071,17 @@ where
     let mut running_sum_sq: i64 = vec.iter().map(|v| U::to_i64(v).unwrap().pow(2)).sum();
     let n_i64 = n_usize as i64;
 
-    // Shifts in a row that found no move, each after `2 n` random tries.
+    // Once `2 n` random tries find no move, useful moves are rare, and the
+    // attempt switches to a scan over every pair of values for good: it finds
+    // a move whenever one exists, and costs less than random tries that
+    // mostly miss. Giving up after a few fruitless random shifts instead lost
+    // samples near the widest SD, where the last useful move can be one of
+    // about `2 n²`: mean 3, sd 2, n 1000 on 1..=5 found none of its 23.
+    let mut scanning = false;
+    // Shifts since the distance to the SD band last shrank. With rare moves,
+    // a total that cannot hit the band makes the attempt bounce across it:
+    // mean 3, sd 0.08, n 300 on 1..=5 took minutes to find its one sample.
+    let mut best_distance = i64::MAX;
     let mut stuck = 0;
     for _ in 1..=max_loops_sd {
         // `n·Σx² − (Σx)²` is exact, and `build_sprite_params` made sure it
@@ -1087,20 +1097,32 @@ where
         if vec.len() < 2 {
             break;
         }
-
-        // Shift values to adjust SD (updates running sums in O(1)). Every
-        // shift keeps the total, so the mean needs no correction afterwards.
         let increase_sd = m2n < params.m2n_lo;
-        if shift_values_internal(&mut vec, params, increase_sd, &mut running_sum_sq, rng) {
-            stuck = 0;
+        let distance = if increase_sd {
+            params.m2n_lo - m2n
         } else {
+            m2n - params.m2n_hi
+        };
+        if distance < best_distance {
+            best_distance = distance;
+            stuck = 0;
+        } else if scanning {
             stuck += 1;
-            // Almost surely no move is left: give the attempt up rather than
-            // run out its loop limit, which made each trapped start cost
-            // ~20,000 fruitless shifts.
             if stuck == 10 {
                 break;
             }
+        }
+
+        // Shift values to adjust SD (updates running sums in O(1)). Every
+        // shift keeps the total, so the mean needs no correction afterwards.
+        let moved = (!scanning
+            && shift_values_internal(&mut vec, params, increase_sd, &mut running_sum_sq, rng))
+            || {
+                scanning = true;
+                shift_values_exhaustive(&mut vec, params, increase_sd, &mut running_sum_sq, rng)
+            };
+        if !moved {
+            break;
         }
     }
 
@@ -1296,6 +1318,150 @@ where
     }
 
     false
+}
+
+/// Find a move [`shift_values_internal`] missed, or establish that none is
+/// left.
+///
+/// The same moves, taken over the values present rather than at random
+/// positions: a stage 1 move chosen at random among all that help, failing
+/// that the stage 2 split whose parts help most. With `P` distinct values
+/// present this costs `O(n + P²)`.
+// ponytail: quadratic in distinct values, which is at most `min(n, k)`; fine
+// on Likert grids, revisit if wide multi-item grids with huge n get slow.
+fn shift_values_exhaustive<U>(
+    vec: &mut [U],
+    params: &SpriteParams<U>,
+    increase_sd: bool,
+    running_sum_sq: &mut i64,
+    rng: &mut impl Rng,
+) -> bool
+where
+    U: IntegerType,
+{
+    let pv = &params.possible_values_scaled;
+    let val = |j: usize| U::to_i64(&pv[j]).unwrap();
+    let index_of = |v: i64| params.value_to_index.get(&v).copied();
+    let helps = |d_sq: i64| if increase_sd { d_sq > 0 } else { d_sq < 0 };
+    // Grid neighbours of `a`, in both directions.
+    let neighbours = |a: usize| [a.checked_sub(1), Some(a + 1).filter(|&j| j < pv.len())];
+
+    let mut count = vec![0usize; pv.len()];
+    for v in vec.iter() {
+        count[index_of(U::to_i64(v).unwrap()).expect("free values sit on the grid")] += 1;
+    }
+    let present: Vec<usize> = (0..pv.len()).filter(|&j| count[j] > 0).collect();
+
+    // Stage 1: one value to a neighbour, another the same distance back.
+    let mut chosen = None;
+    let mut seen = 0u64;
+    for &a in &present {
+        for a_new in neighbours(a).into_iter().flatten() {
+            let step = val(a_new) - val(a);
+            let d1 = val(a_new).pow(2) - val(a).pow(2);
+            for &b in &present {
+                if b == a && count[a] < 2 {
+                    continue;
+                }
+                let Some(b_new) = index_of(val(b) - step) else {
+                    continue;
+                };
+                let d_sq = d1 + val(b_new).pow(2) - val(b).pow(2);
+                if helps(d_sq) {
+                    // Reservoir sampling: each helpful move equally likely.
+                    seen += 1;
+                    if rng.random_range(0..seen) == 0 {
+                        chosen = Some((a, a_new, b, b_new, d_sq));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((a, a_new, b, b_new, d_sq)) = chosen {
+        apply_move(vec, pv, (a, a_new), &[(b, b_new, 1)]);
+        *running_sum_sq += d_sq;
+        return true;
+    }
+
+    // Stage 2: a step across a gap, compensated in `parts` smaller steps by
+    // the copies whose moves help most.
+    for &a in &present {
+        for a_new in neighbours(a).into_iter().flatten() {
+            let step = val(a_new) - val(a);
+            if step.abs() < 2 * params.min_step {
+                continue;
+            }
+            let d1 = val(a_new).pow(2) - val(a).pow(2);
+            for parts in 2..=(step.abs() / params.min_step).min(10) {
+                if step % parts != 0 {
+                    continue;
+                }
+                let sub = step / parts;
+                let mut candidates: Vec<(i64, usize, usize, usize)> = present
+                    .iter()
+                    .filter_map(|&j| {
+                        let copies = count[j] - (j == a) as usize;
+                        let j_new = index_of(val(j) - sub)?;
+                        (copies > 0).then(|| (val(j_new).pow(2) - val(j).pow(2), j, j_new, copies))
+                    })
+                    .collect();
+                if increase_sd {
+                    candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
+                } else {
+                    candidates.sort_by_key(|c| c.0);
+                }
+                let mut need = parts as usize;
+                let mut d_sq = d1;
+                let mut moves = Vec::new();
+                for (gain, j, j_new, copies) in candidates {
+                    let take = copies.min(need);
+                    d_sq += gain * take as i64;
+                    moves.push((j, j_new, take));
+                    need -= take;
+                    if need == 0 {
+                        break;
+                    }
+                }
+                if need == 0 && helps(d_sq) {
+                    apply_move(vec, pv, (a, a_new), &moves);
+                    *running_sum_sq += d_sq;
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Move one copy of `pv[first.0]` to `pv[first.1]`, then for each
+/// `(j, j_new, copies)` that many other values from `pv[j]` to `pv[j_new]`.
+/// A value moves at most once, so the first move is never undone.
+fn apply_move<U: IntegerType>(
+    vec: &mut [U],
+    pv: &[U],
+    first: (usize, usize),
+    moves: &[(usize, usize, usize)],
+) {
+    let mut moved = vec![false; vec.len()];
+    let i = vec
+        .iter()
+        .position(|v| *v == pv[first.0])
+        .expect("the value is present");
+    vec[i] = pv[first.1];
+    moved[i] = true;
+    for &(j, j_new, copies) in moves {
+        let mut left = copies;
+        for (k, v) in vec.iter_mut().enumerate() {
+            if left == 0 {
+                break;
+            }
+            if !moved[k] && *v == pv[j] {
+                *v = pv[j_new];
+                moved[k] = true;
+                left -= 1;
+            }
+        }
+    }
 }
 
 /// Calculate mean of a slice
@@ -1681,6 +1847,47 @@ pub mod tests {
              (CLOSURE finds 24,907 for these inputs). \
              LP stopping criterion may be broken."
         );
+    }
+
+    #[test]
+    fn the_exhaustive_scan_finds_the_one_move_left() {
+        // Near the widest SD on 1..=5, `2 4` among 499 1s and 499 5s has one
+        // move that raises the SD: the 2 to 1 and the 4 to 5. Random tries
+        // hit it about once in n shifts, and attempts used to give up first.
+        let params = build_sprite_params::<f64, i32>(
+            3.0,
+            2.0,
+            1000,
+            1,
+            5,
+            0.005,
+            0.001,
+            1,
+            None,
+            RestrictionsOption::Null,
+        )
+        .unwrap();
+        let mut rng = rand::rng();
+        let mut vec: Vec<i32> = [vec![1; 499], vec![5; 499], vec![2, 4]].concat();
+        let sum_sq = |v: &[i32]| v.iter().map(|&x| (x * x) as i64).sum::<i64>();
+        let mut running = sum_sq(&vec);
+        assert!(shift_values_exhaustive(
+            &mut vec,
+            &params,
+            true,
+            &mut running,
+            &mut rng
+        ));
+        assert!(vec.iter().all(|&v| v == 1 || v == 5));
+        assert_eq!(running, sum_sq(&vec));
+        // And then none is left, which ends the attempt.
+        assert!(!shift_values_exhaustive(
+            &mut vec,
+            &params,
+            true,
+            &mut running,
+            &mut rng
+        ));
     }
 
     #[test]
