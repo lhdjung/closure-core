@@ -481,33 +481,42 @@ fn classify_from_runs(runs: &[Run], min_prominence_counts: u32) -> ShapeClass {
 ///
 /// For a fixed peak position `p`, the largest weakly-unimodal vector lying under
 /// `counts` with its peak at `p` is the running minimum outward from `p`; the
-/// deficit is the mass that running minimum leaves behind. Runs in `O(k²)`.
+/// deficit is the mass that running minimum leaves behind. Runs in `O(k)`:
+/// trying each `p` in turn took `O(k²)`, about 10 s for one sample on a grid of
+/// 100,000 values.
 pub fn unimodality_deficit(counts: &[u32]) -> u32 {
-    let k = counts.len();
-    if k == 0 {
-        return 0;
-    }
-    let total: u32 = counts.iter().sum();
+    let total: u64 = counts.iter().map(|&c| c as u64).sum();
+    let left = running_min_sums(counts.iter().copied());
+    let mut right = running_min_sums(counts.iter().rev().copied());
+    right.reverse();
+    let kept = (0..counts.len())
+        .map(|p| left[p] + right[p] - counts[p] as u64)
+        .max()
+        .unwrap_or(0);
+    (total - kept) as u32
+}
 
-    let mut best = u32::MAX;
-    for p in 0..k {
-        let mut kept = counts[p];
-        let mut running = counts[p];
-        for i in (0..p).rev() {
-            running = running.min(counts[i]);
-            kept += running;
+/// For each position `p` of `counts`, the sum over `i <= p` of the smallest
+/// count in `i..=p`: what a running minimum outward from `p` keeps on its
+/// left. With `j` the last position before `p` holding a smaller count, every
+/// `i` in `j+1..=p` contributes `counts[p]` and every `i <= j` what it
+/// contributes from `j`, so one stack of strictly increasing counts gives
+/// all of them in `O(k)`.
+fn running_min_sums(counts: impl Iterator<Item = u32>) -> Vec<u64> {
+    let mut sums: Vec<u64> = Vec::new();
+    let mut smaller: Vec<(usize, u32)> = Vec::new(); // (position, count)
+    for (p, c) in counts.enumerate() {
+        while smaller.last().is_some_and(|&(_, s)| s >= c) {
+            smaller.pop();
         }
-        running = counts[p];
-        for &c in counts.iter().skip(p + 1) {
-            running = running.min(c);
-            kept += running;
-        }
-        best = best.min(total - kept);
-        if best == 0 {
-            break;
-        }
+        let sum = match smaller.last() {
+            Some(&(j, _)) => sums[j] + c as u64 * (p - j) as u64,
+            None => c as u64 * (p + 1) as u64,
+        };
+        smaller.push((p, c));
+        sums.push(sum);
     }
-    best
+    sums
 }
 
 /// Per-value count bounds over the members of one [`ShapeClass`].
@@ -1499,6 +1508,39 @@ mod tests {
         // than 5 at every later position: 40 + 5*4 = 60 of the 100 survive, so
         // 40 observations have to go before the shape is single-peaked.
         assert_eq!(unimodality_deficit(&[40, 5, 10, 5, 40]), 40);
+    }
+
+    #[test]
+    fn the_linear_deficit_matches_trying_every_peak() {
+        // The definition, one peak position at a time, as the function used to
+        // compute it.
+        fn by_every_peak(counts: &[u32]) -> u32 {
+            let total: u32 = counts.iter().sum();
+            (0..counts.len())
+                .map(|p| {
+                    let mut kept = counts[p];
+                    let mut running = counts[p];
+                    for &c in counts[..p].iter().rev() {
+                        running = running.min(c);
+                        kept += running;
+                    }
+                    running = counts[p];
+                    for &c in &counts[p + 1..] {
+                        running = running.min(c);
+                        kept += running;
+                    }
+                    total - kept
+                })
+                .min()
+                .unwrap_or(0)
+        }
+        // Every vector of length up to 6 with counts up to 4, ties included.
+        for k in 0..=6u32 {
+            for code in 0..5u32.pow(k) {
+                let v: Vec<u32> = (0..k).map(|i| code / 5u32.pow(i) % 5).collect();
+                assert_eq!(unimodality_deficit(&v), by_every_peak(&v), "{v:?}");
+            }
+        }
     }
 
     #[test]
