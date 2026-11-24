@@ -32,7 +32,7 @@
 //! | `counts.parquet` | one row per sample: a count column per scale value, then `horns`. A sample's id is its row number. |
 //! | `scale_values.parquet` | which scale value each count column stands for |
 //! | `format.parquet` | format name, version, technique, `n`, `k`, `items`, scale bounds |
-//! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics |
+//! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics; `metrics_horns` ends with the single-peak ceiling and whether the reported SD is beyond it |
 //! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
 //! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
 //! | `modality_summary` | one row: samples per shape class at the primary cutoff (`n_*`) and anywhere in the band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread, the smallest and largest gap between a sample's tallest and shortest bar (`bar_gap_*`, in observations and as a share of the average bar), how clearly a second peak stands out (`second_peak_*`) and how far the tallest peak stands above the bars towards the nearer scale end (`edge_drop_*`), both in observations |
@@ -68,6 +68,15 @@
 //! sample's bars are (flatness), `second_peak_*` how clearly a second peak
 //! stands out (multimodality), and `edge_drop_*` how far the tallest peak is
 //! from the nearer end of the scale (a bell or a floor or ceiling effect).
+//!
+//! One shape conclusion needs no samples and no cutoff. The reported SD fixes
+//! every sample's horns index, and no single-peaked histogram on a scale of
+//! `k` values has a horns index above [`single_peak_ceiling`],
+//! `(2k − 1)² / (9 (k − 1)²)`. When even the lowest SD the rounding allows is
+//! beyond it, `metrics_horns` says `beyond_single_peak`: every histogram with
+//! that SD has a dip, so the original data was not single-peaked. That holds
+//! for SPRITE and truncated runs too. On a 1–5 scale the line is a population
+//! SD of 1.5.
 //!
 //! Two more points on reading the output:
 //!
@@ -602,6 +611,48 @@ pub struct MetricsHorns {
     pub median: f64,
     pub max: f64,
     pub range: f64,
+    /// The highest horns index any single-peaked histogram on this grid can
+    /// have; see [`single_peak_ceiling`]. `NaN` for an empty result list
+    /// built without a grid's search bounds.
+    pub single_peak_ceiling: f64,
+    /// True when even the lowest SD the reported SD and its rounding error
+    /// allow puts the horns index above [`Self::single_peak_ceiling`]: every
+    /// histogram with that SD has a dip somewhere, so, if the reported
+    /// statistics are right, the original data was not single-peaked.
+    ///
+    /// This follows from the SD and the scale alone, without any samples, so
+    /// it holds for SPRITE and for truncated runs too. It is about strictly
+    /// single-peaked histograms, rising and then falling with no dip at all;
+    /// at a prominence cutoff a small dip does not count as a second mode.
+    /// When no sample exists at all, the reported statistics contradict each
+    /// other, and that finding comes first.
+    pub beyond_single_peak: bool,
+}
+
+/// The highest horns index a single-peaked histogram on `k` evenly spaced
+/// values can have: `(2k − 1)² / (9 (k − 1)²)`.
+///
+/// Single-peaked means rising and then falling with no dip, ties allowed
+/// (zero [`unimodality_deficit`](modality::unimodality_deficit)). The maximum
+/// is reached by a floor or ceiling effect: one end holding `(k − 2) / (3(k −
+/// 1))` of the sample more than each other value, the rest spread evenly.
+/// 0.5625 on 5 values, 0.52 on 7, falling towards 4/9 on long scales. The
+/// uniform histogram has `(k + 1) / (3 (k − 1))`, lower by
+/// `(k − 2)² / (9 (k − 1)²)`: a horns index above the uniform one does not yet
+/// rule out a single peak. The derivation is in `protocols/horns-and-shapes.qmd`.
+pub fn single_peak_ceiling(k: usize) -> f64 {
+    let m = k.saturating_sub(1) as f64;
+    (2.0 * m + 1.0).powi(2) / (9.0 * m * m)
+}
+
+/// Whether the lowest admissible `n·Σx² − (Σx)²`, in grid steps, puts every
+/// admissible sample above [`single_peak_ceiling`]. Exact: the population
+/// variance is `m2n / n²`, the ceiling on it `((2m + 1) / 6)²` for `m = k − 1`
+/// steps, so the test is `36 · m2n > (2m + 1)² · n²` in integers.
+pub(crate) fn beyond_single_peak(m2n_lo: i64, n: usize, k: usize) -> bool {
+    let m = k.saturating_sub(1) as i128;
+    let n = n as i128;
+    36 * (m2n_lo as i128) > (2 * m + 1).pow(2) * n * n
 }
 
 /// Results table combining reconstructed samples and their horns values.
@@ -707,12 +758,12 @@ impl<U: IntegerType> ResultListFromMeanSdN<U> {
             1,
             100,
         );
-        empty_result_list(grid, 0, &ProminenceThresholds::default(), false)
+        empty_result_list(grid, 0, &ProminenceThresholds::default(), false, false)
     }
 
     /// Create an empty result list over an explicit value grid.
     pub fn empty_on_grid(grid: ValueGrid, n: usize) -> Self {
-        empty_result_list(grid, n, &ProminenceThresholds::default(), false)
+        empty_result_list(grid, n, &ProminenceThresholds::default(), false, false)
     }
 }
 
@@ -1367,6 +1418,7 @@ pub(crate) fn empty_result_list<U>(
     n: usize,
     thresholds: &ProminenceThresholds,
     exhaustive: bool,
+    beyond_single_peak: bool,
 ) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
@@ -1396,6 +1448,8 @@ where
             median: f64::NAN,
             max: f64::NAN,
             range: f64::NAN,
+            single_peak_ceiling: single_peak_ceiling(group_size),
+            beyond_single_peak,
         },
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(group_size),
@@ -1441,6 +1495,7 @@ fn counts_to_result_list<U>(
     counts: SampleCounts,
     exhaustive: bool,
     thresholds: &ProminenceThresholds,
+    beyond_single_peak: bool,
 ) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
@@ -1451,7 +1506,7 @@ where
     // Handle empty samples case
     if counts.is_empty() {
         let n = counts.n();
-        return empty_result_list(grid, n, thresholds, exhaustive);
+        return empty_result_list(grid, n, thresholds, exhaustive, beyond_single_peak);
     }
 
     let n = counts.n();
@@ -1569,6 +1624,8 @@ where
             median: horns_median,
             max: horns_max,
             range: horns_max - horns_min,
+            single_peak_ceiling: single_peak_ceiling(group_size),
+            beyond_single_peak,
         },
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(group_size),
@@ -1724,6 +1781,8 @@ fn create_stats_writers(
         Field::new("median", DataType::Float64, false),
         Field::new("max", DataType::Float64, false),
         Field::new("range", DataType::Float64, false),
+        Field::new("single_peak_ceiling", DataType::Float64, false),
+        Field::new("beyond_single_peak", DataType::Boolean, false),
     ]));
     let metrics_horns_file = File::create(format!("{}metrics_horns.parquet", base_path))?;
     let metrics_horns_writer =
@@ -1945,8 +2004,12 @@ where
     // When `stop_after` truncates the enumeration, the result set is only
     // part of the solution space, and an unseen shape says nothing about the
     // original data.
-    let closure_results: ResultListFromMeanSdN<U> =
-        counts_to_result_list(counts, exhaustive, &thresholds);
+    let closure_results: ResultListFromMeanSdN<U> = counts_to_result_list(
+        counts,
+        exhaustive,
+        &thresholds,
+        beyond_single_peak(ctx.m2n_lo, ctx.n, ctx.scale_range()),
+    );
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -2038,6 +2101,12 @@ pub(crate) fn write_statistics_files<U>(
             Arc::new(Float64Array::from(vec![results.metrics_horns.median])),
             Arc::new(Float64Array::from(vec![results.metrics_horns.max])),
             Arc::new(Float64Array::from(vec![results.metrics_horns.range])),
+            Arc::new(Float64Array::from(vec![
+                results.metrics_horns.single_peak_ceiling,
+            ])),
+            Arc::new(BooleanArray::from(vec![
+                results.metrics_horns.beyond_single_peak,
+            ])),
         ],
     );
     mh_writer.write(&mh_batch?)?;
@@ -2421,6 +2490,7 @@ fn write_modality_to_parquet<U>(
 ///
 /// Rebuilds the same tables memory mode produces from the running state, then
 /// hands them to the shared writer, so both modes emit identical files.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_streaming_statistics(
     base_path: &str,
     all_horns: &[f64],
@@ -2429,12 +2499,18 @@ pub(crate) fn write_streaming_statistics(
     final_freq_state: Arc<Mutex<StreamingFrequencyState>>,
     exhaustive: bool,
     thresholds: &ProminenceThresholds,
+    beyond_single_peak: bool,
 ) -> Result<(), ParameterError> {
     let samples_all = all_horns.len();
     if samples_all == 0 {
         // Still create the files so a reader finds a complete, empty result set.
-        let results: ResultListFromMeanSdN<i32> =
-            empty_result_list(grid.clone(), n_usize, thresholds, exhaustive);
+        let results: ResultListFromMeanSdN<i32> = empty_result_list(
+            grid.clone(),
+            n_usize,
+            thresholds,
+            exhaustive,
+            beyond_single_peak,
+        );
         return write_statistics_files(base_path, &results).map_err(output_error);
     }
 
@@ -2531,6 +2607,8 @@ pub(crate) fn write_streaming_statistics(
             median: horns_median,
             max: horns_max,
             range: horns_max - horns_min,
+            single_peak_ceiling: single_peak_ceiling(k),
+            beyond_single_peak,
         },
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(k),
@@ -2739,6 +2817,7 @@ where
                 // the space.
                 found_count < limit,
                 &thresholds,
+                beyond_single_peak(ctx.m2n_lo, ctx.n, ctx.scale_range()),
             )?;
 
             return Ok(StreamingResult {
@@ -2850,6 +2929,7 @@ where
         // limit means no branch was skipped or cut short.
         stop_after.is_none_or(|limit| total_counter.load(Ordering::Relaxed) < limit),
         &thresholds,
+        beyond_single_peak(ctx.m2n_lo, ctx.n, ctx.scale_range()),
     )?;
 
     Ok(StreamingResult {
@@ -3143,6 +3223,73 @@ mod tests {
             checked > 10_000,
             "the sweep found too few samples to mean much: {checked}"
         );
+    }
+
+    #[test]
+    fn the_single_peak_ceiling_is_the_highest_horns_a_single_peak_reaches() {
+        assert_eq!(single_peak_ceiling(2), 1.0);
+        assert_eq!(single_peak_ceiling(5), 0.5625);
+        assert!((single_peak_ceiling(7) - 169.0 / 324.0).abs() < 1e-15);
+        // Falling towards 4/9, above the uniform histogram's horns by
+        // (k − 2)² / (9 (k − 1)²), so equal to it only on two values.
+        let mut last = f64::MAX;
+        for k in 2..200 {
+            let (c, m) = (single_peak_ceiling(k), (k - 1) as f64);
+            assert!(c < last && c > 4.0 / 9.0, "k = {k}");
+            let above_uniform = (m - 1.0).powi(2) / (9.0 * m * m);
+            assert!(
+                (c - horns_uniform(k) - above_uniform).abs() < 1e-12,
+                "k = {k}"
+            );
+            last = c;
+        }
+        assert!(single_peak_ceiling(100_000) - 4.0 / 9.0 < 1e-4);
+        // The floor effect that reaches it: on 1..=5, 40 at the bottom and 15
+        // on every other value.
+        assert_eq!(horns_from_counts(&[40.0, 15.0, 15.0, 15.0, 15.0]), 0.5625);
+
+        // Every histogram of n over k values: a single-peaked one never has a
+        // horns index above the ceiling, and the exact integer test flags a
+        // histogram's own spread only when it has a dip.
+        fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+            if row.len() == k - 1 {
+                row.push(n);
+                out.push(row.clone());
+                row.pop();
+                return;
+            }
+            for c in 0..=n {
+                row.push(c);
+                compositions(k, n - c, row, out);
+                row.pop();
+            }
+        }
+        for (k, n) in [(3, 40), (4, 24), (5, 20), (6, 14), (7, 12)] {
+            let mut rows = Vec::new();
+            compositions(k, n, &mut Vec::new(), &mut rows);
+            let mut highest = 0.0f64;
+            for row in rows {
+                let (sum, ssq) = row
+                    .iter()
+                    .enumerate()
+                    .fold((0i64, 0i64), |(s, q), (i, &c)| {
+                        (s + i as i64 * c as i64, q + (i * i) as i64 * c as i64)
+                    });
+                let m2n = n as i64 * ssq - sum * sum;
+                let single = modality::unimodality_deficit(&row) == 0;
+                let horns = horns_from_counts(&row.iter().map(|&c| c as f64).collect::<Vec<_>>());
+                if single {
+                    highest = highest.max(horns);
+                    assert!(!beyond_single_peak(m2n, n as usize, k), "{row:?}");
+                }
+                assert_eq!(
+                    beyond_single_peak(m2n, n as usize, k),
+                    horns > single_peak_ceiling(k) + 1e-12,
+                    "{row:?}"
+                );
+            }
+            assert!(highest <= single_peak_ceiling(k) + 1e-12, "k = {k}");
+        }
     }
 
     #[test]

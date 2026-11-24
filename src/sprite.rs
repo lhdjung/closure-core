@@ -640,13 +640,18 @@ where
     // the grid's real resolution, which for a multi-item scale is finer than a
     // whole scale point.
     let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
+    let beyond_single_peak = crate::beyond_single_peak(
+        params.m2n_lo,
+        U::to_usize(&params.n).expect("n was validated"),
+        grid.len(),
+    );
     let counts = find_distributions_all_internal(&params, grid, stop_after);
 
     // Calculate all statistics using the shared function from lib.rs SPRITE
     // searches the solution space at random rather than enumerating it, so a
     // shape it never generated has not been ruled out.
     let sprite_results: ResultListFromMeanSdN<U> =
-        counts_to_result_list(counts, false, &thresholds);
+        counts_to_result_list(counts, false, &thresholds, beyond_single_peak);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -820,6 +825,7 @@ where
         final_freq_state,
         false,
         &thresholds,
+        crate::beyond_single_peak(params.m2n_lo, n_usize, grid.len()),
     )?;
 
     Ok(StreamingResult {

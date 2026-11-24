@@ -367,6 +367,45 @@ fn a_wide_scale_is_searched_without_listing_millions_of_seeds() {
 }
 
 #[test]
+fn an_sd_beyond_the_single_peak_ceiling_is_flagged() {
+    // On 1..=5 no single-peaked histogram has a population SD above 1.5,
+    // which at n = 100 is a sample SD of 1.5076. SD 1.52 ± 0.005 is beyond
+    // it even at its lowest; SD 1.51 ± 0.005 is not.
+    let closure = |sd: f64| {
+        closure_parallel::<f64, i32>(2.5, sd, 100, 1, 5, 0.005, 0.005, 1, None, None, None).unwrap()
+    };
+    let beyond = closure(1.52);
+    assert!(beyond.metrics_horns.beyond_single_peak);
+    assert_eq!(beyond.metrics_horns.single_peak_ceiling, 0.5625);
+    assert!(!beyond.results.is_empty());
+    assert!(
+        beyond.modality_shapes.deficit_min > 0,
+        "every sample has a dip"
+    );
+    assert!(!closure(1.51).metrics_horns.beyond_single_peak);
+
+    // SPRITE draws at random and never rules a shape out by itself, but the
+    // flag follows from the SD alone.
+    let sprite = closure_core::sprite_parallel::<f64, i32>(
+        2.5,
+        1.52,
+        100,
+        1,
+        5,
+        0.005,
+        0.005,
+        1,
+        None,
+        closure_core::RestrictionsOption::Null,
+        None,
+        Some(10),
+        None,
+    )
+    .unwrap();
+    assert!(sprite.metrics_horns.beyond_single_peak);
+}
+
+#[test]
 fn the_counter_rejects_what_the_search_rejects() {
     // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
     // read as "SD between 0 and 0.95" and counted 10 samples. It now returns
