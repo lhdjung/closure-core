@@ -191,6 +191,24 @@ where
         }
     }
 
+    let n_usize = U::to_usize(&n).unwrap_or(0);
+    if n_usize < 2 {
+        return Err(ParameterError::InputValidation(
+            "n must be at least 2".to_string(),
+        ));
+    }
+    // Counted before the fixed responses are built: a count of `usize::MAX`
+    // overflowed the vector's capacity, and one of 2^40 asked for terabytes.
+    let n_fixed = restrictions_exact
+        .values()
+        .chain(restrictions_minimum.iter().flat_map(|m| m.values()))
+        .try_fold(0usize, |sum, &count| sum.checked_add(count));
+    if !matches!(n_fixed, Some(f) if f <= n_usize) {
+        return Err(ParameterError::InputValidation(format!(
+            "The restrictions fix more responses than n ({n_usize})"
+        )));
+    }
+
     // Generate all possible scaled values
     let mut poss_values_scaled: Vec<U> = Vec::new();
     for i in 1..=items {
@@ -258,17 +276,6 @@ where
         .collect();
 
     let n_fixed = fixed_responses_scaled.len();
-    let n_usize = U::to_usize(&n).unwrap_or(0);
-    if n_usize < 2 {
-        return Err(ParameterError::InputValidation(
-            "n must be at least 2".to_string(),
-        ));
-    }
-    if n_fixed > n_usize {
-        return Err(ParameterError::InputValidation(format!(
-            "The restrictions fix {n_fixed} responses, but n is only {n_usize}"
-        )));
-    }
 
     let value_to_index: HashMap<i64, usize> = final_possible_values_scaled
         .iter()

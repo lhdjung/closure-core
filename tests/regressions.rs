@@ -1244,6 +1244,54 @@ fn sprite_rejects_an_infinite_sd_or_tolerance() {
 }
 
 #[test]
+fn sprite_rejects_huge_restriction_counts_without_building_them() {
+    use closure_core::{sprite_parallel, ParameterError, RestrictionsMinimum, RestrictionsOption};
+
+    // The fixed responses were built before their number was checked
+    // against n: a minimum count of `usize::MAX` panicked on capacity
+    // overflow, and an exact count of 2^40 asked for about 4 TB.
+    let run = |exact: Option<usize>, minimum: Option<usize>| {
+        sprite_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            1,
+            exact.map(|c| [(300, c)].into_iter().collect()),
+            minimum.map_or(RestrictionsOption::Null, |c| {
+                RestrictionsOption::new(RestrictionsMinimum::new([(300, c)].into_iter().collect()))
+            }),
+            None,
+            Some(1),
+            None,
+        )
+    };
+    for result in [run(None, Some(usize::MAX)), run(Some(1 << 40), None)] {
+        assert!(matches!(result, Err(ParameterError::InputValidation(_))));
+    }
+    // Counts whose sum overflows a usize.
+    let both = sprite_parallel::<f64, i32>(
+        3.0,
+        1.0,
+        20,
+        1,
+        5,
+        0.05,
+        0.05,
+        1,
+        Some([(300, usize::MAX)].into_iter().collect()),
+        RestrictionsOption::new(RestrictionsMinimum::new([(100, 2)].into_iter().collect())),
+        None,
+        Some(1),
+        None,
+    );
+    assert!(matches!(both, Err(ParameterError::InputValidation(_))));
+}
+
+#[test]
 fn a_limited_run_that_saw_everything_is_exhaustive() {
     // `stop_after` used to mark every limited run as partial, so `can_be`
     // answered `None` even when the limit was never reached.
