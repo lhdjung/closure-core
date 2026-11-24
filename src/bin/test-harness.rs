@@ -9,7 +9,7 @@ use std::io::Result;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use closure_core::{closure_parallel, count_initial_combinations};
+use closure_core::closure_parallel;
 
 fn main() -> std::io::Result<()> {
     println!("Running test harness...");
@@ -42,18 +42,6 @@ fn write_closure_csv(
         }
     }
 
-    // Setup progress bar
-    let n_usize = n as usize;
-    let depth = (n_usize / 10).clamp(2, 15.min(n_usize - 1));
-    let initial_count = count_initial_combinations(scale_min, scale_max, depth);
-    let bar = ProgressBar::new(initial_count as u64);
-    bar.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} Computing...")
-            .unwrap()
-            .progress_chars("=>-"),
-    );
-
     // Compute results (only this part is timed)
     let result = closure_parallel(
         mean,
@@ -85,6 +73,15 @@ fn write_closure_csv(
     } else {
         1 // Update for every combination if fewer than 100
     };
+
+    // The bar ticks once per chunk of samples written.
+    let bar = ProgressBar::new(total.div_ceil(chunk_size) as u64);
+    bar.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} Writing...")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
 
     // Expand one sample at a time: results are stored as frequency tables, so
     // the full matrix never has to exist in memory.
