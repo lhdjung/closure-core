@@ -36,6 +36,14 @@ const LP_COVERAGE_THRESHOLD: f64 = 0.99;
 /// Fewest successful draws before the duplicate rate may stop a search. On a
 /// small space the rate passes the threshold after a few hundred draws: with
 /// two samples SPRITE reaches once in 200 draws, one run in five missed one.
+///
+/// On a small space of expensive draws this floor sets the run time: mean 3,
+/// sd 2, n 1000 on 1..=5 with tolerances 0.005 and 0.001 has 23 samples,
+/// SPRITE finds 21 within its first few hundred draws, and the remaining
+/// draws take most of its 4–5 s. With tolerances of 0.05 the same mean and
+/// SD admit about a million samples, and a run without `stop_after` lasts
+/// until the duplicate rate or [`attempt_cap`] ends it, hours rather than
+/// seconds.
 // ponytail: a sample rarer than about 1 in 1,000 draws can still be missed;
 // raise this if such samples matter more than the time on small spaces.
 const MIN_DRAWS: u64 = 5_000;
