@@ -6,7 +6,7 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `bc29dec` on `optimize`.
+- **To:** closure-core `a248020` on `optimize`.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -14,7 +14,7 @@ this guide set out, is done in unsum `6d83a70`. That version is still in the
 history: `git show 21d63b9:UNSUM-MIGRATION.md`.
 
 Everything marked *verified* was run. The binding patch in section 3 was
-compiled with `cargo check` against `bc29dec`, without warnings. The R changes
+compiled with `cargo check` against `a248020`, without warnings. The R changes
 in section 4 were not run.
 
 ---
@@ -41,7 +41,7 @@ skipped.
 |---|---|---|---|---|
 | 1 | The commits after `7054029` are not on GitHub yet | everything | Push `optimize`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
 | 2 | The four entry points take a last `prominence` argument | compile | Pass `None` | `src/rust/src/lib.rs`, the calls at lines 421, 434, 468 and 481 |
-| 3 | `modality_summary` has four `bar_gap_*` columns | the schema check, in memory and on disk | Export them, and expect 22 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
+| 3 | `modality_summary` has eight new columns: `bar_gap_*`, `second_peak_*`, `edge_drop_*` | the schema check, in memory and on disk | Export them, and expect 26 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
 | 4 | Shape classes and SPRITE coverage changed | snapshot tests | Update snapshots and `NEWS.md` (section 5) | `tests/`, `NEWS.md` |
 | 5 | New input errors | nothing; they arrive as strings | Mention in `NEWS.md` (section 6) | |
 | 6 | Multi-item SPRITE samples are in rounded hundredths | exact statistics at `items` = 3, 6, 7, … | Use the grid's exact values where it matters (section 7) | wherever samples are recomputed |
@@ -54,11 +54,11 @@ unsum already follows `branch = "optimize"`. But GitHub's `optimize` is at
 `7054029`, and everything after it, including all the changes below, exists
 only in the local clone of closure-core. Cargo can only fetch what is pushed,
 and at `7054029` the patch in section 3 does not compile: there is no
-`prominence` argument and no `bar_gap_*` field. So:
+`prominence` argument and none of the new summary fields. So:
 
 1. In closure-core: `git push origin optimize`.
 2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
-   `Cargo.lock` now names `bc29dec` or later.
+   `Cargo.lock` now names `a248020` or later.
 3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
    `rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
    that tarball, so the old copy would otherwise keep being compiled.
@@ -81,7 +81,7 @@ This patch fixes them and exports the new columns. *Verified:* it compiles
 without warnings.
 
 ```diff
-@@ -143,6 +143,10 @@
+@@ -143,6 +143,14 @@
          ("deficit_min".into(), (ms.deficit_min as i32).into()),
          ("deficit_mean".into(), ms.deficit_mean.into()),
          ("deficit_max".into(), (ms.deficit_max as i32).into()),
@@ -89,10 +89,14 @@ without warnings.
 +        ("bar_gap_max".into(), (ms.bar_gap_max as i32).into()),
 +        ("bar_gap_min_share".into(), ms.bar_gap_min_share.into()),
 +        ("bar_gap_max_share".into(), ms.bar_gap_max_share.into()),
++        ("second_peak_min".into(), (ms.second_peak_min as i32).into()),
++        ("second_peak_max".into(), (ms.second_peak_max as i32).into()),
++        ("edge_drop_min".into(), (ms.edge_drop_min as i32).into()),
++        ("edge_drop_max".into(), (ms.edge_drop_max as i32).into()),
      ];
      for class in ShapeClass::all() {
          pairs.push((format!("n_{}", class.as_str()), (ms.n_of(class) as f64).into()));
-@@ -429,6 +433,7 @@
+@@ -429,6 +437,7 @@
                  items_val,
                  streaming_config,
                  stop_after,
@@ -100,7 +104,7 @@ without warnings.
              )
          } else {
              sprite_parallel_streaming(
-@@ -444,6 +449,7 @@
+@@ -444,6 +453,7 @@
                  restrict_min_parsed,
                  streaming_config,
                  stop_after,
@@ -108,7 +112,7 @@ without warnings.
              )
          };
  
-@@ -476,6 +482,7 @@
+@@ -476,6 +486,7 @@
              items_val,
              None, // No parquet config - just return results in memory
              stop_after,
@@ -116,7 +120,7 @@ without warnings.
          )
      } else {
          sprite_parallel(
-@@ -491,6 +498,7 @@
+@@ -491,6 +502,7 @@
              restrict_min_parsed,
              None, // No parquet config - just return results in memory
              stop_after,
@@ -125,9 +129,10 @@ without warnings.
      };
 ```
 
-**The gaps must be `as i32`, not `as f64`.** Streaming writes them as
-unsigned integers, which nanoparquet reads as R integers, and the schema check
-compares `typeof` exactly. The `deficit_*` columns already follow this rule.
+**The counts must be `as i32`, not `as f64`.** Streaming writes `bar_gap_min`,
+`bar_gap_max`, `second_peak_*` and `edge_drop_*` as unsigned integers, which
+nanoparquet reads as R integers, and the schema check compares `typeof`
+exactly. The `deficit_*` columns already follow this rule.
 
 **`prominence`.** `None` keeps the default cutoffs for the shape
 classification: a mode must stand 5% of `n` above its surroundings for the
@@ -138,19 +143,33 @@ arguments. Every cutoff must be a fraction of `n` above 0 and below 1 (`0.05`,
 not `5`); anything else is an `InputValidation` error. A `primary` outside the
 band widens the band to reach it.
 
-**What the new columns mean.** `bar_gap_min` and `bar_gap_max` are the
-smallest and largest gap, over all samples, between a sample's tallest and
-shortest bar, in observations. They are the cutoff-free version of the
-flatness verdict: if `bar_gap_max` is 2, every sample's bars lie within 2
-observations of each other, and a reader can judge whether that is essentially
-uniform without choosing a cutoff. The `_share` columns divide by the average
-bar, `n / k`, and are `NaN` when there are no samples.
+**What the new columns mean.** Each verdict now comes with the number it
+rests on, in observations, as its smallest and largest value over the samples
+(0 for the smallest when there are no samples):
+
+- `bar_gap_*`: the gap between a sample's tallest and shortest bar; the
+  number behind *flat*. If `bar_gap_max` is 2, every sample's bars lie within
+  2 observations of each other. The `_share` columns divide by the average
+  bar, `n / k`, and are `NaN` when there are no samples.
+- `second_peak_*`: the largest cutoff at which a sample still has two or more
+  modes, 0 if it never does; the number behind *multimodal*. If
+  `second_peak_min` is 7, every sample's second peak stands at least 7
+  observations above its dip, so every sample is multimodal at any cutoff up
+  to 7. If `second_peak_max` is 0, no sample has two modes at any cutoff.
+- `edge_drop_*`: how far a sample's tallest bar stands above the lowest bar
+  between it and the nearer end of the scale, 0 if it sits at an end; the
+  number behind *bell* versus *floor or ceiling effect*. A single-peaked
+  sample is a bell at any cutoff up to its edge drop. If `edge_drop_min` is 8,
+  every single-peaked sample is a bell at any cutoff up to 8.
+
+Each is exactly where the class changes, so a reader can weigh these numbers
+against `n` without adopting closure-core's cutoffs.
 
 ---
 
 ## 4. Step 3: the R code
 
-`R/constants.R`, line 69: add the four columns right after `deficit_max`.
+`R/constants.R`, line 69: add the eight columns right after `deficit_max`.
 `check_component_tibble()` compares names with `identical()`, so the order
 must match the binding and the file.
 
@@ -166,14 +185,18 @@ MODALITY_SUMMARY_TYPES <- c(
     "bar_gap_min" = "integer",
     "bar_gap_max" = "integer",
     "bar_gap_min_share" = "double",
-    "bar_gap_max_share" = "double"
+    "bar_gap_max_share" = "double",
+    "second_peak_min" = "integer",
+    "second_peak_max" = "integer",
+    "edge_drop_min" = "integer",
+    "edge_drop_max" = "integer"
   ),
   `names<-`(as.list(rep("double", 6L)), paste0("n_", SHAPE_CLASSES)),
   `names<-`(as.list(rep("double", 6L)), paste0("band_n_", SHAPE_CLASSES))
 )
 ```
 
-`R/utils.R`, line 327: `dims = c(1L, 18L)` becomes `dims = c(1L, 22L)`.
+`R/utils.R`, line 327: `dims = c(1L, 18L)` becomes `dims = c(1L, 26L)`.
 
 Nothing else in R needs to change. `modality_conclusion` and its rebuild from
 `modality_summary` work as before.
@@ -310,6 +333,7 @@ and refactors.
 |---|---|
 | `490a6c3` | `prominence` argument on the four entry points (3) |
 | `f862887` | Near-uniform samples are flat; `bar_gap_*` columns (3, 4, 5) |
+| `a248020` | `second_peak_*` and `edge_drop_*` columns (3) |
 | `d3749b6` | A single peak's edge is decided by the bars within the cutoff (5) |
 | `dc2cf02` | Equal lower peaks merge (5) |
 | `47784a3` | Cutoffs must lie between 0 and 1; a cutoff of 0 reads as 1 (6) |
