@@ -181,13 +181,17 @@ against `n` without adopting closure-core's cutoffs.
 
 In `metrics_horns`, `single_peak_ceiling` is the highest horns index any
 single-peaked histogram on the scale can have, `(2k − 1)² / (9 (k − 1)²)` for
-`k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when even the
-lowest SD the reported SD and its rounding allow is past it. Then every
-histogram with that SD has a dip, so, if the reported statistics are right,
-the original data was not single-peaked. It follows from the SD alone, so it
-holds for SPRITE and for runs with `stop_after` too. On 1–5 the line is a
-population SD of 1.5; at `n = 100` a reported SD of 1.52 is flagged. The
-derivation is in closure-core's `protocols/horns-and-shapes.qmd`.
+`k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when no
+single-peaked histogram meets the reported statistics: at every mean the
+rounding allows, even the lowest SD it allows is beyond the largest a
+single-peaked histogram with that mean can have (Navard, Seaman and Young's
+`B_μ`, whose maximum over the mean is the ceiling). Then every histogram with
+these statistics has a dip, so, if they are right, the original data was not
+single-peaked. It follows from the reported statistics alone, so it holds for
+SPRITE and for runs with `stop_after` too. On 1–5 the line is a population SD
+of 1.5 at means 2.5 and 3.5, and 1.41 at mean 3; at mean 3 and `n = 50`, a
+reported SD of 1.44 is flagged. The derivation is in closure-core's
+`protocols/horns-and-shapes.qmd`.
 
 ---
 

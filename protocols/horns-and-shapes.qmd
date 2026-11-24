@@ -37,10 +37,10 @@ execute:
   also works for SPRITE and for truncated runs. Neither of those can rule out
   a shape by itself, because neither sees every sample.
 - **At a given mean the line is lower.** Navard, Seaman and Young (1993)
-  give it, $B_\mu$, under side conditions; exact checks indicate it holds
-  without them, and its maximum over the mean is the ceiling above. A proof
-  for every mean is still open, so closure-core flags against the mean-free
-  ceiling.
+  give it, $B_\mu$, but prove it only under side conditions. This document
+  proves it for every single-peaked distribution and every mean; its maximum
+  over the mean is the ceiling above. closure-core's flag uses it at every
+  mean the rounding allows.
 - **It only works in one direction.** A high horns index rules out a single
   peak; a low one rules out nothing.
 - **Each shape verdict now comes with the number it rests on:** `bar_gap_*`
@@ -457,35 +457,131 @@ mirror image of the floor effect in @sec-ceiling. So the value of the ceiling
 is already in Navard et al. What they do not state is the mean-free bound
 itself, without side conditions.
 
-**Without the side conditions.** Whether $B_\mu$ needs those conditions can be
-checked exactly, because the largest variance at a given mean reduces to a
-finite search.
+**Without the side conditions.** In positions $0, \dots, m$ ($m = n - 1$,
+mean $\mu$ counted from the bottom of the scale), the upper branch of $B_\mu$
+reads
+$$
+V(\mu) = \frac{(4m-1)\,\mu}{3} - \mu^2 - \frac{m(m-1)}{3},
+$$
+which is the variance of the uniform histogram mixed with extra mass on the
+top value, at mean $\mu$.
+
+::: {.callout-important}
+## Theorem
+
+Every single-peaked distribution on positions $0, \dots, m$ with mean
+$\mu \ge m/2$ has $\sigma^2 \le V(\mu)$, with equality for
+$q\,U_{\{0..m\}} + (1-q)\,\delta_m$, $q = 2(m - \mu)/m$. By mirror symmetry,
+$\sigma^2 \le V(m - \mu)$ for $\mu \le m/2$. So Navard et al.'s $B_\mu$ holds
+for every discrete unimodal distribution, with no conditions on the mode or
+the end categories.
+:::
+
+### Proof
+
+The idea: rewrite the bound as a statement that the average of one fixed
+quadratic is at most 0, then check that average block by block.
+
+**Step 1: a linear form.** Since $\sigma^2 = \mathbb{E}[X^2] - \mu^2$ and
+$V(\mu) + \mu^2 = \big((4m-1)\mu - m(m-1)\big)/3$, the claim
+$\sigma^2 \le V(\mu)$ is the same as
+$$
+\mathbb{E}[\varphi(X)] \le 0,
+\qquad
+\varphi(x) = x^2 - \frac{4m-1}{3}\,x + \frac{m(m-1)}{3}
+= (x - m)\left(x - \frac{m-1}{3}\right).
+$$
+Unlike the variance, $\mathbb{E}[\varphi(X)]$ is linear in the distribution.
+
+**Step 2: use the mean.** Let $j$ be a mode of the distribution, and
+$$
+\lambda_j = \max\!\left(0,\ \tfrac{2}{3}(m - 1 - j)\right),
+\qquad
+\psi_j(x) = \varphi(x) + \lambda_j\left(x - \frac{m}{2}\right).
+$$
+Then $\mathbb{E}[\psi_j(X)] = \mathbb{E}[\varphi(X)] + \lambda_j(\mu - m/2)
+\ge \mathbb{E}[\varphi(X)]$, because $\lambda_j \ge 0$ and $\mu \ge m/2$. So it
+suffices to show $\mathbb{E}[\psi_j(X)] \le 0$.
+
+**Step 3: blocks.** By Step 1 of @sec-ceiling, the distribution is a mixture
+of uniform blocks that all contain $j$, so $\mathbb{E}[\psi_j(X)]$ is a
+weighted average of the blocks' averages of $\psi_j$. It suffices to show
+that every block $\{a..b\}$ with $a \le j \le b$ has a non-positive average.
+
+**Step 4: corners.** A block's average of $\psi_j$ is
+$(b-a)(b-a+2)/12 + ((a+b)/2)^2$ plus terms linear in $a + b$. Its Hessian in
+$(a, b)$ is $\left(\begin{smallmatrix} 2/3 & 1/3 \\ 1/3 & 2/3 \end{smallmatrix}\right)$,
+positive definite, so it is convex on the box $0 \le a \le j \le b \le m$ and
+largest at a corner. The four corner blocks give, for $j \le m - 1$
+(using $\mathbb{E}[X] = (a+b)/2$ and
+$\mathbb{E}[X^2] = (b-a)(b-a+2)/12 + ((a+b)/2)^2$ on a block):
+
+| Block | Average of $\varphi$ | Average of $\lambda_j (x - m/2)$ | Average of $\psi_j$ |
+|---|---|---|---|
+| $\{0..m\}$ | $0$ | $0$ | $0$ |
+| $\{0..j\}$ | $(m-j)(m-1-j)/3$ | $-(m-1-j)(m-j)/3$ | $0$ |
+| $\{j..m\}$ | $-j(m-j)/3$ | $j(m-1-j)/3$ | $-j/3$ |
+| $\{j\}$ | $(j-m)(j - (m-1)/3)$ | $\tfrac23(m-1-j)(j - m/2)$ | $-j(m-j+1)/3$ |
+
+All are at most 0. ($\lambda_j$ is chosen to make the second row vanish.) For
+$j = m$, $\lambda_m = 0$ and the only corners are $\{m\}$ and $\{0..m\}$, where
+$\varphi$ averages $\varphi(m) = 0$ and $0$. Hence every block containing $j$
+has a non-positive average of $\psi_j$, and
+$\mathbb{E}[\varphi(X)] \le \mathbb{E}[\psi_j(X)] \le 0$. $\blacksquare$
+
+**Equality.** For $q\,U_{\{0..m\}} + (1-q)\,\delta_m$,
+$\mathbb{E}[\varphi(X)] = q \cdot 0 + (1-q)\,\varphi(m) = 0$, so $\sigma^2 = V(\mu)$:
+the bound is sharp at every mean, with proportions free.
+
+The proof does not need the mode to be known, or any cap on the end
+categories: it works with whatever mode the distribution has. Maximising
+$V$ over $\mu$ gives back the mean-free ceiling of @sec-ceiling, a second
+proof of it.
+
+```{r}
+#| label: mean-ceiling-proof
+# Every block's average of psi_j is at most 0, and the four corners match the
+# table's closed forms (in doubles; an exact rational check up to m = 60 was
+# run separately).
+psi_avg <- function(a, b, j, m) {
+  x <- a:b
+  lam <- max(0, 2 * (m - 1 - j) / 3)
+  mean((x - m) * (x - (m - 1) / 3) + lam * (x - m / 2))
+}
+worst <- -Inf
+for (m in 1:30) for (j in 0:m) {
+  for (a in 0:j) for (b in j:m) worst <- max(worst, psi_avg(a, b, j, m))
+  if (j <= m - 1) {
+    stopifnot(abs(psi_avg(0, m, j, m)) < 1e-9,
+              abs(psi_avg(0, j, j, m)) < 1e-9,
+              abs(psi_avg(j, m, j, m) + j / 3) < 1e-9,
+              abs(psi_avg(j, j, j, m) + j * (m - j + 1) / 3) < 1e-9)
+  }
+}
+worst
+stopifnot(worst < 1e-9)
+```
+
+### An independent check
+
+The largest variance at a given mean can also be computed directly, which
+checks the theorem without its proof.
 
 > **Lemma.** Among single-peaked distributions on positions $0, \dots, m$ with
 > a mode at $j$ and mean $\mu$, the largest variance is reached by a mixture
 > of at most two of the uniform blocks $\{j\}$, $\{0..j\}$, $\{j..m\}$ and
 > $\{0..m\}$.
 
-*Proof.* (1) The single-peaked distributions with a mode at $j$ are exactly
-the mixtures of uniform blocks that contain $j$. Step 1 of @sec-ceiling
-writes each of them as such a mixture. Conversely, every uniform block
-containing $j$ rises (weakly) up to $j$ and falls after it, and mixtures keep
-that. (2) At a fixed mean, the variance is $\mathbb{E}[X^2] - \mu^2$, and
-$\mathbb{E}[X^2]$ is linear in the block weights. Maximising it subject to
-the weights summing to 1 and the mean being $\mu$ is a linear program, so an
-optimum uses at most two blocks. By duality its value is
+*Proof.* The distributions with a mode at $j$ are exactly the mixtures of
+uniform blocks containing $j$ (Step 1 of @sec-ceiling; conversely, each such
+block rises up to $j$ and falls after it, and mixtures keep that). At a fixed
+mean, maximising the linear $\mathbb{E}[X^2]$ over the block weights is a
+linear program with two equality constraints, so an optimum uses at most two
+blocks, and by duality its value is
 $\min_\beta \max_{S \ni j} \big(\mathbb{E}_S[X^2] + \beta\,(\mathbb{E}_S[X] - \mu)\big)$.
-(3) For a block $\{a..b\}$,
-$\mathbb{E}_S[X^2] + \beta\,\mathbb{E}_S[X] = (b-a)(b-a+2)/12 + ((a+b)/2)^2 + \beta (a+b)/2$.
-Its Hessian in $(a, b)$ is $\left(\begin{smallmatrix} 2/3 & 1/3 \\ 1/3 & 2/3 \end{smallmatrix}\right)$,
-which is positive definite. So the expression is convex on the box
-$0 \le a \le j \le b \le m$, and its maximum over the blocks lies at a
-corner. Hence the dual over all blocks equals the dual over the four corner
-blocks, and so do the primal values. $\blacksquare$
-
-The largest variance at mean $\mu$ is therefore the maximum, over $j$ and over
-pairs of corner blocks whose means bracket $\mu$, of the variance of the
-mixture with mean $\mu$. This is exact at each mean, with proportions free.
+For fixed $\beta$ the inner expression is convex in the block's ends, as in
+Step 4 above, so the maximum over blocks lies at a corner, and the program
+over the four corner blocks has the same value. $\blacksquare$
 
 ```{r}
 #| label: mean-ceiling
@@ -525,28 +621,20 @@ gap
 stopifnot(gap < 1e-9)
 ```
 
-The exact maximum and $B_\mu$ agree at every mean tested, for every scale up
-to 15 values. A separate check in exact rational arithmetic gave the same
-result for scales up to 41 values at 401 means each. So $B_\mu$ appears to be
-the exact largest variance of a single-peaked distribution at a given mean,
-with no side conditions. That is not yet a proof for every mean: between the
-tested means, another pair of corner blocks could in principle rise above it.
-Proving that the step at the far end is always the best pair would settle it.
+The direct computation and $B_\mu$ agree at every mean tested.
 
-At the centred mean this is Navard et al.'s Theorem 4.1. They state it with
-the end categories' shares below $1/n$, but at the centred mean the only
-single-peaked histogram that fails this is the uniform itself, which sits
-exactly at $1/n$. Brute force over all histograms of 50 responses on 5 values
-and 21 on 7 values finds no single-peaked histogram at the centred mean above
-$(n^2-1)/12$.
+**Navard et al.'s Theorem 4.1 needs only the centred mean.** At
+$\mu = (n+1)/2$ the theorem gives $\sigma^2 \le (n^2-1)/12$, the uniform's
+variance, for every single-peaked distribution. Navard et al. also assume the
+end categories each hold less than $1/n$; that condition is not needed.
 
-**What it would add.** In the sweep over reported statistics in
-`protocols/when-closure-is-useful.md`, CLOSURE finds that every sample has a
-dip in 46, 96 and 199 cases (1–5 with $n = 20$ and $50$; 1–7 with $n = 30$).
-The mean-free ceiling catches 20, 52 and 86 of them from the SD alone; a check
-against $B_\mu$ would catch 24, 79 and 126. It never flagged a case where
-CLOSURE found a single-peaked sample. closure-core's `beyond_single_peak` still
-uses the mean-free ceiling, which is proved.
+**In closure-core.** `beyond_single_peak` tests the theorem at every total the
+rounding of the mean allows (@sec-sd). In the sweep over reported statistics
+in `protocols/when-closure-is-useful.md`, CLOSURE finds that every sample has
+a dip in 46, 96 and 199 cases (1–5 with $n = 20$ and $50$; 1–7 with
+$n = 30$). The mean-free ceiling catches 20, 52 and 86 of them from the
+statistics alone; the flag, using $B_\mu$, catches 24, 79 and 126. It never
+fires where CLOSURE finds a single-peaked sample, as the theorem guarantees.
 
 ## From the ceiling to a reported SD {#sec-sd}
 
@@ -560,19 +648,31 @@ $$
 population SD $\sigma = s\sqrt{(n-1)/n}$, so the line for a reported SD is
 $\sigma_{\max}\sqrt{n/(n-1)}$.
 
-Because a reported SD is rounded, the flag uses the lowest SD the rounding
-allows: `beyond_single_peak` is true when even $s - r$ is past the line.
+That is the line at the most favourable mean. At a given mean the line is
+$\sqrt{V(\mu)}$ from @sec-mean-ceiling, lower everywhere else: on 1–5 it is
+1.5 at means 2.5 and 3.5, but $\sqrt{2} = 1.41$, the uniform's SD, at mean 3.
+
+Because the reported mean and SD are rounded, the flag uses every mean and
+the lowest SD the rounding allows: `beyond_single_peak` is true when, at every
+admissible mean, even the lowest admissible SD is past the line for that mean.
 closure-core decides this exactly, without floating point. Its search bounds
-already hold the smallest admissible value of $n\sum x^2 - (\sum x)^2$, in grid
-steps, as an integer `m2n_lo`, and $n\sum x^2 - (\sum x)^2 = n^2\sigma^2$. So
+already hold the admissible totals $S = \sum x$ and the smallest admissible
+value of $n\sum x^2 - S^2 = n^2\sigma^2$, as integers in grid steps from the
+bottom of the scale (`sum_lo`, `sum_hi`, `m2n_lo`). Multiplying $V(S/n)$ by
+$3n^2$ clears the fractions:
 $$
-\text{beyond\_single\_peak} \iff 36 \cdot \text{m2n\_lo} > (2m+1)^2\, n^2 .
+\text{beyond\_single\_peak} \iff
+3 \cdot \text{m2n\_lo} > (4m-1)\,S\,n - 3S^2 - m(m-1)\,n^2
+\ \text{ for every admissible } S,
 $$
+with $S$ replaced by $nm - S$ below the middle. The right-hand side is
+concave on each side of the middle, so only the ends of the range, the middle
+and each side's peak need checking.
 
 ```{r}
 #| label: thresholds
-# Smallest reported SD, at two decimals with rounding error 0.005, that is
-# flagged on a single-item 1..k scale.
+# Smallest reported SD, at two decimals with rounding error 0.005, past the
+# mean-free line on a single-item 1..k scale, whatever the mean.
 flagged_from <- function(k, n, r = 0.005) {
   line <- (2 * k - 1) / 6 * sqrt(n / (n - 1))
   ceiling((line + r) * 100 + 1e-9) / 100
@@ -581,19 +681,30 @@ expand.grid(k = c(5, 7), n = c(20, 50, 100, 1000)) |>
   transform(flagged_from_sd = mapply(flagged_from, k, n))
 ```
 
-On 1–5 with $n = 100$: SD 1.52 is flagged, since even 1.515 is past the line
-of 1.5076; SD 1.51 is not, since 1.505 is below it. closure-core's test
-`an_sd_beyond_the_single_peak_ceiling_is_flagged` runs this case. For mean
-2.5 and SD 1.52, CLOSURE finds 150 samples and every one has a dip, as the
-theorem says it must. SPRITE raises the flag for the same input, although its
-own samples could never have ruled a shape out.
+```{r}
+#| label: lines-by-mean
+# The line for a reported SD at each mean on 1..5, n = 50: sqrt of B_mu,
+# converted to a sample SD.
+n <- 50
+data.frame(mean = seq(1.5, 4.5, by = 0.5)) |>
+  transform(sd_line = round(sqrt(sapply(mean, B_mu, n = 5) * n / (n - 1)), 3))
+```
+
+On 1–5 with $n = 100$ and mean 2.5, where the mean-free line applies: SD 1.52
+is flagged, since even 1.515 is past the line of 1.5076; SD 1.51 is not. For
+SD 1.52, CLOSURE finds 150 samples and every one has a dip. SPRITE raises the
+flag for the same input, although its own samples could never have ruled a
+shape out. At mean 3 with $n = 50$, the uniform histogram $(10, 10, 10, 10, 10)$
+has SD 1.43 and is not flagged; SD 1.44 is flagged, though below the mean-free
+line, and every one of CLOSURE's 68 samples has a dip. closure-core's test
+`an_sd_beyond_the_single_peak_ceiling_is_flagged` runs these cases.
 
 ### What the flag says, and what it does not
 
 - **It is a shape inference.** If the reported statistics are right, the
   original data had a dip somewhere, so it was not single-peaked. It follows
-  from the reported SD and the scale; the mean, the samples and the
-  prominence cutoffs play no part.
+  from the reported mean, SD, $n$ and scale; the samples and the prominence
+  cutoffs play no part.
 - **It does not replace the consistency test.** If CLOSURE finds no sample at
   all, the reported statistics contradict each other, and that is the finding.
   The flag is still computed then, but there is no data whose shape it could
@@ -605,23 +716,16 @@ own samples could never have ruled a shape out.
   of dips.
 - **It only looks upward.** A low horns index rules out nothing. Two peaks
   side by side, $(0, 10, 0, 10, 0)$, have horns 0.25, half the uniform value.
-- **Below the ceiling, a single peak may or may not fit.** For mean 2.5 and
-  SD 1.49 on 1–5 with $n = 100$, the horns index is 0.55, below 0.5625, so
-  the flag stays down; yet all 363 CLOSURE samples have a dip. Where CLOSURE
-  can run, its own numbers (`deficit_min`, and those in
-  @sec-verdict-numbers) catch such cases.
-- **It ignores the mean.** The ceiling is the highest variance at *any* mean.
-  By the equality case, only a mean of exactly $(2m+1)/6$ grid steps from one
-  end reaches it, 2.5 or 3.5 on 1–5. At other means the true line is lower,
-  and @sec-mean-ceiling gives it: a bound of Navard et al. (1993) that
-  appears to hold without their conditions. It would flag more cases, but
-  closure-core does not use it until it is proved for every mean.
-- **It is not sharp for a given $n$.** The extreme histogram has whole counts
-  only for some $n$: on 1–7 with $n = 14$, the highest single-peaked horns
-  index is 0.472, against a ceiling of 0.522. Like the range-only bound
-  before Popoviciu's odd-$n$ correction, the ceiling is sharp only when the
-  proportions are free (the BRIMMER manuscript's quasi-integer sense). An
-  $n$-sharp version would flag more small samples.
+- **Below the line, a single peak may or may not fit.** The line is sharp
+  only when the proportions are free (the BRIMMER manuscript's quasi-integer
+  sense). With whole counts the extreme histogram exists only for some $n$:
+  on 1–7 with $n = 14$, the highest single-peaked horns index is 0.472,
+  against a ceiling of 0.522. And for mean 2.5 and SD 1.49 on 1–5 with
+  $n = 100$, the flag stays down, yet all 363 CLOSURE samples have a dip.
+  Like the range-only bound before Popoviciu's odd-$n$ correction, an
+  $n$-sharp version would flag more small samples. Where CLOSURE can run, its
+  own numbers (`deficit_min`, and those in @sec-verdict-numbers) catch such
+  cases.
 
 ```{r}
 #| label: limits
@@ -763,8 +867,8 @@ variance $(n^2-1)/12$ as an upper bound, assumes a centred mean and end
 categories below $1/n$. The centred mean is essential:
 $(40, 15, 15, 15, 15)$ is unimodal with mean 2.5 and variance 2.25, against
 $(25 - 1)/12 = 2$. @sec-mean-ceiling shows that the maximum of their $B_\mu$
-over the mean is the single-peak ceiling. It also shows that $B_\mu$ itself
-appears to hold without the side conditions.
+over the mean is the single-peak ceiling, and proves that $B_\mu$ itself holds
+without the side conditions; Theorem 4.1 then needs only the centred mean.
 
 **The continuous bound.** $R^2/9$ for unimodal distributions on an interval
 belongs to a literature on variance bounds under unimodality that Navard et
@@ -787,7 +891,7 @@ CLOSURE adds only which values inside that interval whole counts can reach.
 
 | Question | Answer from the SD alone | Answer from the samples |
 |---|---|---|
-| Could the data have been strictly single-peaked? | No, if `beyond_single_peak` (any mean, any $n$, CLOSURE or SPRITE) | `deficit_min > 0` in an exhaustive CLOSURE run says no, at this mean |
+| Could the data have been strictly single-peaked? | No, if `beyond_single_peak` (from the reported mean and SD, any $n$, CLOSURE or SPRITE) | `deficit_min > 0` in an exhaustive CLOSURE run says no, at this mean |
 | How clearly does a second peak stand out, at least? | — | `second_peak_min` |
 | Could the data have been a bell rather than a floor or ceiling effect? | — | `edge_drop_*`, and the band queries |
 | Could it have been flat? | — | `bar_gap_*` |
