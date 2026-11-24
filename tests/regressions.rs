@@ -334,11 +334,36 @@ fn f32_inputs_find_samples_exactly_on_a_bound() {
         None,
     )
     .unwrap();
-    assert!(sprite.results.len() > 0, "SPRITE found nothing in f32");
+    assert!(!sprite.results.is_empty(), "SPRITE found nothing in f32");
     for i in 0..sprite.results.len() {
         let total: i32 = sprite.results.sample(i).iter().sum();
         assert_eq!(total, 5000, "sample {i} in hundredths");
     }
+}
+
+#[test]
+fn a_wide_scale_is_searched_without_listing_millions_of_seeds() {
+    // Seeding three values deep listed 36 million seeds on 0..=600 before
+    // searching: 11 s and 1.7 GB for one sample. It now takes milliseconds.
+    let start = std::time::Instant::now();
+    let results =
+        closure_parallel::<f64, i32>(50.0, 10.0, 3, 0, 1000, 0.005, 0.005, 1, None, None, None)
+            .unwrap();
+    assert_eq!(
+        results.results.len() as u64,
+        closure_count(50.0, 10.0, 3, 0, 1000, 0.005, 0.005).unwrap()
+    );
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+
+    // Past 100,000 values a listed sample would take more than 400 KB; the
+    // counter lists nothing and still answers.
+    let wide =
+        closure_parallel::<f64, i32>(50.0, 10.0, 3, 0, 100_000, 0.005, 0.005, 1, None, None, None);
+    assert!(matches!(
+        wide,
+        Err(closure_core::ParameterError::InputValidation(_))
+    ));
+    assert!(closure_count(50.0, 10.0, 3, 0, 100_000, 0.005, 0.005).is_ok());
 }
 
 #[test]

@@ -5,7 +5,7 @@ use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, Restrictio
 use crate::{
     counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
     ProminenceThresholds, ResultListFromMeanSdN, SampleCounts, SampleFormat, SearchBounds,
-    StreamingConfig, StreamingFrequencyState, StreamingResult, ValueGrid,
+    StreamingConfig, StreamingFrequencyState, StreamingResult, ValueGrid, MAX_GRID_WIDTH,
 };
 use num::NumCast;
 use rand::prelude::*;
@@ -47,14 +47,6 @@ const LP_COVERAGE_THRESHOLD: f64 = 0.99;
 // ponytail: a sample rarer than about 1 in 1,000 draws can still be missed;
 // raise this if such samples matter more than the time on small spaces.
 const MIN_DRAWS: u64 = 5_000;
-/// Most grid values a SPRITE scale may have, counting
-/// `(scale_max - scale_min) * items + 1`. Every sample is stored as one `u32`
-/// count per grid value, twice (once to deduplicate, once in the results), so
-/// this caps a sample at 400 KB.
-/// Without it, 0..=10,000,000 passed every check and each sample took 40 MB
-/// however small n was. Covers any Likert scale at 100 items, and scales of
-/// up to 99,999 points at one item.
-const MAX_GRID_WIDTH: usize = 100_000;
 
 /// Most attempts a search makes, failures included, the same in memory and
 /// streaming: `MAX_DUP_LOOPS` per sample asked for, but never more than

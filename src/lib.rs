@@ -740,6 +740,21 @@ fn with_slack(x: f64, up: bool) -> f64 {
     }
 }
 
+/// Most grid values a scale may have for the techniques that list samples:
+/// SPRITE counts `(scale_max - scale_min) * items + 1`, CLOSURE
+/// `scale_max - scale_min + 1`. Every sample is stored as one `u32` count per
+/// grid value (SPRITE keeps it twice, once to deduplicate), so this caps a
+/// sample at 400 KB. Without it, 0..=10,000,000 passed every check and each
+/// sample took 40 MB however small n was. Covers any Likert scale at 100
+/// items, and scales of up to 99,999 points at one item.
+/// [`closure_count`](crate::count::closure_count) lists nothing and has no
+/// such limit.
+pub(crate) const MAX_GRID_WIDTH: usize = 100_000;
+
+/// Most branches a CLOSURE search is split into up front; see
+/// [`ClosureSearchContext::seed_depth`].
+const MAX_SEEDS: u128 = 10_000;
+
 /// The rounding errors, widened by how precisely `T` holds the inputs.
 ///
 /// An input is the decimal the caller typed only to within its type's
@@ -918,6 +933,14 @@ impl ClosureSearchContext {
             rounding_error_mean,
             rounding_error_sd,
         )?;
+        let width = (scale_max - scale_min + 1) as usize;
+        if width > MAX_GRID_WIDTH {
+            return Err(ParameterError::InputValidation(format!(
+                "The scale has {width} values, but CLOSURE lists samples on at most \
+                 {MAX_GRID_WIDTH}: it stores every sample as one count per scale value, 400 KB \
+                 per sample at that limit. closure_count has no such limit"
+            )));
+        }
         let m2_hi = (0..=n)
             .map(|k| with_slack(k as f64 * bounds.var_nm1_hi, true).floor() as i64)
             .collect();
@@ -941,8 +964,18 @@ impl ClosureSearchContext {
     /// values, or fewer when `n` is smaller than that. Two gave only 28
     /// very unevenly sized branches on a 7-point scale; three balances the
     /// load measurably better and four adds nothing.
+    ///
+    /// The seeds are listed before searching, `C(k + d − 1, d)` of them for
+    /// `k` scale values, so on a wide scale the depth drops until there are at
+    /// most [`MAX_SEEDS`]. At depth three a 0..=600 scale listed 36 million
+    /// seeds and took 1.7 GB before searching any of them.
     fn seed_depth(&self) -> usize {
-        self.n.min(3)
+        let k = self.scale_range() as u128;
+        let seeds = |d: u128| (0..d).fold(1u128, |acc, i| acc * (k + d - 1 - i) / (i + 1));
+        (1..=self.n.min(3))
+            .rev()
+            .find(|&d| seeds(d as u128) <= MAX_SEEDS)
+            .unwrap_or(1)
     }
 }
 
