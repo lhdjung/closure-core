@@ -378,8 +378,16 @@ where
 /// run every attempt to its loop limit, 16 s to return nothing for mean 3.5,
 /// sd 0.1, n 20 on 1..=5. Both limits are exact in integers:
 ///
-/// - Most spread (Bhatia–Davis): values in `[lo, hi]` with total `S` have
-///   `n·Σx² − S² <= (n·hi − S)(S − n·lo)`, a parabola in `S`.
+/// - Most spread: the `m` free values, whole numbers in `[lo, hi]` with free
+///   total `T`, have the largest `Σx²` with as many as possible at `hi`, the
+///   rest at `lo`, and at most one in between; the fixed responses add their
+///   own squares. Values excluded by restrictions can only lower it, so this
+///   is a valid bound. Within each run of `hi − lo` totals it is convex in
+///   `S`, so every admissible total is checked, up to a million of them;
+///   past that the Bhatia–Davis bound `(n·hi − S)(S − n·lo)` stands in, which
+///   whole numbers reach only where every value can sit at an end. It alone
+///   let mean 3.20, sd 2.15, n 5 on 1..=5 search for 87 ms to return nothing,
+///   though the widest such sample has an SD of 2.05.
 /// - Least spread: internal values are whole numbers, so at best the `m`
 ///   free values split between two neighbours, `T mod m` of them one above
 ///   the rest, for free total `T`; the fixed responses add their own squares.
@@ -415,22 +423,45 @@ fn feasibility<U: IntegerType>(
     }
 
     let n = n as i128;
-    let values = || pv.iter().chain(fixed).map(to_i64);
-    let lo = values().min().unwrap_or(0) as i128;
-    let hi = values().max().unwrap_or(0) as i128;
     let (s_lo, s_hi) = (sum_lo as i128, sum_hi as i128);
-    let vertex = (n * (lo + hi)).div_euclid(2);
-    let most = [s_lo, s_hi, vertex, vertex + 1]
-        .into_iter()
-        .map(|s| s.clamp(s_lo, s_hi))
-        .map(|s| (n * hi - s) * (s - n * lo))
-        .max()
-        .unwrap();
+    let fixed_sum_sq: i128 = fixed.iter().map(|v| (to_i64(v) as i128).pow(2)).sum();
+    let (fs, m) = (fixed_sum as i128, r_n as i128);
+    let (plo, phi) = (pv_min as i128, pv_max as i128);
+    let most_at = |s: i128| {
+        let free_sq = if m == 0 {
+            0
+        } else {
+            // `k` free values at the top, one at `plo + v` if `v > 0`, the
+            // rest at the bottom. `s` is reachable, so `extra` is in
+            // `0..=m·(phi − plo)` and `k <= m`.
+            let (d, extra) = (phi - plo, s - fs - m * plo);
+            let (k, v) = if d == 0 {
+                (0, 0)
+            } else {
+                (extra / d, extra % d)
+            };
+            let between = (v > 0) as i128;
+            k * phi * phi + (m - k - between) * plo * plo + between * (plo + v).pow(2)
+        };
+        n * (fixed_sum_sq + free_sq) - s * s
+    };
+    let most = if s_hi - s_lo <= 1_000_000 {
+        (s_lo..=s_hi).map(most_at).max().unwrap()
+    } else {
+        let values = || pv.iter().chain(fixed).map(to_i64);
+        let lo = values().min().unwrap_or(0) as i128;
+        let hi = values().max().unwrap_or(0) as i128;
+        let vertex = (n * (lo + hi)).div_euclid(2);
+        [s_lo, s_hi, vertex, vertex + 1]
+            .into_iter()
+            .map(|s| s.clamp(s_lo, s_hi))
+            .map(|s| (n * hi - s) * (s - n * lo))
+            .max()
+            .unwrap()
+    };
     if (bounds.m2n_lo as i128) > most {
         return (0, 0, Some("No sample on the scale reaches the SD."));
     }
-    let fixed_sum_sq: i128 = fixed.iter().map(|v| (to_i64(v) as i128).pow(2)).sum();
-    let (fs, m) = (fixed_sum as i128, r_n as i128);
     let least_at = |s: i128| {
         let free_sq = if m == 0 {
             0
@@ -1963,6 +1994,53 @@ pub mod tests {
         assert_eq!(attempt_cap(Some(usize::MAX)), MAX_ATTEMPTS);
         assert_eq!(attempt_cap(Some(1)), MIN_DRAWS as usize);
         assert_eq!(attempt_cap(Some(1_000)), 20_000);
+    }
+
+    #[test]
+    fn the_widest_whole_number_sample_rules_out_an_sd_up_front() {
+        // On 1..=5 with n = 5 and mean 3.20 (total 16), the widest sample is
+        // 1, 1, 4, 5, 5: SD 2.049. Bhatia-Davis allows 2.23, so SD 2.15 used
+        // to pass the precheck and search to no avail.
+        let params = |sd: f64| {
+            build_sprite_params::<f64, i32>(
+                3.2,
+                sd,
+                5,
+                1,
+                5,
+                0.005,
+                0.005,
+                1,
+                None,
+                RestrictionsOption::Null,
+            )
+            .unwrap()
+        };
+        assert!(params(2.15).infeasible.is_some());
+        assert!(params(2.05).infeasible.is_none());
+        // Fixed responses are counted as fixed: three 3s among n = 5 leave two
+        // free values with total 7, widest as 2 and 5, so the widest sample
+        // is 2, 3, 3, 3, 5: SD 1.095. Bhatia-Davis over all five values
+        // allowed 2.23.
+        let mut exact = std::collections::HashMap::new();
+        exact.insert(300, 3);
+        let fixed = |sd: f64| {
+            build_sprite_params::<f64, i32>(
+                3.2,
+                sd,
+                5,
+                1,
+                5,
+                0.005,
+                0.005,
+                1,
+                Some(exact.clone()),
+                RestrictionsOption::Null,
+            )
+            .unwrap()
+        };
+        assert!(fixed(1.10).infeasible.is_none());
+        assert!(fixed(1.11).infeasible.is_some());
     }
 
     #[test]
