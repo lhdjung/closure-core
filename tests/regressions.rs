@@ -222,6 +222,36 @@ fn invalid_parameters_are_errors_not_panics() {
 }
 
 #[test]
+fn a_cutoff_given_as_a_percentage_is_an_error() {
+    // 5.0 meant as 5% is 5n observations: every sample read as flat, and the
+    // run reported that the data must have been flat.
+    use closure_core::ProminenceThresholds;
+    let run = |primary: f64, band: Vec<f64>| {
+        closure_parallel::<f64, i32>(
+            3.0,
+            1.13,
+            100,
+            1,
+            5,
+            0.005,
+            0.005,
+            1,
+            None,
+            None,
+            Some(ProminenceThresholds { primary, band }),
+        )
+    };
+    assert!(run(5.0, vec![2.0, 5.0, 10.0]).is_err());
+    assert!(run(0.05, vec![0.02, 1.0]).is_err());
+    // Fractions are fine, and are what the run reports at.
+    let shapes = run(0.04, vec![0.03, 0.06]).unwrap().modality_shapes;
+    assert_eq!(shapes.min_prominence, 0.04);
+    let rungs: Vec<u32> = shapes.ladder.iter().map(|r| r.min_prominence_counts).collect();
+    assert_eq!(rungs, vec![3, 4, 6]);
+    assert_eq!(shapes.must_be(|c| c == closure_core::modality::ShapeClass::Flat), Some(false));
+}
+
+#[test]
 fn the_counter_rejects_what_the_search_rejects() {
     // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
     // read as "SD between 0 and 0.95" and counted 10 samples. It now returns

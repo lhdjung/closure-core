@@ -113,7 +113,13 @@ pub struct ProminenceThresholds {
     pub primary: f64,
     /// Rungs of the band the shape queries consider: every whole-observation
     /// cutoff between the lowest and the highest counts, and the per-rung
-    /// counts are reported. `primary` is added if it is not among them.
+    /// counts are reported.
+    ///
+    /// `primary` always becomes a rung too, so that [`ModalityShapes::can_be`]
+    /// never misses a shape [`ModalityShapes::can_be_at_primary`] sees. A
+    /// `primary` outside the band therefore *widens* it: with the default band
+    /// and `primary: 0.15`, the shape queries consider every cutoff from 2% to
+    /// 15% of `n`, not 2% to 10% plus 15%.
     pub band: Vec<f64>,
 }
 
@@ -128,14 +134,21 @@ impl Default for ProminenceThresholds {
 
 impl ProminenceThresholds {
     /// Why these cutoffs cannot be used, if they cannot: every one must be a
-    /// finite fraction above 0, and the band must not be empty.
+    /// fraction of `n` above 0 and below 1, and the band must not be empty.
+    ///
+    /// The upper limit catches percentages passed as fractions: a cutoff of 5
+    /// meant as 5% is 5n observations, more than any bar can differ by, so
+    /// every sample would read as flat.
     pub fn check(&self) -> Result<(), String> {
-        let ok = |p: f64| p.is_finite() && p > 0.0;
+        let ok = |p: f64| p > 0.0 && p < 1.0;
         if self.band.is_empty() {
             return Err("the prominence band needs at least one cutoff".to_string());
         }
         if !ok(self.primary) || !self.band.iter().all(|&p| ok(p)) {
-            return Err("prominence cutoffs must be finite and above 0".to_string());
+            return Err(
+                "prominence cutoffs must be fractions of n above 0 and below 1 (0.05 is 5%)"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -257,6 +270,9 @@ fn runs_of(counts: &[u32]) -> Vec<Run> {
 /// `(30, 29, 30, 29, 26)`, from reading as multimodal.
 ///
 /// Each mode is reported by the first position of its (first) run.
+///
+/// A cutoff of 0 is read as 1: below one observation, a tie would count as two
+/// modes and no sample could be flat.
 pub fn modes(counts: &[u32], min_prominence_counts: u32) -> Vec<usize> {
     mode_extents(&runs_of(counts), min_prominence_counts)
         .into_iter()
@@ -273,6 +289,7 @@ pub fn modes(counts: &[u32], min_prominence_counts: u32) -> Vec<usize> {
 /// runs form one broad mode; [`classify`] needs to know whether that mode
 /// touches a scale boundary.
 fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)> {
+    let min_prominence_counts = min_prominence_counts.max(1);
     // A single run means every count is equal: flat, no mode.
     if runs.len() < 2 {
         return Vec::new();
@@ -599,9 +616,12 @@ impl ModalityShapes {
     /// has no least element, so it is reported as `t / n`, capped at the top
     /// rung. Either way the answer lies in the band and rounds to `t`.
     ///
-    /// This is the margin behind a `Some(false)` from [`Self::can_be`]: how
-    /// far the cutoff would have to move before some sample took the shape.
-    /// `None` means no cutoff in the band gives any sample this shape.
+    /// `None` exactly when no cutoff in the band gives any sample this shape,
+    /// which is when [`Self::can_be`] finds no witness. So this is not a margin
+    /// behind a `Some(false)` from `can_be`; it is the margin behind a
+    /// `Some(false)` from [`Self::can_be_at_primary`] that `can_be` overturns:
+    /// how far the cutoff has to move from the primary one before some sample
+    /// takes the shape.
     pub fn min_prominence_admitting(&self, class: ShapeClass) -> Option<f64> {
         self.band_min_prominence
             .get(class as usize)
@@ -791,8 +811,12 @@ impl ShapeAccumulator {
         let min_prominence = thresholds.primary;
         // At least one observation, so a threshold of 0 does not admit ties as
         // separate modes. The slack keeps an exact product from rounding up a
-        // whole observation: 0.07 * 100 is 7.000000000000001 in f64.
-        let to_counts = |p: f64| ((p * n as f64 - 1e-9).ceil() as u32).max(1);
+        // whole observation: 0.07 * 100 is 7.000000000000001 in f64. It is
+        // relative, since the rounding error of the product grows with it.
+        let to_counts = |p: f64| {
+            let x = p * n as f64;
+            ((x - x * 1e-12).ceil() as u32).max(1)
+        };
 
         let mut fractions: Vec<f64> = thresholds.band.clone();
         // The configured threshold is always a rung, so `can_be` can never
@@ -1606,6 +1630,24 @@ mod tests {
             assert_eq!(acc.band_min, expected_min, "k={k} n={n}");
             assert_eq!(acc.finish(true).band_n_per_class, expected, "k={k} n={n}");
         }
+    }
+
+    #[test]
+    fn cutoffs_must_be_fractions_below_one() {
+        let with = |primary: f64, band: Vec<f64>| ProminenceThresholds { primary, band };
+        assert!(with(0.05, vec![0.02, 0.1]).check().is_ok());
+        assert!(with(0.5, vec![0.9]).check().is_ok());
+        for bad in [5.0, 1.0, 0.0, -0.1, f64::NAN, f64::INFINITY] {
+            assert!(with(bad, vec![0.05]).check().is_err(), "primary {bad}");
+            assert!(with(0.05, vec![0.02, bad]).check().is_err(), "band {bad}");
+        }
+        assert!(with(0.05, vec![]).check().is_err());
+    }
+
+    #[test]
+    fn a_cutoff_of_zero_reads_as_one() {
+        assert_eq!(modes(&[3, 4, 3, 4, 3], 0), modes(&[3, 4, 3, 4, 3], 1));
+        assert_eq!(classify(&[30, 30, 29], 0), classify(&[30, 30, 29], 1));
     }
 
     #[test]
