@@ -384,6 +384,26 @@ fn an_sd_beyond_the_single_peak_ceiling_is_flagged() {
     );
     assert!(!closure(1.51).metrics_horns.beyond_single_peak);
 
+    // At mean 3, the middle of 1..=5, no single-peaked histogram has a
+    // variance above the uniform's, 2 (Navard et al.'s B_μ). At n = 50 the
+    // uniform (10, 10, 10, 10, 10) has SD 1.43: not flagged, and single-peaked.
+    // SD 1.44 is flagged although its horns index is below the mean-free
+    // ceiling, and every sample CLOSURE finds has a dip.
+    let middle = |sd: f64| {
+        closure_parallel::<f64, i32>(3.0, sd, 50, 1, 5, 0.005, 0.005, 1, None, None, None).unwrap()
+    };
+    let uniform = middle(1.43);
+    assert!(!uniform.metrics_horns.beyond_single_peak);
+    assert_eq!(uniform.modality_shapes.deficit_min, 0);
+    let above = middle(1.44);
+    assert!(!above.results.is_empty());
+    assert!(above.metrics_horns.beyond_single_peak);
+    assert!(above.metrics_horns.max < above.metrics_horns.single_peak_ceiling);
+    assert!(
+        above.modality_shapes.deficit_min > 0,
+        "every sample has a dip"
+    );
+
     // SPRITE draws at random and never rules a shape out by itself, but the
     // flag follows from the SD alone.
     let sprite = closure_core::sprite_parallel::<f64, i32>(

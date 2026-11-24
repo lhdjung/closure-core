@@ -460,6 +460,14 @@ fn feasibility<U: IntegerType>(
 }
 
 impl<U: IntegerType> SpriteParams<U> {
+    /// Whether no single-peaked sample meets the bounds, on a grid `k` wide;
+    /// see [`crate::beyond_single_peak`]. Internal units are grid steps.
+    fn beyond_single_peak(&self, k: usize) -> bool {
+        let n = U::to_usize(&self.n).expect("n was validated");
+        let shift = n as i64 * self.scale_min_scaled;
+        crate::beyond_single_peak(self.m2n_lo, self.sum_lo - shift, self.sum_hi - shift, n, k)
+    }
+
     /// Tabulate a sample in internal units onto a value grid `k` wide.
     ///
     /// Exact: internal units are grid steps, so a value's position is plain
@@ -640,11 +648,7 @@ where
     // the grid's real resolution, which for a multi-item scale is finer than a
     // whole scale point.
     let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
-    let beyond_single_peak = crate::beyond_single_peak(
-        params.m2n_lo,
-        U::to_usize(&params.n).expect("n was validated"),
-        grid.len(),
-    );
+    let beyond_single_peak = params.beyond_single_peak(grid.len());
     let counts = find_distributions_all_internal(&params, grid, stop_after);
 
     // Calculate all statistics using the shared function from lib.rs SPRITE
@@ -825,7 +829,7 @@ where
         final_freq_state,
         false,
         &thresholds,
-        crate::beyond_single_peak(params.m2n_lo, n_usize, grid.len()),
+        params.beyond_single_peak(grid.len()),
     )?;
 
     Ok(StreamingResult {

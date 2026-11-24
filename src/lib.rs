@@ -72,11 +72,14 @@
 //! One shape conclusion needs no samples and no cutoff. The reported SD fixes
 //! every sample's horns index, and no single-peaked histogram on a scale of
 //! `k` values has a horns index above [`single_peak_ceiling`],
-//! `(2k − 1)² / (9 (k − 1)²)`. When even the lowest SD the rounding allows is
-//! beyond it, `metrics_horns` says `beyond_single_peak`: every histogram with
-//! that SD has a dip, so the original data was not single-peaked. That holds
-//! for SPRITE and truncated runs too. On a 1–5 scale the line is a population
-//! SD of 1.5.
+//! `(2k − 1)² / (9 (k − 1)²)`; at a given mean the limit is lower still
+//! (Navard, Seaman and Young's `B_μ`, proved for every mean in
+//! `protocols/horns-and-shapes.qmd`). When even the lowest SD the rounding
+//! allows is beyond that limit at every mean the rounding allows,
+//! `metrics_horns` says `beyond_single_peak`: every histogram with these
+//! statistics has a dip, so the original data was not single-peaked. That
+//! holds for SPRITE and truncated runs too. On a 1–5 scale the mean-free line
+//! is a population SD of 1.5; at mean 3 it is 1.41, the uniform's.
 //!
 //! Two more points on reading the output:
 //!
@@ -615,13 +618,18 @@ pub struct MetricsHorns {
     /// have; see [`single_peak_ceiling`]. `NaN` for an empty result list
     /// built without a grid's search bounds.
     pub single_peak_ceiling: f64,
-    /// True when even the lowest SD the reported SD and its rounding error
-    /// allow puts the horns index above [`Self::single_peak_ceiling`]: every
-    /// histogram with that SD has a dip somewhere, so, if the reported
-    /// statistics are right, the original data was not single-peaked.
+    /// True when no single-peaked histogram meets the reported statistics:
+    /// at every mean the rounding allows, even the lowest SD it allows is
+    /// beyond the largest a single-peaked histogram with that mean can have.
+    /// Every admissible histogram then has a dip somewhere, so, if the
+    /// reported statistics are right, the original data was not single-peaked.
     ///
-    /// This follows from the SD and the scale alone, without any samples, so
-    /// it holds for SPRITE and for truncated runs too. It is about strictly
+    /// The bound at a given mean is Navard, Seaman and Young's (1993) `B_μ`,
+    /// whose largest value over all means is [`Self::single_peak_ceiling`]; so
+    /// a horns index above the ceiling always sets this flag, and at most
+    /// means a lower one does too. It follows from the mean, the SD and the
+    /// scale alone, without any samples, so it holds for SPRITE and for
+    /// truncated runs too. It is about strictly
     /// single-peaked histograms, rising and then falling with no dip at all;
     /// at a prominence cutoff a small dip does not count as a second mode.
     /// When no sample exists at all, the reported statistics contradict each
@@ -645,14 +653,57 @@ pub fn single_peak_ceiling(k: usize) -> f64 {
     (2.0 * m + 1.0).powi(2) / (9.0 * m * m)
 }
 
-/// Whether the lowest admissible `n·Σx² − (Σx)²`, in grid steps, puts every
-/// admissible sample above [`single_peak_ceiling`]. Exact: the population
-/// variance is `m2n / n²`, the ceiling on it `((2m + 1) / 6)²` for `m = k − 1`
-/// steps, so the test is `36 · m2n > (2m + 1)² · n²` in integers.
-pub(crate) fn beyond_single_peak(m2n_lo: i64, n: usize, k: usize) -> bool {
-    let m = k.saturating_sub(1) as i128;
-    let n = n as i128;
-    36 * (m2n_lo as i128) > (2 * m + 1).pow(2) * n * n
+/// Whether every sample the search bounds admit has a variance above the
+/// largest any single-peaked histogram with its mean can have, so that none of
+/// them is single-peaked.
+///
+/// The bound is Navard, Seaman and Young's (1993) `B_μ`, proved without their
+/// side conditions in `protocols/horns-and-shapes.qmd`: on positions `0..=m`, a
+/// single-peaked histogram with mean `μ ≥ m/2` has a variance of at most
+/// `(4m − 1)μ/3 − μ² − m(m − 1)/3`, mirrored below `m/2`. Its maximum over `μ`
+/// is [`single_peak_ceiling`].
+///
+/// Exact, in integers. `sum_lo..=sum_hi` are the admissible totals and `m2n_lo`
+/// the lowest admissible `n·Σx² − (Σx)²`, all in grid steps from the bottom of
+/// the scale. For total `S`, `n²` times the bound is `f(S) / 3` with
+/// `f(S) = (4m − 1)·S·n − 3S² − m(m − 1)·n²` (with `S` mirrored to `nm − S`
+/// below the middle), so the test is `3 · m2n_lo > f(S)` for every admissible
+/// `S`. `f` is concave on each side of the middle, so its largest admissible
+/// value lies at an end of the range, at the middle, or next to a side's peak.
+pub(crate) fn beyond_single_peak(
+    m2n_lo: i64,
+    sum_lo: i64,
+    sum_hi: i64,
+    n: usize,
+    k: usize,
+) -> bool {
+    let (n, m) = (n as i128, k.saturating_sub(1) as i128);
+    let (lo, hi) = ((sum_lo as i128).max(0), (sum_hi as i128).min(n * m));
+    if lo > hi {
+        // No admissible total: a consistency failure, with no shape to infer.
+        return false;
+    }
+    let f = |s: i128| {
+        let s = if 2 * s < n * m { n * m - s } else { s };
+        (4 * m - 1) * s * n - 3 * s * s - m * (m - 1) * n * n
+    };
+    let peak = (4 * m - 1) * n / 6;
+    let largest = [
+        lo,
+        hi,
+        n * m / 2,
+        (n * m + 1) / 2,
+        peak,
+        peak + 1,
+        n * m - peak,
+        n * m - peak - 1,
+    ]
+    .into_iter()
+    .filter(|s| (lo..=hi).contains(s))
+    .map(f)
+    .max()
+    .expect("lo and hi are candidates");
+    3 * (m2n_lo as i128) > largest
 }
 
 /// Results table combining reconstructed samples and their horns values.
@@ -1006,6 +1057,19 @@ impl ClosureSearchContext {
             m2n_lo: bounds.m2n_lo,
             m2_hi,
         })
+    }
+
+    /// Whether no single-peaked sample meets the bounds; see
+    /// [`beyond_single_peak`].
+    fn beyond_single_peak(&self) -> bool {
+        let shift = self.n as i64 * self.scale_min;
+        beyond_single_peak(
+            self.m2n_lo,
+            self.sum_lo - shift,
+            self.sum_hi - shift,
+            self.n,
+            self.scale_range(),
+        )
     }
 
     /// Number of scale values.
@@ -2004,12 +2068,8 @@ where
     // When `stop_after` truncates the enumeration, the result set is only
     // part of the solution space, and an unseen shape says nothing about the
     // original data.
-    let closure_results: ResultListFromMeanSdN<U> = counts_to_result_list(
-        counts,
-        exhaustive,
-        &thresholds,
-        beyond_single_peak(ctx.m2n_lo, ctx.n, ctx.scale_range()),
-    );
+    let closure_results: ResultListFromMeanSdN<U> =
+        counts_to_result_list(counts, exhaustive, &thresholds, ctx.beyond_single_peak());
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -2817,7 +2877,7 @@ where
                 // the space.
                 found_count < limit,
                 &thresholds,
-                beyond_single_peak(ctx.m2n_lo, ctx.n, ctx.scale_range()),
+                ctx.beyond_single_peak(),
             )?;
 
             return Ok(StreamingResult {
@@ -2929,7 +2989,7 @@ where
         // limit means no branch was skipped or cut short.
         stop_after.is_none_or(|limit| total_counter.load(Ordering::Relaxed) < limit),
         &thresholds,
-        beyond_single_peak(ctx.m2n_lo, ctx.n, ctx.scale_range()),
+        ctx.beyond_single_peak(),
     )?;
 
     Ok(StreamingResult {
@@ -3249,8 +3309,9 @@ mod tests {
         assert_eq!(horns_from_counts(&[40.0, 15.0, 15.0, 15.0, 15.0]), 0.5625);
 
         // Every histogram of n over k values: a single-peaked one never has a
-        // horns index above the ceiling, and the exact integer test flags a
-        // histogram's own spread only when it has a dip.
+        // horns index above the ceiling, nor a variance above B_μ at its own
+        // mean, and the exact integer test flags a histogram's own total and
+        // spread exactly when its variance is above B_μ.
         fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
             if row.len() == k - 1 {
                 row.push(n);
@@ -3278,15 +3339,23 @@ mod tests {
                 let m2n = n as i64 * ssq - sum * sum;
                 let single = modality::unimodality_deficit(&row) == 0;
                 let horns = horns_from_counts(&row.iter().map(|&c| c as f64).collect::<Vec<_>>());
+                // B_μ in grid steps, from the mean's nearer half.
+                let m = (k - 1) as f64;
+                let mean = sum as f64 / n as f64;
+                let mu = mean.max(m - mean);
+                let b_mu = (4.0 * m - 1.0) * mu / 3.0 - mu * mu - m * (m - 1.0) / 3.0;
+                let var = m2n as f64 / (n as f64 * n as f64);
+                let flagged = beyond_single_peak(m2n, sum, sum, n as usize, k);
                 if single {
                     highest = highest.max(horns);
-                    assert!(!beyond_single_peak(m2n, n as usize, k), "{row:?}");
+                    assert!(var <= b_mu + 1e-12, "{row:?}");
+                    assert!(!flagged, "{row:?}");
                 }
-                assert_eq!(
-                    beyond_single_peak(m2n, n as usize, k),
-                    horns > single_peak_ceiling(k) + 1e-12,
-                    "{row:?}"
-                );
+                assert_eq!(flagged, var > b_mu + 1e-12, "{row:?}");
+                // Above the ceiling is always flagged, at any mean.
+                if horns > single_peak_ceiling(k) + 1e-12 {
+                    assert!(flagged, "{row:?}");
+                }
             }
             assert!(highest <= single_peak_ceiling(k) + 1e-12, "k = {k}");
         }
