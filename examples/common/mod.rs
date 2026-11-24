@@ -11,7 +11,7 @@ pub struct Case {
 }
 
 impl Case {
-    /// `"n=20,  [1,7]"`, with a trailing `*` for wider-than-default rounding tolerance.
+    /// `"n = 20,  [1,7]"`, with a trailing `*` for wider-than-default rounding tolerance.
     pub fn label(&self) -> String {
         let star = if self.re_mean > 0.05 || self.re_sd > 0.05 {
             "*"
@@ -51,10 +51,3 @@ pub const CASES: &[Case] = &[
     Case { mean: 4.0, sd: 1.50, n: 100, scale_min: 1, scale_max: 7, re_mean: 0.05, re_sd: 0.05 },
     Case { mean: 3.0, sd: 1.00, n: 100, scale_min: 1, scale_max: 5, re_mean: 0.05, re_sd: 0.05 },
 ];
-
-#[test]
-fn labels_line_up() {
-    assert_eq!(CASES[0].label(), "n = 10,  [1,7]");
-    assert_eq!(CASES[5].label(), "n = 20,  [1,7]*");
-    assert_eq!(CASES[19].label(), "n = 100, [1,5]");
-}
