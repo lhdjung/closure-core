@@ -39,7 +39,7 @@ skipped.
 
 | # | What changed in closure-core | Blocks | What to change in unsum | Where |
 |---|---|---|---|---|
-| 1 | The commits after `7054029` are not on GitHub yet | everything | Push `optimize`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
+| 1 | unsum's pin predates all of this | everything | Make sure GitHub's `optimize` has `08d8e80`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
 | 2 | The four entry points take a last `prominence` argument | compile | Pass `None` | `src/rust/src/lib.rs`, the calls at lines 421, 434, 468 and 481 |
 | 3 | `modality_summary` has eight new columns: `bar_gap_*`, `second_peak_*`, `edge_drop_*` | the schema check, in memory and on disk | Export them, and expect 26 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
 | 3a | `metrics_horns` has two new columns: `single_peak_ceiling`, `beyond_single_peak` | the schema check, on disk at once and in memory once exported | Export them, and expect 11 columns | `src/rust/src/lib.rs` 287, `R/utils.R` 196–210 |
@@ -51,13 +51,13 @@ skipped.
 
 ## 2. Step 1: get the new closure-core
 
-unsum already follows `branch = "optimize"`. But GitHub's `optimize` is at
-`7054029`, and everything after it, including all the changes below, exists
-only in the local clone of closure-core. Cargo can only fetch what is pushed,
-and at `7054029` the patch in section 3 does not compile: there is no
-`prominence` argument and none of the new summary fields. So:
+unsum already follows `branch = "optimize"`, but Cargo can only fetch what is
+on GitHub. The patch in section 3 compiles against `08d8e80`; before
+`490a6c3` there is no `prominence` argument, and before `a248020` and
+`7bf2a52` some of the new summary fields are missing. So:
 
-1. In closure-core: `git push origin optimize`.
+1. In closure-core: check that GitHub's `optimize` contains `08d8e80`
+   (`git ls-remote origin optimize`), and `git push origin optimize` if not.
 2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
    `Cargo.lock` now names `08d8e80` or later.
 3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
