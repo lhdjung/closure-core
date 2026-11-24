@@ -225,70 +225,54 @@ where
         )));
     }
 
-    // Generate all possible scaled values
-    let mut poss_values_scaled: Vec<U> = Vec::new();
-    for i in 1..=items {
-        // Iterate over scale range using generic integer arithmetic
-        let mut val = scale_min;
-        while val < scale_max {
-            let val_i32 = U::to_i32(&val).unwrap();
-            let float_val = val_i32 as f64 + (i - 1) as f64 / items as f64;
-            let scaled_val = (float_val * scale_factor as f64).round() as i64;
-            poss_values_scaled.push(NumCast::from(scaled_val).expect("checked to fit"));
-            val = val + U::one();
-        }
-    }
-    // Add scale_max
-    let max_i32 = U::to_i32(&scale_max).unwrap();
-    let max_scaled = (max_i32 as f64 * scale_factor as f64).round() as i64;
-    poss_values_scaled.push(NumCast::from(max_scaled).expect("checked to fit"));
-
-    poss_values_scaled.sort_by(|a, b| U::to_i64(a).unwrap().cmp(&U::to_i64(b).unwrap()));
-    poss_values_scaled.dedup();
-
-    let poss_values_keys: HashSet<i32> = poss_values_scaled
+    // Internal values are the whole numbers from `scale_min * items` to
+    // `scale_max * items`, the one at grid position `j` being
+    // `scale_min_scaled + j`. Restriction keys are read off the output grid's
+    // own labels, so a key names the value it labels in the results. Keys
+    // computed here separately rounded values ending in exactly half a
+    // hundredth the other way: at 40 items the grid labels 1.025 as 102,
+    // but SPRITE rejected 102 and took 103 for it.
+    let scale_min_scaled = scale_min_i32 as i64 * scale_factor as i64;
+    let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
+    let value_of_key: HashMap<i32, i64> = grid
+        .values_hundredths()
         .iter()
-        .map(|v| (U::to_f64(v).unwrap() / (scale_factor as f64 / 100.0)).round() as i32)
+        .enumerate()
+        .map(|(j, &key)| (key, scale_min_scaled + j as i64))
         .collect();
+    let to_u = |v: i64| -> U { NumCast::from(v).expect("checked to fit") };
 
     // Process fixed responses
     let mut fixed_responses_scaled: Vec<U> = Vec::new();
-    let mut fixed_values_keys: HashSet<i32> = HashSet::new();
+    let mut fixed_values: HashSet<i64> = HashSet::new();
 
     for (&key, &count) in &restrictions_exact {
-        if !poss_values_keys.contains(&key) {
+        let Some(&v) = value_of_key.get(&key) else {
             return Err(ParameterError::InputValidation(format!(
                 "Invalid key in restrictions_exact: {}",
                 key as f64 / 100.0
             )));
-        }
-        fixed_values_keys.insert(key);
-        let scaled_val = (key as f64 / 100.0 * scale_factor as f64).round() as i64;
-        let u_val: U = NumCast::from(scaled_val).expect("checked to fit");
-        fixed_responses_scaled.extend(std::iter::repeat_n(u_val, count));
+        };
+        fixed_values.insert(v);
+        fixed_responses_scaled.extend(std::iter::repeat_n(to_u(v), count));
     }
 
     if let Some(min_map) = restrictions_minimum {
         for (&key, &count) in &min_map {
-            if !poss_values_keys.contains(&key) {
+            let Some(&v) = value_of_key.get(&key) else {
                 return Err(ParameterError::InputValidation(format!(
                     "Invalid key in restrictions_minimum: {}",
                     key as f64 / 100.0
                 )));
-            }
-            let scaled_val = (key as f64 / 100.0 * scale_factor as f64).round() as i64;
-            let u_val: U = NumCast::from(scaled_val).expect("checked to fit");
-            fixed_responses_scaled.extend(std::iter::repeat_n(u_val, count));
+            };
+            fixed_responses_scaled.extend(std::iter::repeat_n(to_u(v), count));
         }
     }
 
-    // Filter out fixed values from possible values
-    let final_possible_values_scaled: Vec<U> = poss_values_scaled
-        .into_iter()
-        .filter(|v| {
-            let key = (U::to_f64(v).unwrap() / (scale_factor as f64 / 100.0)).round() as i32;
-            !fixed_values_keys.contains(&key)
-        })
+    // The free values: every grid value but those exactly restricted.
+    let final_possible_values_scaled: Vec<U> = (scale_min_scaled..scale_min_scaled + k)
+        .filter(|v| !fixed_values.contains(v))
+        .map(to_u)
         .collect();
 
     let n_fixed = fixed_responses_scaled.len();
@@ -355,7 +339,7 @@ where
         infeasible,
         fixed_sum,
         fixed_sum_sq,
-        scale_min_scaled: scale_min_i32 as i64 * scale_factor as i64,
+        scale_min_scaled,
         possible_values_scaled: final_possible_values_scaled,
         fixed_responses_scaled,
         n_fixed,

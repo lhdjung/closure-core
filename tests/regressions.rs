@@ -1329,6 +1329,40 @@ fn sprite_rejects_a_grid_too_wide_to_store() {
 }
 
 #[test]
+fn sprite_restriction_keys_are_the_output_grid_labels() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // At 40 items the grid labels 1.025 as 102, but SPRITE computed its own
+    // keys and rounded the same value to 103: `{102: 1}` was rejected, and
+    // `{103: 1}` was accepted and then reported as 102.
+    let run = |key: i32| {
+        sprite_parallel::<f64, i32>(
+            3.0,
+            1.0,
+            20,
+            1,
+            5,
+            0.05,
+            0.05,
+            40,
+            Some([(key, 1)].into_iter().collect()),
+            RestrictionsOption::Null,
+            None,
+            Some(5),
+            None,
+        )
+    };
+    assert!(run(103).is_err());
+    let results = run(102).unwrap();
+    assert!(!results.results.is_empty());
+    let column = results.results.counts.grid().values_hundredths()[1];
+    assert_eq!(column, 102);
+    for row in results.results.counts.rows() {
+        assert_eq!(row[1], 1, "1.025 must appear exactly once");
+    }
+}
+
+#[test]
 fn a_limited_run_that_saw_everything_is_exhaustive() {
     // `stop_after` used to mark every limited run as partial, so `can_be`
     // answered `None` even when the limit was never reached.
