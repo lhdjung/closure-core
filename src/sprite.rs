@@ -157,19 +157,15 @@ where
     let scale_factor = items;
 
     // Internal values run from `scale_min * items` to `scale_max * items`, and
-    // samples are reported in hundredths; if both ends fit in `U` at both
-    // multipliers, so does everything between. Internal values that did not
+    // samples are reported in hundredths; `items` is at most 100, so if both
+    // ends fit in `U` times 100, everything does. Internal values that did not
     // fit used to be dropped from the grid without a word, so samples could
     // never use the top of the scale.
-    let fits_u = |v: i32| {
-        [items as i64, 100]
-            .iter()
-            .all(|&m| <U as NumCast>::from(v as i64 * m).is_some())
-    };
+    let fits_u = |v: i32| <U as NumCast>::from(v as i64 * 100).is_some();
     if !fits_u(scale_min_i32) || !fits_u(scale_max_i32) {
-        return Err(ParameterError::InputValidation(format!(
-            "scale values times 100 and times items ({items}) must fit in the sample's integer type"
-        )));
+        return Err(ParameterError::InputValidation(
+            "scale values times 100 must fit in the sample's integer type".to_string(),
+        ));
     }
 
     // Check mean is in range

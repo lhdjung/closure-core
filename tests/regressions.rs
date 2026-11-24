@@ -756,8 +756,11 @@ fn sprite_without_a_limit_does_not_overflow() {
 fn sprite_rejects_a_scale_its_integer_type_cannot_hold() {
     use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
 
-    // At items = 1000, a 1..=50 scale runs to 50,000 internal units, past i16.
-    // Values that did not fit used to be dropped from the grid silently.
+    // Samples are reported in hundredths, which at 1..=500 reach 50,000, past
+    // i16. Reading one back used to panic. Internal values (`items` per
+    // scale point, at most 100) never exceed the hundredths, so that check
+    // covers them too; values that did not fit used to be dropped from the
+    // grid silently.
     let run = |scale_max: i16, items: u32| {
         sprite_parallel::<f64, i16>(
             25.0,
@@ -775,17 +778,16 @@ fn sprite_rejects_a_scale_its_integer_type_cannot_hold() {
             None,
         )
     };
-    assert!(matches!(
-        run(50, 1000),
-        Err(ParameterError::InputValidation(_))
-    ));
-    // Samples are reported in hundredths, which at 1..=500 reach 50,000.
-    // Reading one back used to panic instead.
-    assert!(matches!(
-        run(500, 1),
-        Err(ParameterError::InputValidation(_))
-    ));
-    assert!(run(50, 3).is_ok());
+    for items in [1, 100] {
+        match run(500, items) {
+            Err(ParameterError::InputValidation(msg)) => {
+                assert!(msg.contains("times 100 must fit"), "{msg}")
+            }
+            other => panic!("items {items}: expected an input error, got {:?}", other.is_ok()),
+        }
+    }
+    // 327.67 is the most an i16 holds in hundredths.
+    assert!(run(327, 1).is_ok());
 }
 
 #[test]
