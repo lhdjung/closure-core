@@ -396,11 +396,12 @@ fn a_ceiling_effect_is_not_reported_as_a_bell() {
     // sample: at 0.15 the floor spike in (20, 7, 8, 33, 32) is suppressed
     // because it stands only 13 above the valley beside it, and a distribution
     // with a fifth of its mass at the bottom of the scale gets reported as a
-    // candidate bell. That is the classifier breaking, not the claim weakening.
+    // pure ceiling effect. That is the classifier breaking, not the claim
+    // weakening.
     let artefact = [20u32, 7, 8, 33, 32];
     assert_eq!(
         closure_core::modality::classify(&artefact, 15),
-        ShapeClass::OneModeInterior
+        ShapeClass::OneModeHighEdge
     );
     assert_eq!(
         closure_core::modality::classify(&artefact, 10),

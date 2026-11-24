@@ -13,7 +13,7 @@
 //! floor effect and a centred distribution. Forensically the difference is the
 //! whole point, so [`ShapeClass`] crosses mode *count* with mode *location*:
 //!
-//! | | interior peak | peak at a scale boundary |
+//! | | interior peak | peak reaching a scale end |
 //! |---|---|---|
 //! | one mode | [`OneModeInterior`] ("bell") | [`OneModeLowEdge`] / [`OneModeHighEdge`] (J) |
 //! | two or more | [`TwoModes`] | [`ThreeOrMoreModes`] |
@@ -56,7 +56,10 @@
 //! above the dip that separates it from any taller bar (its *prominence*). The
 //! same cutoff decides flatness. A histogram is [`Flat`] when its tallest bar
 //! exceeds its shortest by less than the cutoff, so `(30, 30, 30, 30, 29)` is
-//! flat at any cutoff of two observations or more.
+//! flat at any cutoff of two observations or more. And it decides where a
+//! single peak sits: the peak reaches a scale end when every bar between them
+//! is within the cutoff of it, so `(29, 31, 5, 5, 5)` is a floor effect at a
+//! cutoff of 5, not a bell one value up.
 //!
 //! Nothing derives the cutoff. The defaults, 5% of `n` for the per-class counts
 //! and every whole-observation cutoff from 2% to 10% of `n` for the shape
@@ -99,7 +102,7 @@ pub const DEFAULT_MODE_PROMINENCE: f64 = 0.05;
 /// wobble becomes a mode, which is what a cutoff is there to prevent. Above
 /// about 10%, a peak holding a large share of the sample can be erased because
 /// it stands only a little above the dip beside it: at 15% on a 1-5 scale,
-/// `(20, 7, 8, 33, 32)` reads as one interior mode although a fifth of the
+/// `(20, 7, 8, 33, 32)` reads as a ceiling effect alone although a fifth of the
 /// sample sits at the bottom of the scale.
 pub const DEFAULT_PROMINENCE_LADDER: [f64; 3] = [0.02, 0.05, 0.10];
 
@@ -165,11 +168,16 @@ pub enum ShapeClass {
     /// than the cutoff, so every difference between bars is below it. See
     /// [`modes`].
     Flat,
-    /// One mode, away from both ends of the scale — the "bell" case.
+    /// One mode, away from both ends of the scale — the "bell" case. Between
+    /// the peak and either end, some bar is at least the cutoff below it.
     OneModeInterior,
-    /// One mode, at the lowest scale value: a floor effect (J-shape).
+    /// One mode reaching the lowest scale value: a floor effect (J-shape).
+    /// Every bar from the peak down to the bottom of the scale is within the
+    /// cutoff of it, so the peak may sit one or more values up, as in
+    /// `(29, 31, 5, 5, 5)` at a cutoff of 5.
     OneModeLowEdge,
-    /// One mode, at the highest scale value: a ceiling effect (J-shape).
+    /// One mode reaching the highest scale value: a ceiling effect (J-shape),
+    /// in the same sense.
     OneModeHighEdge,
     /// Two modes.
     TwoModes,
@@ -418,25 +426,35 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
 /// Classify a count vector into exactly one [`ShapeClass`].
 ///
 /// `min_prominence_counts` is the prominence a local maximum needs to count as a
-/// mode; see [`modes`].
+/// mode; see [`modes`], which also explains why 0 is read as 1.
 pub fn classify(counts: &[u32], min_prominence_counts: u32) -> ShapeClass {
-    classify_from_runs(&runs_of(counts), counts.len(), min_prominence_counts)
+    classify_from_runs(&runs_of(counts), min_prominence_counts)
 }
 
 /// [`classify`], on a run decomposition computed once by the caller.
-fn classify_from_runs(runs: &[Run], k: usize, min_prominence_counts: u32) -> ShapeClass {
+fn classify_from_runs(runs: &[Run], min_prominence_counts: u32) -> ShapeClass {
     let peaks = mode_extents(runs, min_prominence_counts);
     match peaks[..] {
         // No distinguishable mode: every difference between bars is below the
         // cutoff. See [`modes`].
         [] => ShapeClass::Flat,
-        // A lone mode cannot span both edges: its group would hold every
-        // bar within the cutoff of the summit, which is flat. So the edge
-        // tests below are mutually exclusive.
+        // A lone mode sits at an edge when its bars reach that end of the
+        // scale without dropping the cutoff below the summit: the bars between
+        // are within the cutoff of it, so by the rule that merges tied tallest
+        // runs they are part of the same broad peak. Testing the exact
+        // position of the tallest bar instead made `(31, 29, 30, 5, 5)` a
+        // floor effect and `(30, 29, 31, 5, 5)` a bell at a cutoff of 5.
+        //
+        // A lone mode cannot reach both edges: every bar would then be within
+        // the cutoff of the summit, which is flat. So the edge tests below are
+        // mutually exclusive.
         [(start, end)] => {
-            if start == 0 {
+            let t = min_prominence_counts.max(1);
+            let summit = runs.iter().map(|r| r.height).max().unwrap_or(0);
+            let near_summit = |r: &Run| summit - r.height < t;
+            if runs.iter().take_while(|r| r.start < start).all(near_summit) {
                 ShapeClass::OneModeLowEdge
-            } else if end == k - 1 {
+            } else if runs.iter().rev().take_while(|r| r.end > end).all(near_summit) {
                 ShapeClass::OneModeHighEdge
             } else {
                 ShapeClass::OneModeInterior
@@ -763,6 +781,28 @@ fn mode_count(class: ShapeClass) -> u8 {
     }
 }
 
+/// For a sample whose tallest runs form one mode, the edge class it takes once
+/// that mode reaches a scale end, and the lowest threshold at which it does;
+/// `None` when the tallest bar already sits at an end, where nothing changes.
+///
+/// The mode reaches the low end once every bar left of its first tallest run
+/// is within the threshold of the summit: from `summit − (lowest such bar) + 1`.
+/// Likewise on the right. At most one side can get there before the sample
+/// turns flat, so the earlier side is the one that counts.
+fn edge_from(runs: &[Run]) -> Option<(ShapeClass, u32)> {
+    let summit = runs.iter().map(|r| r.height).max()?;
+    let first = runs.iter().position(|r| r.height == summit)?;
+    let last = runs.iter().rposition(|r| r.height == summit)?;
+    let from = |side: &[Run]| side.iter().map(|r| summit - r.height + 1).max();
+    let low = from(&runs[..first])?;
+    let high = from(&runs[last + 1..])?;
+    Some(if low <= high {
+        (ShapeClass::OneModeLowEdge, low)
+    } else {
+        (ShapeClass::OneModeHighEdge, high)
+    })
+}
+
 /// Running shape statistics over a stream of count vectors.
 ///
 /// Shared by the in-memory and streaming paths so both report the same thing;
@@ -867,7 +907,7 @@ impl ShapeAccumulator {
         let runs = runs_of(counts);
         let mut rung_classes = std::mem::take(&mut self.rung_classes);
         for (rung, &(_, threshold)) in self.ladder.iter().enumerate() {
-            let class = classify_from_runs(&runs, counts.len(), threshold);
+            let class = classify_from_runs(&runs, threshold);
             self.ladder_counts[rung][class as usize] += 1;
             rung_classes[rung] = class;
         }
@@ -878,7 +918,7 @@ impl ShapeAccumulator {
         self.bar_gap_min = self.bar_gap_min.min(gap);
         self.bar_gap_max = self.bar_gap_max.max(gap);
 
-        self.update_band(&runs, counts.len(), &rung_classes, gap);
+        self.update_band(&runs, &rung_classes, gap);
 
         let class = rung_classes[self.primary];
         self.rung_classes = rung_classes;
@@ -915,28 +955,38 @@ impl ShapeAccumulator {
     /// number of modes never goes up: merging tied tallest runs (`summit −
     /// valley < t`) only becomes more likely, and a lower peak only drops out
     /// (`height − col >= t`). A single mode is the one group of all tallest
-    /// runs, whose extent no longer changes, so a one-mode class holds until
-    /// the sample turns flat, at `t = gap + 1`, and flat holds from there on.
-    /// The class sequence is therefore three-or-more modes, then two, then one
-    /// fixed one-mode class, then flat, each part possibly empty. The first
-    /// two boundaries are each a binary search between the two rungs they
-    /// fall between; the last is known.
-    fn update_band(&mut self, runs: &[Run], k: usize, rung_classes: &[ShapeClass], gap: u32) {
+    /// runs, so one mode holds until the sample turns flat, at `t = gap + 1`,
+    /// and flat holds from there on. Within one mode, the bars within `t` of
+    /// the summit only reach further as `t` rises, so an interior mode can
+    /// come to reach a scale end, at a threshold [`edge_from`] computes, and
+    /// never leaves it again. The class sequence is therefore three-or-more
+    /// modes, then two, then interior, then an edge class, then flat, each
+    /// part possibly empty. The first two boundaries are each a binary search
+    /// between the two rungs they fall between; the others are known.
+    fn update_band(&mut self, runs: &[Run], rung_classes: &[ShapeClass], gap: u32) {
         let (lo, hi) = (self.ladder[0].1, self.ladder[self.ladder.len() - 1].1);
         if mode_count(rung_classes[0]) >= 3 {
             self.record_band(ShapeClass::ThreeOrMoreModes, lo);
         }
-        if let Some((t, class)) = self.first_at_most(runs, k, rung_classes, 2) {
+        if let Some((t, class)) = self.first_at_most(runs, rung_classes, 2) {
             if class == ShapeClass::TwoModes {
                 self.record_band(class, t);
             }
         }
-        if let Some((t, class)) = self.first_at_most(runs, k, rung_classes, 1) {
+        let flat_from = gap.saturating_add(1).max(lo);
+        if let Some((t, class)) = self.first_at_most(runs, rung_classes, 1) {
             if mode_count(class) == 1 {
                 self.record_band(class, t);
             }
+            if class == ShapeClass::OneModeInterior {
+                if let Some((edge, t_edge)) = edge_from(runs) {
+                    // Past the gap the sample is flat, not an edge mode.
+                    if t_edge <= hi && t_edge < flat_from {
+                        self.record_band(edge, t_edge);
+                    }
+                }
+            }
         }
-        let flat_from = gap.saturating_add(1).max(lo);
         if flat_from <= hi {
             self.record_band(ShapeClass::Flat, flat_from);
         }
@@ -948,7 +998,6 @@ impl ShapeAccumulator {
     fn first_at_most(
         &self,
         runs: &[Run],
-        k: usize,
         rung_classes: &[ShapeClass],
         modes: u8,
     ) -> Option<(u32, ShapeClass)> {
@@ -961,7 +1010,7 @@ impl ShapeAccumulator {
         let mut class = rung_classes[j];
         while at - below > 1 {
             let mid = below + (at - below) / 2;
-            let c = classify_from_runs(runs, k, mid);
+            let c = classify_from_runs(runs, mid);
             if mode_count(c) <= modes {
                 at = mid;
                 class = c;
@@ -1633,6 +1682,21 @@ mod tests {
     }
 
     #[test]
+    fn a_single_peak_reaches_the_edge_its_neighbours_lead_to() {
+        // Which bar of a broad peak is tallest by one or two observations
+        // must not decide between a bell and a floor effect.
+        assert_eq!(classify(&[31, 29, 30, 5, 5], 5), ShapeClass::OneModeLowEdge);
+        assert_eq!(classify(&[30, 29, 31, 5, 5], 5), ShapeClass::OneModeLowEdge);
+        assert_eq!(classify(&[5, 5, 31, 29, 30], 5), ShapeClass::OneModeHighEdge);
+        // 40 of 50 observations on the bottom two values, 2 apart.
+        assert_eq!(classify(&[19, 21, 2, 2, 6], 5), ShapeClass::OneModeLowEdge);
+        // A drop of the full cutoff between the peak and the end keeps it
+        // interior.
+        assert_eq!(classify(&[26, 31, 5, 5, 5], 5), ShapeClass::OneModeInterior);
+        assert_eq!(classify(&[27, 31, 5, 5, 5], 5), ShapeClass::OneModeLowEdge);
+    }
+
+    #[test]
     fn cutoffs_must_be_fractions_below_one() {
         let with = |primary: f64, band: Vec<f64>| ProminenceThresholds { primary, band };
         assert!(with(0.05, vec![0.02, 0.1]).check().is_ok());
@@ -1648,6 +1712,59 @@ mod tests {
     fn a_cutoff_of_zero_reads_as_one() {
         assert_eq!(modes(&[3, 4, 3, 4, 3], 0), modes(&[3, 4, 3, 4, 3], 1));
         assert_eq!(classify(&[30, 30, 29], 0), classify(&[30, 30, 29], 1));
+    }
+
+    #[test]
+    fn classification_is_mirror_symmetric_and_orderly_as_the_cutoff_rises() {
+        // Over every count vector of a few (k, n) and every cutoff up to past
+        // the point where the vector turns flat: mirroring the vector mirrors
+        // the class, and as the cutoff rises the class only moves along three
+        // or more modes, two, interior, an edge class, flat. `update_band`
+        // relies on that order.
+        fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+            if row.len() == k - 1 {
+                row.push(n);
+                out.push(row.clone());
+                row.pop();
+                return;
+            }
+            for c in 0..=n {
+                row.push(c);
+                compositions(k, n - c, row, out);
+                row.pop();
+            }
+        }
+        let mirror = |c: ShapeClass| match c {
+            ShapeClass::OneModeLowEdge => ShapeClass::OneModeHighEdge,
+            ShapeClass::OneModeHighEdge => ShapeClass::OneModeLowEdge,
+            other => other,
+        };
+        let stage = |c: ShapeClass| match c {
+            ShapeClass::ThreeOrMoreModes => 0,
+            ShapeClass::TwoModes => 1,
+            ShapeClass::OneModeInterior => 2,
+            ShapeClass::OneModeLowEdge | ShapeClass::OneModeHighEdge => 3,
+            ShapeClass::Flat => 4,
+        };
+        for (k, n) in [(3, 30), (5, 16), (7, 9)] {
+            let mut rows = Vec::new();
+            compositions(k, n, &mut Vec::new(), &mut rows);
+            for row in &rows {
+                let reversed: Vec<u32> = row.iter().rev().copied().collect();
+                let mut previous: Option<ShapeClass> = None;
+                for t in 1..=n + 1 {
+                    let class = classify(row, t);
+                    assert_eq!(classify(&reversed, t), mirror(class), "{row:?} at {t}");
+                    if let Some(p) = previous {
+                        assert!(stage(p) <= stage(class), "{row:?}: {p:?} then {class:?} at {t}");
+                        if stage(p) == 3 && stage(class) == 3 {
+                            assert_eq!(p, class, "{row:?} switched edges at {t}");
+                        }
+                    }
+                    previous = Some(class);
+                }
+            }
+        }
     }
 
     #[test]
