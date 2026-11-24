@@ -20,6 +20,23 @@ fn main() {
     );
     println!("{}", "-".repeat(65));
 
+    // Untimed warm-up, so the first case doesn't pay for starting rayon's pool.
+    let c = &CASES[0];
+    closure_parallel::<f64, i32>(
+        c.mean,
+        c.sd,
+        c.n,
+        c.scale_min,
+        c.scale_max,
+        c.re_mean,
+        c.re_sd,
+        1,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
     for c in CASES {
         let start = Instant::now();
         let results = closure_parallel::<f64, i32>(
