@@ -975,4 +975,59 @@ fn sprite_rejects_a_scale_too_wide_for_the_grid() {
     );
     assert!(matches!(result, Err(ParameterError::InputValidation(_))));
 
+    // Near the limit at 100 items, the sum of squares would overflow an i64.
+    // Release builds wrapped and returned no samples.
+    let result = sprite_parallel::<f64, i32>(
+        21_000_000.5,
+        0.5,
+        4,
+        21_000_000,
+        21_000_001,
+        0.05,
+        0.05,
+        100,
+        None,
+        RestrictionsOption::Null,
+        None,
+        Some(5),
+    );
+    assert!(matches!(result, Err(ParameterError::InputValidation(_))));
+}
+
+#[test]
+fn sprite_samples_far_from_zero_match_their_sd() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // With values near 1e7, `n·Σx² − (Σx)²` in f64 lost its low digits, and
+    // about half the samples returned missed the SD tolerance.
+    let results = sprite_parallel::<f64, i64>(
+        1e7 + 2.5,
+        1.5,
+        200,
+        10_000_000,
+        10_000_005,
+        0.005,
+        0.005,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        Some(50),
+    )
+    .unwrap()
+    .results;
+    assert!(!results.is_empty());
+    let grid = results.counts.grid().values();
+    for row in results.counts.rows() {
+        let values: Vec<f64> = row
+            .iter()
+            .enumerate()
+            .flat_map(|(j, &c)| std::iter::repeat_n(grid[j] - 1e7, c as usize))
+            .collect();
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let sd = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+        assert!((mean - 2.5).abs() <= 0.005 + 1e-9, "mean {mean}");
+        assert!((sd - 1.5).abs() <= 0.005 + 1e-9, "sd {sd}");
+    }
 }

@@ -4,8 +4,8 @@ use crate::sample_counts::MAX_ABS_SCALE;
 use crate::sprite_types::{OccurrenceConstraints, RestrictionsMinimum, RestrictionsOption};
 use crate::{
     counts_to_result_list, FloatType, IntegerType, ParameterError, ParquetConfig,
-    ResultListFromMeanSdN, SampleCounts, SampleFormat, StreamingConfig, StreamingFrequencyState,
-    StreamingResult, ValueGrid,
+    ResultListFromMeanSdN, SampleCounts, SampleFormat, SearchBounds, StreamingConfig,
+    StreamingFrequencyState, StreamingResult, ValueGrid,
 };
 use core::f64;
 use num::NumCast;
@@ -22,6 +22,8 @@ use std::thread;
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
 const MAX_DUP_LOOPS: u32 = 20;
+/// Float slack for the tests' own tolerance checks.
+#[cfg(test)]
 const DUST: f64 = 1e-12;
 /// Stop once this share of all draws are duplicates. Under uniform sampling
 /// that share estimates the fraction of the solution space already found, but
@@ -37,23 +39,27 @@ const MIN_DRAWS: u64 = 5_000;
 
 // Internal struct to hold the final, validated parameters (generic version)
 #[derive(Debug)]
-struct SpriteParams<T, U>
+struct SpriteParams<U>
 where
-    T: FloatType,
     U: IntegerType,
 {
-    mean: T,
-    sd: T,
     n: U, // Changed from n_obs: u32 to match CLOSURE
-    /// Half-width of the accepted interval around `mean`, inclusive, plus a
-    /// float slack: the same semantics CLOSURE gives `rounding_error_mean`.
-    mean_tolerance: f64,
-    /// Likewise for `sd`.
-    sd_tolerance: f64,
-    /// Internal units per scale point. Equal to `items`, so every grid value
-    /// `scale_min + j / items` is the whole number `scale_min * items + j`.
-    scale_factor: u32,
-    /// `scale_min` in internal units: a value `v` sits at grid position
+    /// Admissible totals in internal units, fixed responses included: those
+    /// within the mean tolerance that the free values can also reach.
+    sum_lo: i64,
+    sum_hi: i64,
+    /// Bounds on `n·Σx² − (Σx)²` in internal units, from the SD and its
+    /// tolerance: CLOSURE's integer-exact acceptance rule.
+    m2n_lo: i64,
+    m2n_hi: i64,
+    /// Why no attempt can succeed, when that is known before searching.
+    infeasible: Option<&'static str>,
+    /// Sum and sum of squares of the fixed responses.
+    fixed_sum: i64,
+    fixed_sum_sq: i64,
+    /// `scale_min` in internal units (`items` per scale point, so every grid
+    /// value `scale_min + j / items` is the whole number
+    /// `scale_min * items + j`): a value `v` sits at grid position
     /// `v - scale_min_scaled`.
     scale_min_scaled: i64,
     /// Scaled possible values (integers)
@@ -82,7 +88,7 @@ fn build_sprite_params<T, U>(
     items: u32,
     restrictions_exact: Option<HashMap<i32, usize>>,
     restrictions_minimum: RestrictionsOption,
-) -> Result<SpriteParams<T, U>, ParameterError>
+) -> Result<SpriteParams<U>, ParameterError>
 where
     T: FloatType,
     U: IntegerType,
@@ -273,13 +279,56 @@ where
         .min()
         .unwrap_or(1);
 
+    // The search runs on an integer sum and sum of squares in internal units.
+    // Both `n·Σx²` and `(Σx)²` are at most `(n·max|x|)²`, so if that fits in
+    // an i64 nothing overflows, and acceptance is exact. In f64, an offset
+    // of 1e7 already returned samples whose SD missed the tolerance.
+    let peak = scale_min_i32
+        .unsigned_abs()
+        .max(scale_max_i32.unsigned_abs()) as i128
+        * items as i128;
+    let fits = (n_usize as i128)
+        .checked_mul(peak)
+        .and_then(|x| x.checked_mul(x))
+        .is_some_and(|x| x <= i64::MAX as i128);
+    if !fits {
+        return Err(ParameterError::InputValidation(
+            "n and the scale values are too large for exact integer arithmetic".to_string(),
+        ));
+    }
+
+    let to_i64 = |v: &U| U::to_i64(v).unwrap();
+    let fixed_sum: i64 = fixed_responses_scaled.iter().map(to_i64).sum();
+    let fixed_sum_sq: i64 = fixed_responses_scaled
+        .iter()
+        .map(|v| to_i64(v).pow(2))
+        .sum();
+    let mean_f64 = T::to_f64(&mean).unwrap_or(f64::NAN);
+    let units = scale_factor as f64;
+    let bounds = SearchBounds::new(
+        mean_f64 * units,
+        sd_f64 * units,
+        n_usize,
+        re_mean * units,
+        re_sd * units,
+    );
+    let (sum_lo, sum_hi, infeasible) = feasibility(
+        &bounds,
+        n_usize,
+        &final_possible_values_scaled,
+        &fixed_responses_scaled,
+        fixed_sum,
+    );
+
     Ok(SpriteParams {
-        mean,
-        sd,
         n, // Changed from n_obs
-        mean_tolerance: re_mean + DUST,
-        sd_tolerance: re_sd + DUST,
-        scale_factor,
+        sum_lo,
+        sum_hi,
+        m2n_lo: bounds.m2n_lo,
+        m2n_hi: bounds.m2n_hi,
+        infeasible,
+        fixed_sum,
+        fixed_sum_sq,
         scale_min_scaled: scale_min_i32 as i64 * scale_factor as i64,
         possible_values_scaled: final_possible_values_scaled,
         fixed_responses_scaled,
@@ -289,7 +338,76 @@ where
     })
 }
 
-impl<T: FloatType, U: IntegerType> SpriteParams<T, U> {
+/// The admissible totals, and whether any attempt can succeed at all.
+///
+/// Every total within the mean tolerance that the free values can reach is
+/// admissible, and the SD phase never changes the total, so each attempt aims
+/// at one of them at random. Aiming every attempt at `round(mean * n)` left
+/// all the other admissible totals unreachable.
+///
+/// An SD outside what any sample with an admissible total can reach used to
+/// run every attempt to its loop limit, 16 s to return nothing for mean 3.5,
+/// sd 0.1, n 20 on 1..=5. Both limits are exact in integers:
+///
+/// - Most spread (Bhatia–Davis): values in `[lo, hi]` with total `S` have
+///   `n·Σx² − S² <= (n·hi − S)(S − n·lo)`, a parabola in `S`.
+/// - Least spread: internal values are whole numbers, so at best they split
+///   between two neighbours, `r = S mod n` of them one above the rest, for
+///   `n·Σx² − S² = r (n − r)`. Any `n` consecutive totals include every
+///   remainder, so only those need checking.
+fn feasibility<U: IntegerType>(
+    bounds: &SearchBounds,
+    n: usize,
+    pv: &[U],
+    fixed: &[U],
+    fixed_sum: i64,
+) -> (i64, i64, Option<&'static str>) {
+    let r_n = (n - fixed.len()) as i64;
+    let to_i64 = |v: &U| U::to_i64(v).unwrap();
+    let (pv_min, pv_max) = match (pv.first(), pv.last()) {
+        (Some(lo), Some(hi)) => (to_i64(lo), to_i64(hi)),
+        _ if r_n > 0 => return (0, 0, Some("No possible values to sample from.")),
+        _ => (0, 0),
+    };
+    let sum_lo = bounds.sum_lo.max(fixed_sum + r_n * pv_min);
+    let sum_hi = bounds.sum_hi.min(fixed_sum + r_n * pv_max);
+    if sum_lo > sum_hi {
+        return (
+            0,
+            0,
+            Some("No total within the mean tolerance is reachable."),
+        );
+    }
+
+    let n = n as i128;
+    let values = || pv.iter().chain(fixed).map(to_i64);
+    let lo = values().min().unwrap_or(0) as i128;
+    let hi = values().max().unwrap_or(0) as i128;
+    let (s_lo, s_hi) = (sum_lo as i128, sum_hi as i128);
+    let vertex = (n * (lo + hi)).div_euclid(2);
+    let most = [s_lo, s_hi, vertex, vertex + 1]
+        .into_iter()
+        .map(|s| s.clamp(s_lo, s_hi))
+        .map(|s| (n * hi - s) * (s - n * lo))
+        .max()
+        .unwrap();
+    if (bounds.m2n_lo as i128) > most {
+        return (0, 0, Some("No sample on the scale reaches the SD."));
+    }
+    let least = (s_lo..=s_hi.min(s_lo + n - 1))
+        .map(|s| {
+            let r = s.rem_euclid(n);
+            r * (n - r)
+        })
+        .min()
+        .unwrap();
+    if (bounds.m2n_hi as i128) < least {
+        return (0, 0, Some("No sample on the scale is as narrow as the SD."));
+    }
+    (sum_lo, sum_hi, None)
+}
+
+impl<U: IntegerType> SpriteParams<U> {
     /// Tabulate a sample in internal units onto a value grid `k` wide.
     ///
     /// Exact: internal units are grid steps, so a value's position is plain
@@ -634,8 +752,8 @@ where
 
 /// Find distributions using streaming approach (parallelized with rayon)
 #[allow(clippy::too_many_arguments)]
-fn find_distributions_all_streaming<T, U>(
-    params: &SpriteParams<T, U>,
+fn find_distributions_all_streaming<U>(
+    params: &SpriteParams<U>,
     grid: &ValueGrid,
     stop_after: Option<usize>,
     tx_results: std::sync::mpsc::Sender<Vec<(Vec<u32>, f64)>>,
@@ -645,7 +763,6 @@ fn find_distributions_all_streaming<T, U>(
     writer_failed: &Arc<AtomicUsize>,
     config: &StreamingConfig,
 ) where
-    T: FloatType,
     U: IntegerType + 'static,
 {
     use crate::horns_from_counts;
@@ -771,13 +888,12 @@ fn find_distributions_all_streaming<T, U>(
 }
 
 /// Internal function to find multiple distributions (parallelized with rayon)
-fn find_distributions_all_internal<T, U>(
-    params: &SpriteParams<T, U>,
+fn find_distributions_all_internal<U>(
+    params: &SpriteParams<U>,
     grid: ValueGrid,
     n_distributions: usize,
 ) -> SampleCounts
 where
-    T: FloatType,
     U: IntegerType,
 {
     let k = grid.len();
@@ -864,86 +980,22 @@ where
 }
 
 /// Internal function to find a single distribution
-fn find_distribution_internal<T, U>(
-    params: &SpriteParams<T, U>,
+fn find_distribution_internal<U>(
+    params: &SpriteParams<U>,
     rng: &mut impl Rng,
 ) -> Result<Vec<U>, String>
 where
-    T: FloatType,
     U: IntegerType,
 {
+    if let Some(reason) = params.infeasible {
+        return Err(reason.to_string());
+    }
     let n_usize = U::to_usize(&params.n).unwrap();
     let r_n = n_usize - params.n_fixed;
-    if params.possible_values_scaled.is_empty() && r_n > 0 {
-        return Err("No possible values to sample from for initialization.".to_string());
-    }
-
     let pv = &params.possible_values_scaled;
-    let mean_f64 = T::to_f64(&params.mean).unwrap();
-    let scale_f64 = params.scale_factor as f64;
 
-    let fixed_sum_init: i64 = params
-        .fixed_responses_scaled
-        .iter()
-        .map(|v| U::to_i64(v).unwrap())
-        .sum();
-
-    // Every total within the mean tolerance is admissible, and the SD phase
-    // below never changes the total, so each attempt aims at one of them at
-    // random. Aiming every attempt at `round(mean * n)` left all the other
-    // admissible totals unreachable.
-    let n_units = n_usize as f64 * scale_f64;
-    let (pv_min, pv_max) = match (pv.first(), pv.last()) {
-        (Some(lo), Some(hi)) => (U::to_i64(lo).unwrap(), U::to_i64(hi).unwrap()),
-        _ => (0, 0),
-    };
-    let sum_lo = (((mean_f64 - params.mean_tolerance) * n_units).ceil() as i64)
-        .max(fixed_sum_init + r_n as i64 * pv_min);
-    let sum_hi = (((mean_f64 + params.mean_tolerance) * n_units).floor() as i64)
-        .min(fixed_sum_init + r_n as i64 * pv_max);
-    if sum_lo > sum_hi {
-        return Err("No total within the mean tolerance is reachable.".to_string());
-    }
-    // Bhatia–Davis: values in `[lo, hi]` with mean `m` have a population
-    // variance of at most `(hi − m)(m − lo)`. An SD beyond that for every
-    // admissible mean used to run each attempt to its full loop limit.
-    let values = || {
-        pv.iter()
-            .chain(&params.fixed_responses_scaled)
-            .map(|v| U::to_i64(v).unwrap() as f64)
-    };
-    let lo = values().fold(f64::INFINITY, f64::min);
-    let hi = values().fold(f64::NEG_INFINITY, f64::max);
-    let m = ((lo + hi) / 2.0).clamp(
-        sum_lo as f64 / n_usize as f64,
-        sum_hi as f64 / n_usize as f64,
-    );
-    let sd_max = ((hi - m) * (m - lo) * n_usize as f64 / (n_usize as f64 - 1.0))
-        .max(0.0)
-        .sqrt()
-        / scale_f64;
-    if T::to_f64(&params.sd).unwrap() - params.sd_tolerance > sd_max + 1e-9 {
-        return Err("No sample on the scale reaches the SD.".to_string());
-    }
-    // And the least: internal values are whole numbers, so at best they split
-    // between two neighbours, `r` of `n` one above the rest, for a population
-    // variance of `r (n − r) / n²`. Any `n` consecutive totals include a
-    // multiple of `n`, where that is 0. An SD below this also ran every
-    // attempt to its full loop limit: 16 s for mean 3.5, sd 0.1, n 20 on 1..=5.
-    let n_i64 = n_usize as i64;
-    let min_spread = (sum_lo..=sum_hi.min(sum_lo + n_i64))
-        .map(|total| {
-            let r = total.rem_euclid(n_i64);
-            r * (n_i64 - r)
-        })
-        .min()
-        .unwrap_or(0);
-    let sd_min = (min_spread as f64 / (n_i64 * (n_i64 - 1)) as f64).sqrt() / scale_f64;
-    if T::to_f64(&params.sd).unwrap() + params.sd_tolerance < sd_min - 1e-9 {
-        return Err("No sample on the scale is as narrow as the SD.".to_string());
-    }
-    let total_target_sum = rng.random_range(sum_lo..=sum_hi);
-    let vec_target_sum = total_target_sum - fixed_sum_init;
+    let total_target_sum = rng.random_range(params.sum_lo..=params.sum_hi);
+    let vec_target_sum = total_target_sum - params.fixed_sum;
 
     // Direct mean initialization (O(n)): fill the r_n free slots with the
     // grid value just below their target mean and raise exactly enough of them
@@ -1012,47 +1064,20 @@ where
         .saturating_mul(k_u64 * k_u64)
         .clamp(MAX_DELTA_LOOPS_LOWER as u64, MAX_DELTA_LOOPS_UPPER as u64)
         as u32;
-    let sd_tolerance = T::from(params.sd_tolerance).unwrap();
-
-    // Precompute fixed-part sums (constant for the lifetime of this attempt)
-    let fixed_sum: i64 = params
-        .fixed_responses_scaled
-        .iter()
-        .map(|v| U::to_i64(v).unwrap())
-        .sum();
-    let fixed_sum_sq: i64 = params
-        .fixed_responses_scaled
-        .iter()
-        .map(|v| {
-            let v64 = U::to_i64(v).unwrap();
-            v64 * v64
-        })
-        .sum();
 
     // Running sums for the mutable part of the distribution. Shifts keep the
     // total, so only the sum of squares runs.
-    let running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
-    let mut running_sum_sq: i64 = vec
-        .iter()
-        .map(|v| {
-            let v64 = U::to_i64(v).unwrap();
-            v64 * v64
-        })
-        .sum();
+    let total = vec.iter().map(|v| U::to_i64(v).unwrap()).sum::<i64>() + params.fixed_sum;
+    let mut running_sum_sq: i64 = vec.iter().map(|v| U::to_i64(v).unwrap().pow(2)).sum();
+    let n_i64 = n_usize as i64;
 
     // Shifts in a row that found no move, each after `2 n` random tries.
     let mut stuck = 0;
     for _ in 1..=max_loops_sd {
-        // Check for success (O(1) using running sums)
-        let current_sd: T = T::from(sd_from_running(
-            running_sum + fixed_sum,
-            running_sum_sq + fixed_sum_sq,
-            n_usize,
-            params.scale_factor,
-        ))
-        .unwrap();
-
-        if (current_sd - params.sd).abs() <= sd_tolerance {
+        // `n·Σx² − (Σx)²` is exact, and `build_sprite_params` made sure it
+        // fits in an i64.
+        let m2n = n_i64 * (running_sum_sq + params.fixed_sum_sq) - total * total;
+        if m2n >= params.m2n_lo && m2n <= params.m2n_hi {
             // Success - combine vec with fixed responses
             let mut full_vec = vec;
             full_vec.extend_from_slice(&params.fixed_responses_scaled);
@@ -1065,7 +1090,7 @@ where
 
         // Shift values to adjust SD (updates running sums in O(1)). Every
         // shift keeps the total, so the mean needs no correction afterwards.
-        let increase_sd = current_sd < params.sd;
+        let increase_sd = m2n < params.m2n_lo;
         if shift_values_internal(&mut vec, params, increase_sd, &mut running_sum_sq, rng) {
             stuck = 0;
         } else {
@@ -1084,14 +1109,13 @@ where
 }
 
 /// Adjust mean of scaled integer values
-fn adjust_mean_internal<T, U>(
+fn adjust_mean_internal<U>(
     vec: &mut [U],
-    params: &SpriteParams<T, U>,
+    params: &SpriteParams<U>,
     max_iter: u32,
     rng: &mut impl Rng,
 ) -> Result<(), String>
 where
-    T: FloatType,
     U: IntegerType,
 {
     // With no free values `vec` is empty too, and the loop below reports
@@ -1101,26 +1125,11 @@ where
         return Err("Cannot adjust mean with no possible values.".to_string());
     }
 
-    let target_mean = params.mean;
-
-    // Compute fixed sum once; maintain running sum for vec
-    let fixed_sum: i64 = params
-        .fixed_responses_scaled
-        .iter()
-        .map(|v| U::to_i64(v).unwrap())
-        .sum();
-    let mut running_sum: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum();
-    let n_total = vec.len() + params.fixed_responses_scaled.len();
-
-    let target_mean_f64 = T::to_f64(&target_mean).unwrap();
-    let mean_of =
-        |running_sum: i64| mean_from_running(running_sum + fixed_sum, n_total, params.scale_factor);
-    let mean_ok =
-        |running_sum: i64| (mean_of(running_sum) - target_mean_f64).abs() <= params.mean_tolerance;
+    let mut total: i64 = vec.iter().map(|v| U::to_i64(v).unwrap()).sum::<i64>() + params.fixed_sum;
+    let mean_ok = |total: i64| (params.sum_lo..=params.sum_hi).contains(&total);
 
     for _ in 0..max_iter {
-        let current_mean_f64 = mean_of(running_sum);
-        if mean_ok(running_sum) {
+        if mean_ok(total) {
             return Ok(());
         }
         // Every response is fixed by the restrictions: nothing can move.
@@ -1128,8 +1137,7 @@ where
             break;
         }
 
-        let current_mean = T::from(current_mean_f64).unwrap();
-        let increase_mean = current_mean < target_mean;
+        let increase_mean = total < params.sum_lo;
         let min_poss_val = params.possible_values_scaled[0];
         let max_poss_val = params.possible_values_scaled[params.possible_values_scaled.len() - 1];
 
@@ -1156,7 +1164,7 @@ where
                     if let Some(&new_val) = params.possible_values_scaled.get(new_pos) {
                         let old_i64 = U::to_i64(&current_val).unwrap();
                         let new_i64 = U::to_i64(&new_val).unwrap();
-                        running_sum += new_i64 - old_i64;
+                        total += new_i64 - old_i64;
                         vec[index_to_try] = new_val;
                         changed = true;
                         break;
@@ -1171,7 +1179,7 @@ where
     }
     // The loop checks before each bump, so the last bump is checked here, as
     // is a vector with nothing free, whose limit `n * k` is 0.
-    if mean_ok(running_sum) {
+    if mean_ok(total) {
         return Ok(());
     }
 
@@ -1184,15 +1192,14 @@ where
 }
 
 /// Shift values to adjust standard deviation
-fn shift_values_internal<T, U>(
+fn shift_values_internal<U>(
     vec: &mut [U],
-    params: &SpriteParams<T, U>,
+    params: &SpriteParams<U>,
     increase_sd: bool,
     running_sum_sq: &mut i64,
     rng: &mut impl Rng,
 ) -> bool
 where
-    T: FloatType,
     U: IntegerType,
 {
     let max_attempts = vec.len() * 2;
@@ -1310,30 +1317,6 @@ fn std_dev(data: &[f64]) -> Option<f64> {
     let variance =
         data.iter().map(|&v| (v - data_mean).powi(2)).sum::<f64>() / (data.len() - 1) as f64;
     Some(variance.sqrt())
-}
-
-/// Compute mean from running integer sums (O(1)).
-/// `total_sum` is the sum of all scaled integers (vec + fixed combined).
-#[inline]
-fn mean_from_running(total_sum: i64, n: usize, scale_factor: u32) -> f64 {
-    total_sum as f64 / (scale_factor as f64 * n as f64)
-}
-
-/// Compute sample SD from running integer sums (O(1)).
-/// Uses the computational formula: Var = (n·Σx² − (Σx)²) / (n·(n−1)·s²)
-/// where s = scale_factor.  Returns 0.0 when n < 2 or variance ≤ 0.
-#[inline]
-fn sd_from_running(total_sum: i64, total_sum_sq: i64, n: usize, scale_factor: u32) -> f64 {
-    if n < 2 {
-        return 0.0;
-    }
-    let n_f = n as f64;
-    let scale_f = scale_factor as f64;
-    let numerator = n_f * total_sum_sq as f64 - (total_sum as f64).powi(2);
-    if numerator <= 0.0 {
-        return 0.0;
-    }
-    (numerator / (scale_f * scale_f * n_f * (n_f - 1.0))).sqrt()
 }
 
 #[cfg(test)]
