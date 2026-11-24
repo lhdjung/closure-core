@@ -6,7 +6,10 @@ and says exactly what to change in unsum for each one.
 - **From:** closure-core `1fe8f95`. unsum's `src/rust/Cargo.lock` pins this
   commit (branch `frequency-details`), and `src/rust/vendor/closure-core` is
   byte-identical to it.
-- **To:** branch `optimize` as of `9448030`, 31 commits later.
+- **To:** branch `optimize` as of `7054029`, 43 commits later, plus the
+  review fixes that follow it. Sections 5, 6 and 9 cover everything after
+  `9448030`; the binding patch was built and verified against `9448030`, and
+  no API it uses has changed since.
 - **unsum state:** line numbers refer to unsum's working tree on 2026-09-25,
   including its uncommitted changes.
 
@@ -38,7 +41,7 @@ skipped.
 
 | # | What changed in closure-core | Blocks | What to change in unsum | Where |
 |---|---|---|---|---|
-| 1 | The vendored copy is 31 commits behind | everything | Re-pin and re-vendor | `src/rust/Cargo.toml`, `vendor.tar.xz` |
+| 1 | The vendored copy is 43 commits behind | everything | Re-pin and re-vendor | `src/rust/Cargo.toml`, `vendor.tar.xz` |
 | 2 | `ParquetConfig` / `StreamingConfig` gained a `format` field | compile | Set `format: OutputFormat::Samples` | `lib.rs` config wrappers |
 | 3 | `ModalityConclusion` was removed; it is now `ModalityShapes` | compile | Build `modality_conclusion` from `rl.modality_shapes` | `lib.rs` `modality_conclusion_to_robj` |
 | 4 | `FrequencyTable::f_count()` was removed | compile | Use `f_expected()` and `f_representative()` | `lib.rs` `frequency_table_to_robj` |
@@ -412,6 +415,15 @@ all of them belong in `NEWS.md`.
 - In-memory `stop_after` above 100 could return more samples than asked
   (426 for 150); it is now an exact upper bound. (`784373a`)
 - Horns values are unchanged.
+- At large `n` (from about 18,000), samples exactly on an SD bound were
+  dropped: the bounds' fixed float slack no longer covered f64 error there.
+  The slack now grows with the bound, so counts can **rise**. (review fixes)
+- `closure_count` could undercount on scale values in the millions. Not
+  reachable from typical Likert input. (review fixes)
+- A run with `stop_after` that ends below its limit has seen every sample, and
+  is now marked exhaustive. For such runs `modality_summary$exhaustive` is
+  `TRUE`, and `modality_conclusion` can be `TRUE`/`FALSE` where it was `NA`.
+  (review fixes)
 
 **SPRITE**
 - Rounding errors are taken literally as inclusive half-widths. They used to
@@ -435,11 +447,41 @@ all of them belong in `NEWS.md`.
   and the extreme-horns rows widen accordingly. (`5883909`)
 - Streaming now stops exactly at `stop_after`; `Some(3)` used to write 5–10.
   (`745928f`)
+- **The search walks differently**, so sample sets differ run to run from
+  before, and coverage rises. Every shift moves its first value up or down at
+  random (`4f2b079`), a compensating value may move several grid steps
+  (`cf5c659`), and one attempt in ten starts from a random fill (`7054029`).
+  With exact restrictions, samples behind a restricted value used to be
+  unreachable; unsum passes none unless `restrict_exact` is set.
+- **Small solution spaces take longer and miss fewer samples.** The duplicate
+  rate may stop a search only after 5,000 draws; tiny cases take about 5 ms
+  instead of 0.15 ms. (`33bb164`)
+- **Impossible SDs return at once with no samples**, instead of after up to
+  tens of seconds. (`4f2b079`, `15d2f6c`)
+- **Near the narrowest possible SD, runs finish in milliseconds; near the
+  widest, more samples are found.** An attempt gives up when no move is left,
+  or when ten shifts in a row bring it no closer to the SD. Mean 3, SD 0.08,
+  n = 300 on 1–5 took 66 s and now takes about 35 ms. Mean 3, SD 2, n = 1000
+  found none of its 23 samples and now finds about 21. (`abae5c7`, review
+  fixes)
+- **Acceptance is CLOSURE's integer rule.** A sample is kept when its exact
+  integer sum and `n·Σx² − (Σx)²` lie within the bounds CLOSURE uses, not by
+  comparing a float SD. Results only differ for samples sitting on a bound, and
+  on scale values in the millions, where the float SD returned samples outside
+  the tolerance. (review fixes)
+- Memory mode no longer prints warnings to stderr when it stops early.
+  (`df52c88`)
+- Memory use falls 1.1–3.7× and large runs get faster: samples are
+  deduplicated by their grid counts. Results are unchanged. (`6f1ff63`)
 
 **Modality**
 - `modality_conclusion` is derived per sample now (see 3.2). The old
   `j_shape_*` flags came from a heuristic on per-value count ranges.
   (`e51484c` and following)
+- Equal lower peaks separated by a dip below the threshold now merge into one
+  mode, as tied tallest runs already did. `(8, 7, 8, 2, 20)` has two modes at
+  thresholds 2–6, not three, matching its mirror image. Per-class counts in
+  `modality_*.parquet` and `modality_conclusion` can change. (`dc2cf02`)
 
 ---
 
@@ -455,7 +497,10 @@ as in 3.6.
 | Output folder cannot be created, or any Parquet write fails | `Output`: "failed to write results: …" | Streaming printed the error and returned `total_combinations = 0`. unsum then warned "Summary statistics are internally inconsistent", which was false. |
 | `n < 2`, `scale_min > scale_max`, negative or non-finite SD / tolerance | `InputValidation` | panics or wrong results |
 | CLOSURE: scale values beyond ±21,474,836, or `(n · max|x|)²` beyond `i64` | `InputValidation` | panic after the search |
-| SPRITE: `items = 0` | `InputValidation` | not rejected |
+| CLOSURE: `scale_min == scale_max` | `InputValidation` | every sample `Flat`, so an exhaustive run "proved" the data not unimodal |
+| SPRITE: `items = 0` or `items > 100` | `InputValidation` | not rejected; above 100, neighbouring grid values shared a key |
+| SPRITE: scale values beyond ±21,474,836 | `InputValidation` | panic building the output grid with an integer type wider than `i32` |
+| SPRITE: `(n · max|x| · items)²` beyond `i64` | `InputValidation` | wrong SDs or no samples (sums overflowed) |
 | SPRITE: `scale_max × 100` or `scale_max × items` outside `i32` | `InputValidation` | values silently dropped, or a panic when reading samples |
 
 ---
@@ -561,13 +606,21 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 | `f799da3`, `31c452a`, `0c1c877` | Overflow and range checks turned into errors |
 | `0c74d37`, `be5a3f7` | Restriction docs. unsum passes `NULL`, i.e. `RestrictionsOption::Null`, so neither the default "both scale ends" rule nor the hundredths keys affect it. If `restrict_exact` / `restrict_min` are ever exposed, their names must be hundredths (`"300"` for the value 3), which is what `parse_restrict_*` in the binding already passes through. |
 | "Take scale values in RestrictionsMinimum::from_range" | `from_range(1, 5)` now means the scale values 1 and 5; it used to need `from_range(100, 500)`. unsum does not call it. |
+| `6f1ff63` | SPRITE deduplicates by grid counts: less memory, same results |
+| `dc2cf02` | Equal lower peaks merge; shape classes can change (5) |
+| `4f2b079`, `cf5c659`, `7054029` | SPRITE moves across restriction gaps and reaches more samples; `items > 100` and one-value CLOSURE scales are errors; `RestrictionsOption::extract` returns an `Option` (unsum does not call it) |
+| `df52c88` | No stderr warnings from in-memory SPRITE |
+| `33bb164` | At least 5,000 SPRITE draws before the duplicate rate may stop |
+| `15d2f6c`, `abae5c7` | SPRITE gives up fast on impossible SDs and trapped attempts |
+| review fixes after `7054029` | Exact `closure_count` pruning; bound slack grows with the bound; limited runs below their limit are exhaustive; SPRITE accepts with CLOSURE's integer rule, keeps searching while moves are left, and rejects scales too wide for the grid or for exact arithmetic; `file_path = ""` means the current directory |
 
 ---
 
 ## Appendix A: full binding patch
 
 This is a patch against unsum's `src/rust/src/lib.rs`. It compiles against
-closure-core `9448030` without warnings. The verification in this document was
+closure-core `9448030` without warnings, and uses no API that has changed since
+(not rebuilt against the later commits). The verification in this document was
 run on a package built with exactly this file.
 
 ```diff
