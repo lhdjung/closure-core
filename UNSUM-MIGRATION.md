@@ -1,37 +1,34 @@
 # Adapting unsum to the current closure-core
 
-This guide lists every change in closure-core that affects the unsum R package,
-and says exactly what to change in unsum for each one.
+This guide lists every change in closure-core since the version unsum uses
+that affects unsum, and says exactly what to change in unsum for each one.
 
-- **From:** closure-core `1fe8f95`. unsum's `src/rust/Cargo.lock` pins this
-  commit (branch `frequency-details`), and `src/rust/vendor/closure-core` is
-  byte-identical to it.
-- **To:** branch `optimize` as of `7054029`, 43 commits later, plus the
-  review fixes and the cutoff and flatness changes that follow it. Sections 5,
-  6 and 9 cover everything after `9448030`. The binding patch was built and
-  verified against `9448030`; since then the four entry points have gained an
-  argument, which 3.7 adds on top of it.
-- **unsum state:** line numbers refer to unsum's working tree on 2026-09-25,
-  including its uncommitted changes.
+- **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
+  counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
+  and it writes the counts layout (`OutputFormat::Counts`).
+- **To:** closure-core `bc29dec` on `optimize`.
+- **Line numbers** refer to unsum's master at `9dc590d`.
 
-Everything marked *verified* was run. A scratch copy of unsum was built with
-`R CMD INSTALL` against the new closure-core, using the binding patch in
-[Appendix A](#appendix-a-full-binding-patch), and checked from R.
+The earlier migration from closure-core `1fe8f95`, which a previous version of
+this guide set out, is done in unsum `6d83a70`. That version is still in the
+history: `git show 21d63b9:UNSUM-MIGRATION.md`.
+
+Everything marked *verified* was run. The binding patch in section 3 was
+compiled with `cargo check` against `bc29dec`, without warnings. The R changes
+in section 4 were not run.
 
 ---
 
 ## Contents
 
 1. [The short version](#1-the-short-version)
-2. [Step 1: point unsum at the new closure-core](#2-step-1-point-unsum-at-the-new-closure-core)
+2. [Step 1: get the new closure-core](#2-step-1-get-the-new-closure-core)
 3. [Step 2: the Rust binding](#3-step-2-the-rust-binding-srcrustsrclibrs)
 4. [Step 3: the R code](#4-step-3-the-r-code)
-5. [Results that change numerically](#5-results-that-change-numerically)
+5. [Results that change](#5-results-that-change)
 6. [New errors](#6-new-errors)
-7. [Optional: switch to the counts layout](#7-optional-switch-to-the-counts-layout)
-8. [File reference](#8-file-reference)
-9. [Commit index](#9-commit-index)
-- [Appendix A: full binding patch](#appendix-a-full-binding-patch)
+7. [Multi-item SPRITE samples are rounded to hundredths](#7-multi-item-sprite-samples-are-rounded-to-hundredths)
+8. [Commit index](#8-commit-index)
 
 ---
 
@@ -42,855 +39,293 @@ skipped.
 
 | # | What changed in closure-core | Blocks | What to change in unsum | Where |
 |---|---|---|---|---|
-| 1 | The vendored copy is 43 commits behind | everything | Re-pin and re-vendor | `src/rust/Cargo.toml`, `vendor.tar.xz` |
-| 2 | `ParquetConfig` / `StreamingConfig` gained a `format` field | compile | Set `format: OutputFormat::Samples` | `lib.rs` config wrappers |
-| 3 | `ModalityConclusion` was removed; it is now `ModalityShapes` | compile | Build `modality_conclusion` from `rl.modality_shapes` | `lib.rs` `modality_conclusion_to_robj` |
-| 4 | `FrequencyTable::f_count()` was removed | compile | Use `f_expected()` and `f_representative()` | `lib.rs` `frequency_table_to_robj` |
-| 5 | `ResultsTable.sample` field was removed | compile | Use `results.sample(i)` | `lib.rs` `results_table_to_robj` |
-| 6 | Error messages come through `Display` | readable errors | `format!("{}", e)`, not `{:?}` | `lib.rs`, 3 places |
-| 7 | `closure_count` returns `Result<u64, ParameterError>` | nothing at compile time; see 3.6 | Match on the result | `lib.rs` `count_closure_combinations`, `R/count.R` |
-| 7a | The four entry points take a `prominence` argument; `modality_summary` has four `bar_gap_*` columns | compile; schema check | Pass `None`; export and expect the new columns (3.7) | `lib.rs` 4 calls and the summary list, `R/constants.R` |
-| 8 | `frequency` columns: `f_count` → `f_expected` + `f_representative`; `value` is now double | every generator call | Update the schema check and every `f_count` use | `R/utils.R`, plots, predicates, docs |
-| 9 | `value` columns of `frequency_dist`, `modality_counts`, `modality_pairs` are now double | every generator call | Update the schema check | `R/utils.R` |
-| 10 | `modality_conclusion` can be `NA`, and its columns mean different things | results, docs | Handle `NA` and update the docs | `R/s7-result.R`, docs |
-| 11 | Streaming writes 5 more files (`modality_*.parquet`) | `path = ` runs | Extend `FILES_EXPECTED`, read the new files | `R/constants.R`, `R/read-write-basic.R` |
-| 12 | Multi-item SPRITE tables are one row per grid value, not per integer | SPRITE `items > 1` | Use the grid length, not `scale_max - scale_min + 1` | `R/utils.R` |
-| 13 | Empty streaming runs write every file | empty results | Retire the empty-folder special case | `R/read-write-basic.R` |
-| 14 | Numbers differ: CLOSURE boundaries, SPRITE coverage, and more | tests, NEWS | Update snapshots and NEWS | `tests/`, `NEWS.md` |
-
-Rows 1–7 are all in the binding patch in [Appendix A](#appendix-a-full-binding-patch),
-which compiles and is verified end to end. Row 7a came later and goes on top
-of it; see 3.7. Rows 8–13 are R changes, set out
-in [section 4](#4-step-3-the-r-code).
+| 1 | The commits after `7054029` are not on GitHub yet | everything | Push `optimize`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
+| 2 | The four entry points take a last `prominence` argument | compile | Pass `None` | `src/rust/src/lib.rs`, the calls at lines 421, 434, 468 and 481 |
+| 3 | `modality_summary` has four `bar_gap_*` columns | the schema check, in memory and on disk | Export them, and expect 22 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
+| 4 | Shape classes and SPRITE coverage changed | snapshot tests | Update snapshots and `NEWS.md` (section 5) | `tests/`, `NEWS.md` |
+| 5 | New input errors | nothing; they arrive as strings | Mention in `NEWS.md` (section 6) | |
+| 6 | Multi-item SPRITE samples are in rounded hundredths | exact statistics at `items` = 3, 6, 7, … | Use the grid's exact values where it matters (section 7) | wherever samples are recomputed |
 
 ---
 
-## 2. Step 1: point unsum at the new closure-core
+## 2. Step 1: get the new closure-core
 
-`src/rust/Cargo.toml`:
+unsum already follows `branch = "optimize"`. But GitHub's `optimize` is at
+`7054029`, and everything after it, including all the changes below, exists
+only in the local clone of closure-core. Cargo can only fetch what is pushed,
+and at `7054029` the patch in section 3 does not compile: there is no
+`prominence` argument and no `bar_gap_*` field. So:
 
-```toml
-# before
-closure-core = { git = "https://github.com/lhdjung/closure-core.git", branch = "frequency-details" }
-# after (or `branch = "master"` once `optimize` is merged)
-closure-core = { git = "https://github.com/lhdjung/closure-core.git", branch = "optimize" }
-```
+1. In closure-core: `git push origin optimize`.
+2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
+   `Cargo.lock` now names `bc29dec` or later.
+3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
+   `rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
+   that tarball, so the old copy would otherwise keep being compiled.
 
-Then run `cargo update -p closure-core` in `src/rust`, and regenerate
-`src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
-`rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
-that tarball, so the old copy would otherwise keep being compiled.
-
-The crates closure-core depends on (arrow/parquet 55, rand 0.9, rayon,
-strum 0.26, thiserror 2) were already in the vendored set. The new version
-adds no dependencies.
+closure-core's dependencies are unchanged since `5d63b62`.
 
 ---
 
 ## 3. Step 2: the Rust binding (`src/rust/src/lib.rs`)
 
-Before the patch, compiling the binding against the new closure-core fails with
-exactly six errors:
+Against the new closure-core, the binding fails with four errors
+(*verified*):
 
 ```
-error[E0063]: missing field `format` in initializer of `ParquetConfig`
-error[E0063]: missing field `format` in initializer of `StreamingConfig`
-error[E0432]: unresolved import `closure_core::ModalityConclusion`
-error[E0599]: no method named `f_count` found for reference `&FrequencyTable`
-error[E0609]: no field `modality_conclusion` on type `&ResultListFromMeanSdN<i32>`
-error[E0615]: attempted to take value of method `sample` on type `&ResultsTable<i32>`
+error[E0061]: this function takes 11 arguments but 10 arguments were supplied   (×2, CLOSURE)
+error[E0061]: this function takes 13 arguments but 12 arguments were supplied   (×2, SPRITE)
 ```
 
-Sections 3.1–3.4 fix them. Sections 3.5 and 3.6 cover changes that compile
-unchanged but behave differently. The complete patch is in
-[Appendix A](#appendix-a-full-binding-patch). It compiles without warnings and
-is what the verification ran on.
+This patch fixes them and exports the new columns. *Verified:* it compiles
+without warnings.
 
-### 3.1 Config structs: choose an output layout
-
-Both config structs gained `format: OutputFormat`.
-
-- `Counts` (the default of `::new`) writes a new layout: `counts.parquet`, one
-  column per scale value.
-- `Samples` writes the old layout: `sample.parquet` with columns
-  `pos1..posN`, plus `horns.parquet`.
-- `Both` writes both.
-
-To keep unsum's reader working with the fewest changes, use `Samples`:
-
-```rust
-Ok(StreamingConfigR(StreamingConfig {
-    file_path,
-    batch_size,
-    show_progress,
-    format: OutputFormat::Samples,
-}))
+```diff
+@@ -143,6 +143,10 @@
+         ("deficit_min".into(), (ms.deficit_min as i32).into()),
+         ("deficit_mean".into(), ms.deficit_mean.into()),
+         ("deficit_max".into(), (ms.deficit_max as i32).into()),
++        ("bar_gap_min".into(), (ms.bar_gap_min as i32).into()),
++        ("bar_gap_max".into(), (ms.bar_gap_max as i32).into()),
++        ("bar_gap_min_share".into(), ms.bar_gap_min_share.into()),
++        ("bar_gap_max_share".into(), ms.bar_gap_max_share.into()),
+     ];
+     for class in ShapeClass::all() {
+         pairs.push((format!("n_{}", class.as_str()), (ms.n_of(class) as f64).into()));
+@@ -429,6 +433,7 @@
+                 items_val,
+                 streaming_config,
+                 stop_after,
++                None, // prominence: the default cutoffs
+             )
+         } else {
+             sprite_parallel_streaming(
+@@ -444,6 +449,7 @@
+                 restrict_min_parsed,
+                 streaming_config,
+                 stop_after,
++                None, // prominence: the default cutoffs
+             )
+         };
+ 
+@@ -476,6 +482,7 @@
+             items_val,
+             None, // No parquet config - just return results in memory
+             stop_after,
++            None, // prominence: the default cutoffs
+         )
+     } else {
+         sprite_parallel(
+@@ -491,6 +498,7 @@
+             restrict_min_parsed,
+             None, // No parquet config - just return results in memory
+             stop_after,
++            None, // prominence: the default cutoffs
+         )
+     };
 ```
 
-Do the same in `ParquetConfigR`. unsum never uses that one, because
-`create_combinations()` always passes `None` for memory mode, so deleting it
-works just as well.
+**The gaps must be `as i32`, not `as f64`.** Streaming writes them as
+unsigned integers, which nanoparquet reads as R integers, and the schema check
+compares `typeof` exactly. The `deficit_*` columns already follow this rule.
 
-[Section 7](#7-optional-switch-to-the-counts-layout) explains how to move to
-the counts layout later.
+**`prominence`.** `None` keeps the default cutoffs for the shape
+classification: a mode must stand 5% of `n` above its surroundings for the
+per-class counts, and the shape queries consider every whole-observation
+cutoff from 2% to 10% of `n`. Both are conventions, not derived values. To
+expose them to R, build `ProminenceThresholds { primary, band }` from two R
+arguments. Every cutoff must be a fraction of `n` above 0 and below 1 (`0.05`,
+not `5`); anything else is an `InputValidation` error. A `primary` outside the
+band widens the band to reach it.
 
-### 3.2 `modality_conclusion`: now three-valued, with new meanings
-
-`ResultListFromMeanSdN.modality_conclusion` (four `bool`s) is gone. Its
-replacement is `modality_shapes: closure_core::modality::ModalityShapes`, which
-classifies every sample into one of six shape classes and answers
-`Option<bool>`:
-
-- `Some(true)`: some sample has that shape. This holds whether or not the
-  search was exhaustive.
-- `Some(false)`: samples exist, and none has that shape at any cutoff in the
-  band, so the original data did not have it either. This is only returned
-  when the search was **exhaustive**: CLOSURE without `stop_after`, or with a
-  limit it did not reach.
-- `None`: none was found, but the search was partial, so nothing follows. That
-  covers SPRITE always, and CLOSURE that reached its `stop_after`. It also
-  covers a run with **no samples at all**: that is the consistency finding
-  (the reported statistics cannot all be true), not a statement about shape,
-  so every column is `NA` rather than `FALSE`.
-
-The patch keeps the four column names so that R-side code stays stable, and
-maps `None` to `NA`:
-
-| Column | Was (at `1fe8f95`) | Is now | Method |
-|---|---|---|---|
-| `can_be_unimodal` | some sample is weakly unimodal. That included flat and monotone samples. | some sample has exactly one mode, anywhere. Flat samples no longer count. | `can_be_unimodal()` |
-| `can_be_bimodal` | some sample has two or more qualifying peaks, with the mean between them | some sample has two or more modes | `can_be_multimodal()` |
-| `j_shape_low` | heuristic from the per-value count box: count at value 2 can exceed count at value 1 | some sample has its single mode at the lowest value | `can_be_j_shape_low()` |
-| `j_shape_high` | mirror of `j_shape_low` | mirror | `can_be_j_shape_high()` |
-
-In the verification, SPRITE with `stop_after = 30` gave
-`TRUE TRUE TRUE NA`: `j_shape_high` was not found and not ruled out.
-
-`ModalityShapes` also answers `can_be_bell_shaped()` (one mode away from both
-ends), the claim papers usually make, and `can_be_flat()`. `must_be(...)`
-asks the converse: whether every sample has a shape, e.g.
-`must_be(|c| c == ShapeClass::Flat)` for "the original data was essentially
-uniform". Each is a candidate column. For exactly two modes, use
-`can_be(|c| c == ShapeClass::TwoModes)`.
-
-The patch also exports three new tibbles, each identical to the file of the
-same name that streaming writes (see [section 8](#8-file-reference)):
-`modality_shapes`, `modality_summary` and `modality_prominence`. Exporting them
-from memory mode is what lets `write_basic()` produce the same files as
-streaming.
-
-### 3.3 `frequency`: `f_count` is replaced by two columns
-
-| Column | Was | Is now |
-|---|---|---|
-| `value` | integer | **double**. Multi-item SPRITE grids have fractional values; for CLOSURE they are still whole numbers. |
-| `f_count` | memory mode: counts in the sample nearest the group's mean profile; streaming: the group's mean counts. The two modes disagreed. | **removed** |
-| `f_expected` | – | mean count per value across the group, identical in memory and streaming |
-| `f_representative` | – | counts in the group's medoid: the actual sample with the smallest summed distance (EMD) to all others. **`NaN` in streaming mode**, which cannot find a medoid in one pass. |
-| `f_relative` | memory: `f_count / n` of the nearest sample; streaming: mean / `n` | `f_expected / n` in both modes |
-
-The patch writes the columns in this order: `samples, value, f_expected,
-f_representative, f_relative`.
-
-### 3.4 `results`: samples are stored as counts
-
-`ResultsTable` no longer has a `sample: Vec<Vec<U>>` field. It holds
-`counts: SampleCounts`, one count per scale value per sample. That is lossless,
-since every sample is sorted. `results.sample(i)` rebuilds one sample and
-`results.samples()` rebuilds all of them. The patch expands one sample at a
-time, so the R-side `results` tibble (`id`, `sample` list-column, `horns`)
-looks exactly as before:
-
-```rust
-let samples_robjs: Vec<Robj> = (0..results_table.len())
-    .map(|i| results_table.sample(i).into_robj())
-    .collect();
-```
-
-SPRITE samples are still in **hundredths** (`150` is 1.5), as before. CLOSURE
-samples are whole scale values.
-
-### 3.5 Error messages
-
-`ParameterError` is still `InputValidation | Consistency | Conflict`, plus a
-new `Output(String)` for failed writes. The binding formatted errors with
-`{:?}`, which prints the variant name (`InputValidation("…")`). With `{}`, R
-gets just the message. *Verified:*
-
-```
-"CLOSURE error: sd and the rounding errors must not be negative"
-"Streaming error: failed to write results: failed to create the sample file under '…/bad/': Is a directory (os error 21)"
-```
-
-### 3.6 `closure_count` returns a `Result`
-
-`closure_count(...)` now returns `Result<u64, ParameterError>`. It gives the
-same error `closure_parallel` gives for the same invalid input (negative SD or
-tolerance, non-finite values, `n < 2`, `scale_min > scale_max`, scale out of
-range). It used to return `0` for those, and before that it counted them.
-
-**This does not break the build.** `Robj::from(count)` still compiles, because
-extendr converts any `Result` into an `Robj`. With extendr's default
-`result_panic` feature, an `Err` then becomes a Rust panic, which reaches R as
-an unhelpful error. Match on it instead, as the patch does:
-
-```rust
-match closure_count(mean, sd, n, scale_min, scale_max, rounding_error_mean, rounding_error_sd) {
-    Ok(count) => Robj::from(count),
-    Err(e) => Robj::from(format!("CLOSURE error: {}", e)),
-}
-```
-
-*Verified* from R with the patch:
-
-```
-count_closure_combinations(3.0,  1.0, 20L, 1L, 5L, 0.05, 0.05)  # 48
-count_closure_combinations(3.0, -1.0, 20L, 1L, 5L, 0.05, 0.05)  # "CLOSURE error: sd and the rounding errors must not be negative"
-count_closure_combinations(3.0,  1.0,  1L, 1L, 5L, 0.05, 0.05)  # "CLOSURE error: n must be at least 2"
-```
-
-On the R side, `closure_count_all()` (`R/count.R`) should then treat a
-character result the way `generate-basic.R` does: abort with the message.
-Normally unsum's own argument checks catch invalid input before it gets that
-far.
-
-### 3.7 Cutoffs are a parameter, and the flatness numbers are reported
-
-`closure_parallel`, `closure_parallel_streaming`, `sprite_parallel` and
-`sprite_parallel_streaming` take a last argument,
-`prominence: Option<ProminenceThresholds>`: the cutoffs for the shape
-classification, as fractions of `n`. `None` keeps the defaults (5% of `n`,
-band 2%–10%). Add `None` to the four calls in `src/rust/src/lib.rs` (lines
-421, 434, 468 and 481). Exposing the cutoffs to R would mean building a
-`ProminenceThresholds { primary, band }` from two R arguments instead.
-
-`modality_summary` gains four columns. Streaming writes them; in memory mode the
-binding builds the tibble itself, so add them to its column list next to
-`deficit_max`:
-
-```rust
-("bar_gap_min".into(), (ms.bar_gap_min as f64).into()),
-("bar_gap_max".into(), (ms.bar_gap_max as f64).into()),
-("bar_gap_min_share".into(), ms.bar_gap_min_share.into()),
-("bar_gap_max_share".into(), ms.bar_gap_max_share.into()),
-```
-
-and to `R/constants.R` as `integer`, `integer`, `double`, `double`. Not
-built against unsum.
+**What the new columns mean.** `bar_gap_min` and `bar_gap_max` are the
+smallest and largest gap, over all samples, between a sample's tallest and
+shortest bar, in observations. They are the cutoff-free version of the
+flatness verdict: if `bar_gap_max` is 2, every sample's bars lie within 2
+observations of each other, and a reader can judge whether that is essentially
+uniform without choosing a cutoff. The `_share` columns divide by the average
+bar, `n / k`, and are `NaN` when there are no samples.
 
 ---
 
 ## 4. Step 3: the R code
 
-With the patched binding and the current R code, `closure_generate()` fails
-immediately, in memory and on disk. *Verified:*
-
-```
-CLOSURE data must not be changed before passing them to other `closure_*()` functions.
-! Specifically, `frequency` must be a tibble with:
-• 15 rows and 4 columns
-• These column names and types: "samples" (character), "value" (integer),
-  "f_count" (double), and "f_relative" (double)
-```
-
-The following changes clear that and the next few failures.
-
-### 4.1 `R/constants.R`
+`R/constants.R`, line 69: add the four columns right after `deficit_max`.
+`check_component_tibble()` compares names with `identical()`, so the order
+must match the binding and the file.
 
 ```r
-TIBBLE_NAMES <- c(
-  "inputs", "metrics_main", "metrics_horns",
-  "modality_counts", "modality_pairs", "modality_conclusion",
-  "modality_shapes", "modality_summary", "modality_prominence",   # new
-  "frequency", "frequency_dist", "results"
+MODALITY_SUMMARY_TYPES <- c(
+  list(
+    "exhaustive" = "logical",
+    "n_scanned" = "double",
+    "min_prominence" = "double",
+    "deficit_min" = "integer",
+    "deficit_mean" = "double",
+    "deficit_max" = "integer",
+    "bar_gap_min" = "integer",
+    "bar_gap_max" = "integer",
+    "bar_gap_min_share" = "double",
+    "bar_gap_max_share" = "double"
+  ),
+  `names<-`(as.list(rep("double", 6L)), paste0("n_", SHAPE_CLASSES)),
+  `names<-`(as.list(rep("double", 6L)), paste0("band_n_", SHAPE_CLASSES))
 )
 ```
 
-Position these to match the order of the S7 properties. The binding returns
-them after `modality_conclusion`.
+`R/utils.R`, line 327: `dims = c(1L, 18L)` becomes `dims = c(1L, 22L)`.
 
-Streaming now also writes the modality tables, so the "not persisted" comments
-no longer hold. `modality_conclusion` itself is still derived and never
-written; section 4.3 shows how to rebuild it from `modality_summary`.
-
-`FILES_EXPECTED` for `OutputFormat::Samples`. This is the exact list closure-core
-writes, *verified* for CLOSURE and SPRITE, for found and for empty results, with
-unsum's own two files added:
-
-```r
-FILES_EXPECTED <- c(
-  "info.md",                      # written by unsum
-  "inputs.parquet",               # written by unsum
-  "metrics_main.parquet",
-  "metrics_horns.parquet",
-  "frequency.parquet",
-  "frequency_dist.parquet",
-  "modality_counts.parquet",      # new
-  "modality_pairs.parquet",       # new
-  "modality_shapes.parquet",      # new
-  "modality_summary.parquet",     # new
-  "modality_prominence.parquet",  # new
-  "horns.parquet",
-  "sample.parquet"
-)
-```
-
-`read_basic()` rejects any folder whose files are not exactly this set, so
-this list has to match the output format precisely.
-[Section 7](#7-optional-switch-to-the-counts-layout) gives the list for
-`Counts`.
-
-### 4.2 `check_generator_output()` in `R/utils.R`
-
-| Line | Now | Change to |
-|---|---|---|
-| 217 | `scale_length <- scale_max - scale_min + 1` | Grid length: `(scale_max - scale_min) * items + 1`. For multi-item SPRITE the tables have one row per grid value. *Verified:* 1–7 at `items = 5` gives `frequency` 93 rows (3 × 31) and `modality_counts` 31. For CLOSURE, `items` is 1. |
-| 220–229 | empty check: `scale_length == nrow(frequency) && all(is.nan(f_count))` | `all(is.nan(data$frequency$f_expected))`. Empty results have 3 × k rows (15 for 1–5, *verified*), so the row test never matched. That was already true at `1fe8f95`, so this check was dead before this update. |
-| 231–242 | `frequency`: 4 columns, `value` integer, `f_count` | 5 columns: `samples` character, `value` **double**, `f_expected`, `f_representative`, `f_relative` double |
-| 244–256 | `frequency_dist$value` integer | **double** (`count`, `n_samples` stay integer) |
-| 258–297 | modality tibbles, "only present for in-memory results" | `modality_counts$value` and `modality_pairs$value_a`/`value_b` are **double**, and their row counts use the grid length too. `modality_conclusion` is still logical but may be `NA`. The block now applies to data read from disk as well. Add checks for the three new tibbles (schemas in [section 8](#8-file-reference)). |
-
-### 4.3 `R/read-write-basic.R`
-
-**Reading (`read_basic()`)**
-
-- **Read the new files** alongside the other small ones:
-  `modality_counts`, `modality_pairs`, `modality_shapes`, `modality_summary`,
-  `modality_prominence`.
-- **Rebuild `modality_conclusion` from `modality_summary`** so that data read
-  from disk has the same columns as data in memory. This mirrors
-  `ModalityShapes::can_be` exactly. *Verified:* identical to the in-memory
-  columns for five CLOSURE cases (including all-`NA` empty results) and a
-  `stop_after` run.
-
-  ```r
-  conclusion_from_summary <- function(s) {
-    can_be <- function(classes) {
-      if (sum(unlist(s[paste0("band_n_", classes)])) > 0) TRUE
-      else if (isTRUE(s$exhaustive)) FALSE
-      else NA
-    }
-    tibble::tibble(
-      can_be_unimodal = can_be(c("one_mode_interior", "one_mode_low_edge", "one_mode_high_edge")),
-      can_be_bimodal  = can_be(c("two_modes", "three_or_more_modes")),
-      j_shape_low     = can_be("one_mode_low_edge"),
-      j_shape_high    = can_be("one_mode_high_edge")
-    )
-  }
-  ```
-
-  Use the `band_n_*` columns, not `n_*`. The `n_*` counts are taken at one
-  mode threshold, 5% of `n`. `band_n_*` counts a sample for every class it takes
-  at any threshold between 2% and 10% of `n`, and that is what the proof
-  semantics rest on.
-- **The empty-results escape hatch (lines 157–163 and 239–260) is obsolete.**
-  An empty streaming run now writes every file. `sample.parquet` and
-  `horns.parquet` have zero rows, `metrics_main$samples_all` is 0, and
-  `frequency` is all `NaN` (*verified*). The folder therefore counts as
-  complete, and the normal read path must cope with zero-row files. The
-  `create_empty_results()` call there can go.
-
-**Writing (`write_basic()`)**
-
-It writes `intersect(names(data), names_on_disk)`, where `names_on_disk` comes
-from `FILES_EXPECTED`. Once memory mode returns `modality_shapes`,
-`modality_summary` and `modality_prominence` (from the patch) and
-`FILES_EXPECTED` lists their files, it writes them automatically, and folders
-written from R match folders streamed from Rust.
-
-### 4.4 Every use of `f_count`
-
-| File | Lines | Suggested replacement |
-|---|---|---|
-| `R/plot-bar-basic.R` | 64, 249, 269, 273, 284, 287 | `f_expected` |
-| `R/plot-ecdf-basic.R` | 207, 218, 314, 324, 327, 346, 355 | `f_expected` |
-| `R/predicates-basic.R` | 22 (`metric = c("f_count", "f_relative")`) | `c("f_expected", "f_representative", "f_relative")` |
-| `R/doc-helpers.R` | 29, 68 | describe both columns (see 3.3) |
-
-Default to `f_expected`. It is defined in both modes. `f_representative` is
-`NaN` for anything written by streaming, and `closure_generate(path = …)`
-always streams. Offer `f_representative` where a real sample is wanted (e.g.
-a bar plot of the medoid), and fall back or warn when it is `NaN`.
-
-### 4.5 `modality_conclusion` consumers
-
-- `R/s7-result.R:214` says "flagging modality and J-shape status". Say that
-  `NA` means "not found, but the search was partial (SPRITE, or `stop_after`)".
-- Any `if (x$modality_conclusion$can_be_unimodal)` needs `isTRUE()` or explicit
-  `NA` handling.
-- The column meanings in the table in 3.2 changed. Update the user
-  documentation, and consider renaming `can_be_bimodal` to
-  `can_be_multimodal` while breaking anyway.
-
-### 4.6 `count_closure_combinations()` / `R/count.R`
-
-- It now agrees exactly with the number of samples `closure_generate()` finds,
-  including samples sitting exactly on a bound and negative scales.
-- Input that `closure_generate()` would reject (negative SD or tolerance,
-  non-finite values, `n < 2`, `scale_min > scale_max`) is now an error; see
-  3.6 for handling it. unsum validates these in R first, so it should not
-  happen in practice.
-- Counts above about 1.8e19 saturate at `u64::MAX` instead of wrapping to a
-  small number. R receives a double (*verified*: `numeric double 48`), so
-  `1.844674e+19` means "at least this many".
+Nothing else in R needs to change. `modality_conclusion` and its rebuild from
+`modality_summary` work as before.
 
 ---
 
-## 5. Results that change numerically
+## 5. Results that change
 
-None of these changes need code in unsum. Some will break snapshot tests, and
-all of them belong in `NEWS.md`.
+None of these need code in unsum. Some will break snapshot tests, and all of
+them belong in `NEWS.md`.
 
 **CLOSURE**
-- Samples lying exactly on a mean or SD bound were sometimes dropped because
-  of float error (e.g. mean 3.24, n = 25). They are now found, so counts can
-  **rise**. (`784373a`)
-- With `n = 2`, every pair was returned regardless of the mean. (`784373a`)
-- In-memory `stop_after` above 100 could return more samples than asked
-  (426 for 150); it is now an exact upper bound. (`784373a`)
-- Horns values are unchanged.
+
+- **Large samples no longer crash R.** The search recursed once per value, so
+  from about `n = 20,000` it overflowed its stack and aborted the process.
+  Deep branches now run on an explicit stack. (`ae301d4`)
 - At large `n` (from about 18,000), samples exactly on an SD bound were
-  dropped: the bounds' fixed float slack no longer covered f64 error there.
-  The slack now grows with the bound, so counts can **rise**. (review fixes)
-- `closure_count` could undercount on scale values in the millions. Not
-  reachable from typical Likert input. (review fixes)
-- A run with `stop_after` that ends below its limit has seen every sample, and
-  is now marked exhaustive. For such runs `modality_summary$exhaustive` is
-  `TRUE`, and `modality_conclusion` can be `TRUE`/`FALSE` where it was `NA`.
-  (review fixes)
+  dropped, because the bounds' fixed float slack no longer covered f64 error
+  there. Counts can **rise**. (`72d2f41`)
+- A run with `stop_after` that ends below its limit has seen every sample and
+  is marked exhaustive, so `modality_conclusion` can be `TRUE`/`FALSE` where it
+  was `NA`. (`93cf367`)
+- A complete search that finds no sample now says `exhaustive = TRUE` in
+  `modality_summary`. `modality_conclusion` stays `NA`: no samples is the
+  consistency finding, not a shape one. `modality_prominence` lists the
+  cutoffs in observations of the real `n` (2, 5, 10 at `n = 100`), not 1 each.
+  (`ce0783d`)
+- Wide scales are fast: a scale of 0–600 at `n = 3` took 11 s and 1.7 GB, and
+  now takes under a millisecond. (`bc29dec`)
 
 **SPRITE**
-- Rounding errors are taken literally as inclusive half-widths. They used to
-  be turned into a number of decimal places: 0.02 became 0.05 and 0.01 became
-  0.005. A tolerance like 0.005 already mapped to two decimal places, so for
-  unsum's usual settings the accepted interval is essentially the same; other
-  rounding settings can change. (`784373a`)
-- **Multi-item scales are exact.** 1.333 used to be stored as 1.3. Some
-  samples missed the reported mean/SD on the real values: 16 of 200 at
-  `items = 3`, 83 of 200 at `items = 4`. `items = 2` never produced half
-  values at some tolerances. (`6cfe417`)
-- **Frequency tables and horns for `items > 1` are on the real grid.** They
-  used to be computed after rounding every value to a whole number. `frequency`
-  and `frequency_dist` now have one row per grid value, e.g. 1, 1.5, 2, …, 5 at
-  `items = 2` (*verified*). Horns, and `metrics_horns$uniform`, which refers to
-  a uniform distribution over the grid, are different numbers. (`0d41544`)
-- **Many more distinct samples.** Every attempt aimed at the single total
-  `round(mean * n)`, so SPRITE never produced any other admissible total.
-  For mean 3.0, SD 1.0, n = 100 it found ~170 samples, all with total 300. It
-  now finds ~1,450, about 130 for each total from 295 to 305. The horns range
-  and the extreme-horns rows widen accordingly. (`5883909`)
-- Streaming now stops exactly at `stop_after`; `Some(3)` used to write 5–10.
-  (`745928f`)
-- **The search walks differently**, so sample sets differ run to run from
-  before, and coverage rises. Every shift moves its first value up or down at
-  random (`4f2b079`), a compensating value may move several grid steps
+
+- **The search walks differently**, so sample sets differ from before, and
+  coverage rises. Every shift moves its first value up or down at random,
+  which reaches samples behind an exactly restricted value (`4f2b079`); a
+  compensating value may move several grid steps
   (`cf5c659`), and one attempt in ten starts from a random fill (`7054029`).
-  With exact restrictions, samples behind a restricted value used to be
-  unreachable; unsum passes none unless `restrict_exact` is set.
-- **Small solution spaces take longer and miss fewer samples.** The duplicate
-  rate may stop a search only after 5,000 draws; tiny cases take about 5 ms
-  instead of 0.15 ms. (`33bb164`)
-- **Impossible SDs return at once with no samples**, instead of after up to
-  tens of seconds. (`4f2b079`, `15d2f6c`)
-- **Near the narrowest possible SD, runs finish in milliseconds; near the
-  widest, more samples are found.** An attempt gives up when no move is left,
-  or when ten shifts in a row bring it no closer to the SD. Mean 3, SD 0.08,
-  n = 300 on 1–5 took 66 s and now takes about 35 ms. Mean 3, SD 2, n = 1000
-  found none of its 23 samples and now finds about 21. (`abae5c7`, review
-  fixes)
+  On fine grids (`items` near 100 on a wide scale), the per-attempt step limit
+  now grows with the grid, so high SDs are reached where every attempt used to
+  fail (`cbdd3b7`).
 - **Acceptance is CLOSURE's integer rule.** A sample is kept when its exact
-  integer sum and `n·Σx² − (Σx)²` lie within the bounds CLOSURE uses, not by
-  comparing a float SD. Results only differ for samples sitting on a bound, and
-  on scale values in the millions, where the float SD returned samples outside
-  the tolerance. (review fixes)
+  integer sum and `n·Σx² − (Σx)²` lie within CLOSURE's bounds, not by comparing
+  a float SD. Results differ only for samples sitting on a bound, and on scale
+  values in the millions. (`15b08ab`)
+- **Small solution spaces take longer and miss fewer samples.** The duplicate
+  rate may stop a search only after 5,000 successful draws; tiny cases take
+  about 5 ms instead of 0.15 ms. Where draws are expensive, this floor sets the
+  run time: mean 3, SD 2, `n = 1000` on 1–5 with tolerances 0.005 and 0.001
+  has 23 samples, and SPRITE finds about 21 of them in 4–5 s (it used to find
+  none). With tolerances of 0.05 the same mean and SD admit about a million
+  samples, so a run without `stop_after` goes on until the duplicate rate or
+  the attempt cap ends it. (`33bb164`, `38adc9d`, `7223cc7`)
+- **One attempt cap for both modes.** A search makes at most 20 attempts per
+  sample asked for, between 5,000 and 100 million, and 100 million without
+  `stop_after`. In memory, a run without `stop_after` used to have no
+  practical bound; streaming with `stop_after` used to try up to 100 million
+  times. (`533ea9a`)
+- **Hopeless SDs return at once with no samples**, including when fixed
+  responses (restrictions) rule the SD out. (`15d2f6c`, `72bcf94`)
+- **Near the narrowest possible SD, runs finish in milliseconds.** An attempt
+  gives up when no move is left, or when ten shifts in a row bring it no closer
+  to the SD. Mean 3, SD 0.08, `n = 300` on 1–5 took 66 s and now takes about
+  35 ms. (`abae5c7`, `38adc9d`)
 - Memory mode no longer prints warnings to stderr when it stops early.
   (`df52c88`)
-- Memory use falls 1.1–3.7× and large runs get faster: samples are
-  deduplicated by their grid counts. Results are unchanged. (`6f1ff63`)
+- Restriction keys are the output grid's own labels. At `items` = 40, 56 and
+  80, a value ending in exactly half a hundredth used to need a different key
+  from the one it is labelled with in the results. Matters only if
+  `restrict_exact` or `restrict_min` is used. (`f2e83a4`)
 
-**Modality**
-- `modality_conclusion` is derived per sample now (see 3.2). The old
-  `j_shape_*` flags came from a heuristic on per-value count ranges.
-  (`e51484c` and following)
+**Shapes**
+
 - **Near-uniform samples are flat.** A sample is flat when its tallest bar
-  exceeds its shortest by less than the cutoff. The tallest bar used to be a
-  mode at every cutoff, so `(30, 30, 30, 30, 29)` read as a floor effect and
-  `(29, 30, 30, 30, 29)` as a bell. `n_flat` and `band_n_flat` rise; the
-  one-mode classes and `can_be_unimodal`, `j_shape_*` fall accordingly. On
-  scales with many values and a small `n`, where bars hold few observations,
-  many more samples are flat. (cutoff and flatness changes)
-- Equal lower peaks separated by a dip below the threshold now merge into one
-  mode, as tied tallest runs already did. `(8, 7, 8, 2, 20)` has two modes at
-  thresholds 2–6, not three, matching its mirror image. Per-class counts in
-  `modality_*.parquet` and `modality_conclusion` can change. (`dc2cf02`)
+  exceeds its shortest by less than the cutoff, so `(30, 30, 30, 30, 29)` is
+  flat. The tallest bar used to be a mode at every cutoff, so that sample read
+  as a floor effect and `(29, 30, 30, 30, 29)` as a bell. `n_flat` and
+  `band_n_flat` rise; the one-mode classes fall. On scales with many values and
+  a small `n` many more samples are flat. (`f862887`)
+- **A single peak reaches a scale end when the bars between are within the
+  cutoff of it.** Whether a peak was a bell or a floor effect used to turn on
+  the exact position of the tallest bar: at a cutoff of 5,
+  `(31, 29, 30, 5, 5)` was a floor effect and `(30, 29, 31, 5, 5)` a bell.
+  Both are floor effects now, as is `(19, 21, 2, 2, 6)`. `j_shape_low` and
+  `j_shape_high` can become `TRUE` where they were `FALSE`, and
+  `n_one_mode_interior` falls: for mean 2.1, SD 1.3, `n = 50` on 1–5, from 3
+  to 1. (`d3749b6`)
+- Equal lower peaks separated by a dip below the cutoff merge into one mode,
+  as tied tallest runs already did: `(8, 7, 8, 2, 20)` has two modes, not
+  three, matching its mirror image. (`dc2cf02`)
+- The unimodality deficit has the same values and is computed in linear time,
+  which matters only on very wide grids. (`9c357f3`)
 
 ---
 
 ## 6. New errors
 
 All of these arrive in R as the character string the binding returns. unsum
-already turns that into `abort_in_export()` and deletes the new folder. The
-input errors also come from `count_closure_combinations()` once it is patched
-as in 3.6.
+already turns that into `abort_in_export()`.
 
 | Condition | Error | Before |
 |---|---|---|
-| Output folder cannot be created, or any Parquet write fails | `Output`: "failed to write results: …" | Streaming printed the error and returned `total_combinations = 0`. unsum then warned "Summary statistics are internally inconsistent", which was false. |
-| `n < 2`, `scale_min > scale_max`, negative or non-finite SD / tolerance | `InputValidation` | panics or wrong results |
-| CLOSURE: scale values beyond ±21,474,836, or `(n · max|x|)²` beyond `i64` | `InputValidation` | panic after the search |
+| More than 100,000 scale values (CLOSURE), or grid values `(scale_max − scale_min) · items + 1` (SPRITE) | `InputValidation` | CLOSURE could list billions of seeds; SPRITE spent 40 MB per sample. `count_closure_combinations()` has no such limit. |
 | CLOSURE: `scale_min == scale_max` | `InputValidation` | every sample `Flat`, so an exhaustive run "proved" the data not unimodal |
-| SPRITE: `items = 0` or `items > 100` | `InputValidation` | not rejected; above 100, neighbouring grid values shared a key |
-| SPRITE: scale values beyond ±21,474,836 | `InputValidation` | panic building the output grid with an integer type wider than `i32` |
-| SPRITE: `(n · max|x| · items)²` beyond `i64` | `InputValidation` | wrong SDs or no samples (sums overflowed) |
-| SPRITE: `scale_max × 100` or `scale_max × items` outside `i32` | `InputValidation` | values silently dropped, or a panic when reading samples |
+| SPRITE: `items > 100` | `InputValidation` | neighbouring grid values shared a key in hundredths |
+| SPRITE: scale values beyond ±21,474,836 | `InputValidation` | panic building the output grid |
+| SPRITE: an infinite SD or tolerance | `InputValidation` | an empty result |
+| SPRITE: restrictions fixing more responses than `n`, however large the counts | `InputValidation` | a huge count panicked or tried to allocate terabytes |
+| A prominence cutoff not above 0 and below 1 (only once cutoffs are exposed) | `InputValidation` | a cutoff of 5 meant as 5% classified every sample as flat |
 
 ---
 
-## 7. Optional: switch to the counts layout
+## 7. Multi-item SPRITE samples are rounded to hundredths
 
-`OutputFormat::Counts` is closure-core's default. It stores one row per sample
-and one **count column per scale value** instead of one column per position.
-There is no `id` column: the row number is the id. For a 235k-sample run on
-1–7 with n = 60 that is about 6.6 MB in memory instead of ~62 MB. On disk it is
-about 1.3× smaller.
+SPRITE reports samples in hundredths of a scale point: `results.sample(i)`
+and the `value_hundredths` column of `scale_values.parquet` give 150 for 1.5.
+When `items` does not divide 100 (3, 6, 7, 9, …) those are **rounded**: at
+`items = 3` the grid value 4/3 is 133. The sample itself met the mean and SD
+on the exact values, but statistics recomputed from rounded hundredths can
+miss a tight tolerance. (`e030a5b`)
 
-With `format: OutputFormat::Counts`, the folder holds (*verified*):
-
-```r
-FILES_EXPECTED <- c(
-  "info.md", "inputs.parquet",
-  "counts.parquet", "scale_values.parquet", "format.parquet",
-  "metrics_main.parquet", "metrics_horns.parquet",
-  "frequency.parquet", "frequency_dist.parquet",
-  "modality_counts.parquet", "modality_pairs.parquet",
-  "modality_shapes.parquet", "modality_summary.parquet",
-  "modality_prominence.parquet"
-)
-```
-
-There is no `sample.parquet` or `horns.parquet`; horns is the last column of
-`counts.parquet`. To rebuild the old `results$sample` list-column in R
-(*verified*: identical to `sample.parquet` and `horns.parquet` from the same
-run, for CLOSURE and SPRITE):
-
-```r
-counts <- nanoparquet::read_parquet(file.path(dir, "counts.parquet"))
-key    <- nanoparquet::read_parquet(file.path(dir, "scale_values.parquet"))
-m      <- as.matrix(counts[key$column])        # one count column per value
-# CLOSURE: whole values; SPRITE: hundredths, as the old layout had them
-unit   <- if (technique == "CLOSURE") key$value else key$value_hundredths
-sample <- lapply(seq_len(nrow(m)), \(i) rep(unit, m[i, ]))
-horns  <- counts$horns
-```
-
-The count columns are unsigned integers: `UInt8` for `n < 255`, `UInt16` for
-`n < 65535`, otherwise `UInt32`. Check how your reader maps `UInt32`. Column
-names are readable (`v1`, `v1_5`, `vn2` for −2), but `scale_values.parquet` is
-the authoritative mapping. `format.parquet` has one row: `format = "counts"`,
-`version = 2`, `technique`, `n`, `k`, `items`, `scale_min`, `scale_max`,
-`sample_scale_factor`.
-
-Reading counts directly, e.g. for bar plots, avoids expanding the samples at
-all. Memory mode could also hand `results.counts.as_flat()` to R as an integer
-matrix instead of a list of vectors.
+For anything computed from multi-item samples, use the exact values:
+`scale_values.parquet`'s `value` column, or `counts.grid().values()` in the
+binding, with the per-value counts. For `items` = 1, 2, 4, 5, 10, 20, 25, 50
+and 100 the hundredths are exact.
 
 ---
 
-## 8. File reference
+## 8. Commit index
 
-Types are as nanoparquet reads them (*verified*). "Both" means the column holds
-the same values in memory mode and in streaming.
-
-| File | Columns |
-|---|---|
-| `metrics_main` | `samples_all` dbl, `values_all` dbl. Unchanged. |
-| `metrics_horns` | `mean`, `uniform`, `sd`, `cv`, `mad`, `min`, `median`, `max`, `range`, all dbl. Unchanged. |
-| `frequency` | `samples` chr (`all` / `horns_min` / `horns_max`, each × k), `value` **dbl**, `f_expected` dbl (both), `f_representative` dbl (memory only, `NaN` when streamed), `f_relative` dbl (both) |
-| `frequency_dist` | `value` **dbl**, `count` int, `n_samples` int |
-| `modality_counts` | `value` dbl, `count_lo` int, `count_hi` int: per-value count range over all samples |
-| `modality_pairs` | `value_a` dbl, `value_b` dbl, `resolved` lgl, `a_greater` lgl: whether each adjacent ordering is fixed |
-| `modality_shapes` | `class` chr, `n_samples` dbl, `value` dbl, `count_lo` int, `count_hi` int: per-value count range **within each shape class**. Classes with no samples have no rows. |
-| `modality_summary` | one row: `exhaustive` lgl, `n_scanned` dbl, `min_prominence` dbl, `deficit_min` int, `deficit_mean` dbl, `deficit_max` int, `bar_gap_min` int, `bar_gap_max` int, `bar_gap_min_share` dbl, `bar_gap_max_share` dbl, `n_<class>` dbl ×6 (at the primary threshold), `band_n_<class>` dbl ×6 (anywhere in the band) |
-| `modality_prominence` | `min_prominence` dbl, `min_prominence_counts` int, `primary` lgl, `class` chr, `n_samples` dbl: class counts at each rung of the threshold band (by default 0.02, 0.05, 0.10 of n) |
-| `sample` (Samples layout) | `pos1..posN` int. Unchanged; SPRITE values in hundredths. |
-| `horns` (Samples layout) | `horns` dbl. Unchanged. |
-| `counts`, `scale_values`, `format` (Counts layout) | see [section 7](#7-optional-switch-to-the-counts-layout) |
-
-The six classes are `flat`, `one_mode_interior`, `one_mode_low_edge`,
-`one_mode_high_edge`, `two_modes` and `three_or_more_modes`. Every sample falls
-into exactly one of them at a given threshold.
-
-Folder paths: `file_path` is always treated as a directory and created if
-missing. unsum passes a folder it just created, so nothing changes. Before,
-streaming to a path that was not an existing directory wrote
-`<path>_counts.parquet`-style files next to it instead. (`af4236e`)
-
----
-
-## 9. Commit index
-
-Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
+Commits since `5d63b62` that affect unsum; the rest are tests, docs, tooling
+and refactors.
 
 | Commit | Effect on unsum |
 |---|---|
-| `0d41544` | Results stored as counts; `OutputFormat`; `value` columns double; multi-item SPRITE tables on the real grid |
-| `e51484c`–`d6ac82e` | `ModalityShapes` replaces `ModalityConclusion`; `f_expected` / `f_representative` replace `f_count`; `modality_*.parquet` files |
-| `784373a` | CLOSURE boundary samples, `n = 2`, exact `stop_after`; SPRITE literal tolerances; input errors instead of panics; empty runs write statistics |
-| `6d62dd3` | `can_be` checks the whole threshold band; `band_n_*` columns in `modality_summary` |
-| `6cfe417` | Multi-item SPRITE exact |
-| `5883909` | SPRITE reaches every admissible total |
-| `6fcadce` | SPRITE `n = 2` with default restrictions no longer panics |
-| `af4236e`, `57b36b1` | Output folder semantics; write failures are errors (`ParameterError::Output`) |
-| `b6e7a47`, `9b939b5` | `closure_count` validation and saturation |
-| "Return an error from closure_count on invalid input" | `closure_count` returns `Result<u64, ParameterError>` (3.6) |
-| `745928f` | SPRITE streaming honours `stop_after` |
-| `f799da3`, `31c452a`, `0c1c877` | Overflow and range checks turned into errors |
-| `0c74d37`, `be5a3f7` | Restriction docs. unsum passes `NULL`, i.e. `RestrictionsOption::Null`, so neither the default "both scale ends" rule nor the hundredths keys affect it. If `restrict_exact` / `restrict_min` are ever exposed, their names must be hundredths (`"300"` for the value 3), which is what `parse_restrict_*` in the binding already passes through. |
-| "Take scale values in RestrictionsMinimum::from_range" | `from_range(1, 5)` now means the scale values 1 and 5; it used to need `from_range(100, 500)`. unsum does not call it. |
-| `6f1ff63` | SPRITE deduplicates by grid counts: less memory, same results |
-| `dc2cf02` | Equal lower peaks merge; shape classes can change (5) |
-| `4f2b079`, `cf5c659`, `7054029` | SPRITE moves across restriction gaps and reaches more samples; `items > 100` and one-value CLOSURE scales are errors; `RestrictionsOption::extract` returns an `Option` (unsum does not call it) |
-| `df52c88` | No stderr warnings from in-memory SPRITE |
-| `33bb164` | At least 5,000 SPRITE draws before the duplicate rate may stop |
-| `15d2f6c`, `abae5c7` | SPRITE gives up fast on impossible SDs and trapped attempts |
-| cutoff and flatness changes after `4c8969d` | Near-uniform samples are flat; `prominence` argument on all four entry points; `bar_gap_*` columns; `must_be` and `can_be_flat` (3.7) |
-| review fixes after `7054029` | Exact `closure_count` pruning; bound slack grows with the bound; limited runs below their limit are exhaustive; SPRITE accepts with CLOSURE's integer rule, keeps searching while moves are left, and rejects scales too wide for the grid or for exact arithmetic; `file_path = ""` means the current directory |
-
----
-
-## Appendix A: full binding patch
-
-This is a patch against unsum's `src/rust/src/lib.rs`. It compiles against
-closure-core `9448030` without warnings. Against the current closure-core it
-also needs the changes in 3.7 (not rebuilt). The verification in this document was
-run on a package built with exactly this file.
-
-```diff
---- a/src/rust/src/lib.rs
-+++ b/src/rust/src/lib.rs
-@@ -1,6 +1,7 @@
-+use closure_core::modality::{ModalityShapes, ShapeClass};
- use closure_core::{
-     closure_count, closure_parallel, closure_parallel_streaming, sprite_parallel,
--    sprite_parallel_streaming, FrequencyDist, ModalityConclusion, ModalityCounts, ModalityPairs,
-+    sprite_parallel_streaming, FrequencyDist, ModalityCounts, ModalityPairs, OutputFormat,
-     ParquetConfig, RestrictionsMinimum, RestrictionsOption, ResultListFromMeanSdN, StreamingConfig,
- };
- /// This is part of unsum, an R package that uses extendr for Rust integration
-@@ -34,6 +35,7 @@
-         Ok(ParquetConfigR(ParquetConfig {
-             file_path,
-             batch_size,
-+            format: OutputFormat::Samples,
-         }))
-     }
- }
-@@ -69,6 +71,7 @@
-             file_path,
-             batch_size,
-             show_progress,
-+            format: OutputFormat::Samples,
-         }))
-     }
- }
-@@ -105,25 +108,99 @@
-     .into()
- }
- 
--/// (can_be_unimodal, can_be_bimodal, j_shape_low, j_shape_high) — exactly one row
--fn modality_conclusion_to_robj(mc: &ModalityConclusion) -> Robj {
-+/// `None` ("not ruled out, but the search was partial") becomes `NA`.
-+fn to_rbool(x: Option<bool>) -> Rbool {
-+    x.map_or(Rbool::na(), Rbool::from)
-+}
-+
-+/// Same four columns as before, now three-valued; see the migration guide.
-+fn modality_conclusion_to_robj(ms: &ModalityShapes) -> Robj {
-     data_frame!(
--        can_be_unimodal = vec![mc.can_be_unimodal],
--        can_be_bimodal  = vec![mc.can_be_bimodal],
--        j_shape_low     = vec![mc.j_shape_low],
--        j_shape_high    = vec![mc.j_shape_high]
-+        can_be_unimodal = vec![to_rbool(ms.can_be_unimodal())],
-+        can_be_bimodal  = vec![to_rbool(ms.can_be_multimodal())],
-+        j_shape_low     = vec![to_rbool(ms.can_be_j_shape_low())],
-+        j_shape_high    = vec![to_rbool(ms.can_be_j_shape_high())]
-     )
-     .into()
- }
- 
-+/// Long format, one row per (class, grid value), like `modality_shapes.parquet`.
-+fn modality_shapes_to_robj(ms: &ModalityShapes, values: &[f64]) -> Robj {
-+    let (mut class, mut n_samples, mut value, mut count_lo, mut count_hi) =
-+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-+    for b in &ms.bounds {
-+        for (i, (&lo, &hi)) in b.count_lo.iter().zip(&b.count_hi).enumerate() {
-+            class.push(b.class.as_str());
-+            n_samples.push(b.n_samples as f64);
-+            value.push(values[i]);
-+            count_lo.push(lo);
-+            count_hi.push(hi);
-+        }
-+    }
-+    data_frame!(
-+        class = class,
-+        n_samples = n_samples,
-+        value = value,
-+        count_lo = count_lo,
-+        count_hi = count_hi
-+    )
-+    .into()
-+}
-+
-+/// One row, same columns as `modality_summary.parquet`.
-+fn modality_summary_to_robj(ms: &ModalityShapes) -> Robj {
-+    let mut pairs: Vec<(String, Robj)> = vec![
-+        ("exhaustive".into(), ms.exhaustive.into()),
-+        ("n_scanned".into(), (ms.n_scanned as f64).into()),
-+        ("min_prominence".into(), ms.min_prominence.into()),
-+        ("deficit_min".into(), (ms.deficit_min as f64).into()),
-+        ("deficit_mean".into(), ms.deficit_mean.into()),
-+        ("deficit_max".into(), (ms.deficit_max as f64).into()),
-+    ];
-+    for class in ShapeClass::all() {
-+        pairs.push((format!("n_{}", class.as_str()), (ms.n_of(class) as f64).into()));
-+    }
-+    for class in ShapeClass::all() {
-+        let n = ms.band_n_per_class[class as usize] as f64;
-+        pairs.push((format!("band_n_{}", class.as_str()), n.into()));
-+    }
-+    let mut df: Robj = List::from_pairs(pairs).into();
-+    df.set_attrib("class", "data.frame").unwrap();
-+    df.set_attrib("row.names", vec![1i32]).unwrap();
-+    df
-+}
-+
-+/// One row per (rung, class), same columns as `modality_prominence.parquet`.
-+fn modality_prominence_to_robj(ms: &ModalityShapes) -> Robj {
-+    let (mut prom, mut counts, mut primary, mut class, mut n_samples) =
-+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-+    for rung in &ms.ladder {
-+        for c in ShapeClass::all() {
-+            prom.push(rung.min_prominence);
-+            counts.push(rung.min_prominence_counts as i32);
-+            primary.push(rung.primary);
-+            class.push(c.as_str());
-+            n_samples.push(rung.n_of(c) as f64);
-+        }
-+    }
-+    data_frame!(
-+        min_prominence = prom,
-+        min_prominence_counts = counts,
-+        primary = primary,
-+        class = class,
-+        n_samples = n_samples
-+    )
-+    .into()
-+}
-+
- /// Helper function to convert FrequencyTable to R data frame
- /// The frequency table now includes a 'samples' column as the first column
- fn frequency_table_to_robj(freq_table: &closure_core::FrequencyTable) -> Robj {
--    // Create a data frame with columns: samples, value, f_count, f_relative
-     let df = data_frame!(
-         samples = freq_table.samples_group().to_vec(),
-         value = freq_table.value().to_vec(),
--        f_count = freq_table.f_count().to_vec(),
-+        f_expected = freq_table.f_expected().to_vec(),
-+        f_representative = freq_table.f_representative().to_vec(),
-         f_relative = freq_table.f_relative().to_vec()
-     );
- 
-@@ -231,7 +308,9 @@
-     let frequency_dist = frequency_dist_to_robj(&rl.frequency_dist);
-     let modality_counts = modality_counts_to_robj(&rl.modality_counts);
-     let modality_pairs = modality_pairs_to_robj(&rl.modality_pairs);
--    let modality_conclusion = modality_conclusion_to_robj(&rl.modality_conclusion);
-+    let modality_conclusion = modality_conclusion_to_robj(&rl.modality_shapes);
-+    let modality_shapes =
-+        modality_shapes_to_robj(&rl.modality_shapes, rl.results.counts.grid().values());
-     let results = results_table_to_robj(&rl.results);
- 
-     vec![
-@@ -242,6 +321,9 @@
-         ("modality_counts", modality_counts),
-         ("modality_pairs", modality_pairs),
-         ("modality_conclusion", modality_conclusion),
-+        ("modality_shapes", modality_shapes),
-+        ("modality_summary", modality_summary_to_robj(&rl.modality_shapes)),
-+        ("modality_prominence", modality_prominence_to_robj(&rl.modality_shapes)),
-         ("results", results),
-     ]
- }
-@@ -252,15 +334,9 @@
-     // Clone the id vector (Vec<f64>) for R compatibility
-     let id_vec: Vec<f64> = results_table.id.clone();
- 
--    // Convert each sample to an R integer vector and collect into a list
--    let samples_robjs: Vec<Robj> = results_table
--        .sample
--        .iter()
--        .map(|sample| {
--            // Each sample becomes an R integer vector
--            let sample_clone: Vec<i32> = sample.clone();
--            sample_clone.into_robj()
--        })
-+    // Samples are stored as count vectors now; expand one at a time.
-+    let samples_robjs: Vec<Robj> = (0..results_table.len())
-+        .map(|i| results_table.sample(i).into_robj())
-         .collect();
- 
-     // Create a list of samples (each element is a vector)
-@@ -289,7 +365,9 @@
-     rounding_error_mean: f64,
-     rounding_error_sd: f64,
- ) -> Robj {
--    let count = closure_count(
-+    // Invalid input is an error now, not a count of 0; report it the way
-+    // `create_combinations()` does.
-+    match closure_count(
-         mean,
-         sd,
-         n,
-@@ -297,9 +375,10 @@
-         scale_max,
-         rounding_error_mean,
-         rounding_error_sd,
--    );
--
--    Robj::from(count)
-+    ) {
-+        Ok(count) => Robj::from(count),
-+        Err(e) => Robj::from(format!("CLOSURE error: {}", e)),
-+    }
- }
- 
- #[extendr]
-@@ -406,7 +485,7 @@
-         let result = match result {
-             Ok(r) => r,
-             Err(e) => {
--                return Robj::from(format!("Streaming error: {:?}", e));
-+                return Robj::from(format!("Streaming error: {}", e));
-             }
-         };
-         let result_list = list!(
-@@ -435,7 +514,7 @@
-             ) {
-                 Ok(results) => results,
-                 Err(e) => {
--                    return Robj::from(format!("CLOSURE error: {:?}", e));
-+                    return Robj::from(format!("CLOSURE error: {}", e));
-                 }
-             }
-         }
-@@ -463,7 +542,7 @@
-             ) {
-                 Ok(results) => results,
-                 Err(e) => {
--                    return Robj::from(format!("SPRITE error: {:?}", e));
-+                    return Robj::from(format!("SPRITE error: {}", e));
-                 }
-             }
-         }
-```
+| `490a6c3` | `prominence` argument on the four entry points (3) |
+| `f862887` | Near-uniform samples are flat; `bar_gap_*` columns (3, 4, 5) |
+| `d3749b6` | A single peak's edge is decided by the bars within the cutoff (5) |
+| `dc2cf02` | Equal lower peaks merge (5) |
+| `47784a3` | Cutoffs must lie between 0 and 1; a cutoff of 0 reads as 1 (6) |
+| `ce0783d` | Complete empty runs are exhaustive; real `n` in `modality_prominence` (5) |
+| `ae301d4` | No stack overflow at large `n` (5) |
+| `bc29dec` | Wide CLOSURE scales are fast; at most 100,000 scale values (5, 6) |
+| `72d2f41` | Exact bounds at large `n` (5) |
+| `93cf367` | Limited runs below their limit are exhaustive (5) |
+| `4f2b079`, `cf5c659`, `7054029`, `cbdd3b7` | SPRITE reaches more samples (5) |
+| `15b08ab` | SPRITE accepts by CLOSURE's integer rule (5) |
+| `33bb164`, `38adc9d`, `abae5c7`, `7223cc7` | SPRITE run times on small and hard cases (5) |
+| `533ea9a` | One SPRITE attempt cap for memory and streaming (5) |
+| `15d2f6c`, `72bcf94` | SPRITE returns at once on hopeless SDs (5) |
+| `f2e83a4` | SPRITE restriction keys follow the grid labels (5) |
+| `4f2b079`, `236c6cc`, `6a1290e`, `67af72f`, `f55bf11` | New input errors (6) |
+| `e030a5b` | Multi-item SPRITE hundredths are rounded (7) |
+| `df52c88` | No stderr warnings from in-memory SPRITE (5) |
+| `03a04da` | f32 inputs keep samples on a bound; unsum passes f64, so nothing changes |
+| `c718a69` | `file_path = ""` means the current directory; unsum always passes a folder |
