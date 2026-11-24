@@ -6,7 +6,7 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `a248020` on `optimize`.
+- **To:** closure-core `7bf2a52` on `optimize`.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -14,7 +14,7 @@ this guide set out, is done in unsum `6d83a70`. That version is still in the
 history: `git show 21d63b9:UNSUM-MIGRATION.md`.
 
 Everything marked *verified* was run. The binding patch in section 3 was
-compiled with `cargo check` against `a248020`, without warnings. The R changes
+compiled with `cargo check` against `7bf2a52`, without warnings. The R changes
 in section 4 were not run.
 
 ---
@@ -42,6 +42,7 @@ skipped.
 | 1 | The commits after `7054029` are not on GitHub yet | everything | Push `optimize`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
 | 2 | The four entry points take a last `prominence` argument | compile | Pass `None` | `src/rust/src/lib.rs`, the calls at lines 421, 434, 468 and 481 |
 | 3 | `modality_summary` has eight new columns: `bar_gap_*`, `second_peak_*`, `edge_drop_*` | the schema check, in memory and on disk | Export them, and expect 26 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
+| 3a | `metrics_horns` has two new columns: `single_peak_ceiling`, `beyond_single_peak` | the schema check, on disk at once and in memory once exported | Export them, and expect 11 columns | `src/rust/src/lib.rs` 287, `R/utils.R` 196–210 |
 | 4 | Shape classes and SPRITE coverage changed | snapshot tests | Update snapshots and `NEWS.md` (section 5) | `tests/`, `NEWS.md` |
 | 5 | New input errors | nothing; they arrive as strings | Mention in `NEWS.md` (section 6) | |
 | 6 | Multi-item SPRITE samples are in rounded hundredths | exact statistics at `items` = 3, 6, 7, … | Use the grid's exact values where it matters (section 7) | wherever samples are recomputed |
@@ -58,7 +59,7 @@ and at `7054029` the patch in section 3 does not compile: there is no
 
 1. In closure-core: `git push origin optimize`.
 2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
-   `Cargo.lock` now names `a248020` or later.
+   `Cargo.lock` now names `7bf2a52` or later.
 3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
    `rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
    that tarball, so the old copy would otherwise keep being compiled.
@@ -77,7 +78,8 @@ error[E0061]: this function takes 11 arguments but 10 arguments were supplied   
 error[E0061]: this function takes 13 arguments but 12 arguments were supplied   (×2, SPRITE)
 ```
 
-This patch fixes them and exports the new columns. *Verified:* it compiles
+This patch fixes them and exports the new columns of `modality_summary` and
+`metrics_horns`. *Verified:* it compiles
 without warnings.
 
 ```diff
@@ -96,7 +98,18 @@ without warnings.
      ];
      for class in ShapeClass::all() {
          pairs.push((format!("n_{}", class.as_str()), (ms.n_of(class) as f64).into()));
-@@ -429,6 +437,7 @@
+@@ -284,7 +292,9 @@
+         min = rl.metrics_horns.min,
+         median = rl.metrics_horns.median,
+         max = rl.metrics_horns.max,
+-        range = rl.metrics_horns.range
++        range = rl.metrics_horns.range,
++        single_peak_ceiling = rl.metrics_horns.single_peak_ceiling,
++        beyond_single_peak = rl.metrics_horns.beyond_single_peak
+     )
+     .into();
+ 
+@@ -429,6 +439,7 @@
                  items_val,
                  streaming_config,
                  stop_after,
@@ -104,7 +117,7 @@ without warnings.
              )
          } else {
              sprite_parallel_streaming(
-@@ -444,6 +453,7 @@
+@@ -444,6 +455,7 @@
                  restrict_min_parsed,
                  streaming_config,
                  stop_after,
@@ -112,7 +125,7 @@ without warnings.
              )
          };
  
-@@ -476,6 +486,7 @@
+@@ -476,6 +488,7 @@
              items_val,
              None, // No parquet config - just return results in memory
              stop_after,
@@ -120,13 +133,14 @@ without warnings.
          )
      } else {
          sprite_parallel(
-@@ -491,6 +502,7 @@
+@@ -491,6 +504,7 @@
              restrict_min_parsed,
              None, // No parquet config - just return results in memory
              stop_after,
 +            None, // prominence: the default cutoffs
          )
      };
+ 
 ```
 
 **The counts must be `as i32`, not `as f64`.** Streaming writes `bar_gap_min`,
@@ -165,6 +179,16 @@ rests on, in observations, as its smallest and largest value over the samples
 Each is exactly where the class changes, so a reader can weigh these numbers
 against `n` without adopting closure-core's cutoffs.
 
+In `metrics_horns`, `single_peak_ceiling` is the highest horns index any
+single-peaked histogram on the scale can have, `(2k − 1)² / (9 (k − 1)²)` for
+`k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when even the
+lowest SD the reported SD and its rounding allow is past it. Then every
+histogram with that SD has a dip, so, if the reported statistics are right,
+the original data was not single-peaked. It follows from the SD alone, so it
+holds for SPRITE and for runs with `stop_after` too. On 1–5 the line is a
+population SD of 1.5; at `n = 100` a reported SD of 1.52 is flagged. The
+derivation is in closure-core's `protocols/horns-and-shapes.qmd`.
+
 ---
 
 ## 4. Step 3: the R code
@@ -197,6 +221,18 @@ MODALITY_SUMMARY_TYPES <- c(
 ```
 
 `R/utils.R`, line 327: `dims = c(1L, 18L)` becomes `dims = c(1L, 26L)`.
+
+`R/utils.R`, lines 196–210, the `metrics_horns` check: `dims = c(1L, 9L)`
+becomes `dims = c(1L, 11L)`, and two types follow `"range" = "double"`:
+
+```r
+      "range" = "double",
+      "single_peak_ceiling" = "double",
+      "beyond_single_peak" = "logical"
+```
+
+Streaming writes the two columns already, so without this change, results
+read from disk fail the check even before the binding exports them.
 
 Nothing else in R needs to change. `modality_conclusion` and its rebuild from
 `modality_summary` work as before.
@@ -334,6 +370,7 @@ and refactors.
 | `490a6c3` | `prominence` argument on the four entry points (3) |
 | `f862887` | Near-uniform samples are flat; `bar_gap_*` columns (3, 4, 5) |
 | `a248020` | `second_peak_*` and `edge_drop_*` columns (3) |
+| `7bf2a52` | `single_peak_ceiling` and `beyond_single_peak` in `metrics_horns` (3) |
 | `d3749b6` | A single peak's edge is decided by the bars within the cutoff (5) |
 | `dc2cf02` | Equal lower peaks merge (5) |
 | `47784a3` | Cutoffs must lie between 0 and 1; a cutoff of 0 reads as 1 (6) |
