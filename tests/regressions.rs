@@ -784,7 +784,10 @@ fn sprite_rejects_a_scale_its_integer_type_cannot_hold() {
             Err(ParameterError::InputValidation(msg)) => {
                 assert!(msg.contains("times 100 must fit"), "{msg}")
             }
-            other => panic!("items {items}: expected an input error, got {:?}", other.is_ok()),
+            other => panic!(
+                "items {items}: expected an input error, got {:?}",
+                other.is_ok()
+            ),
         }
     }
     // 327.67 is the most an i16 holds in hundredths.
@@ -1323,7 +1326,10 @@ fn sprite_rejects_a_grid_too_wide_to_store() {
         Err(ParameterError::InputValidation(msg)) => {
             assert!(msg.contains("at most 100000"), "{msg}")
         }
-        other => panic!("expected an input error, got {:?}", other.map(|r| r.results.len())),
+        other => panic!(
+            "expected an input error, got {:?}",
+            other.map(|r| r.results.len())
+        ),
     }
     // The limit counts grid values, items included: 99,999 at one item fits,
     // 1,000 at 100 items does not.
