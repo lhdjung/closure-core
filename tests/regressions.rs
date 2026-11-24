@@ -731,8 +731,9 @@ fn sprite_without_a_limit_does_not_overflow() {
     use closure_core::{sprite_parallel, RestrictionsOption};
 
     // `stop_after = None` became `usize::MAX`, which was then multiplied by
-    // 20: a panic in debug builds. A small space lets the search end on its
-    // own duplicate-rate rule.
+    // 20: a panic in debug builds, a silent wrap in release, so this test
+    // only catches it in debug; `attempt_cap`'s unit test pins the limit
+    // itself. Here a small space ends the search on its duplicate-rate rule.
     let results = sprite_parallel::<f64, i32>(
         2.0,
         0.9,

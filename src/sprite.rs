@@ -20,7 +20,10 @@ use std::thread;
 
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
+/// Attempts per sample asked for, under `stop_after`.
 const MAX_DUP_LOOPS: u32 = 20;
+/// Most attempts one search makes, in memory or streaming.
+const MAX_ATTEMPTS: usize = 100_000_000;
 /// Float slack for the tests' own tolerance checks.
 #[cfg(test)]
 const DUST: f64 = 1e-12;
@@ -43,6 +46,24 @@ const MIN_DRAWS: u64 = 5_000;
 /// however small n was. Covers any Likert scale at 100 items, and scales of
 /// up to 99,999 points at one item.
 const MAX_GRID_WIDTH: usize = 100_000;
+
+/// Most attempts a search makes, failures included, the same in memory and
+/// streaming: `MAX_DUP_LOOPS` per sample asked for, but never more than
+/// `MAX_ATTEMPTS`, and with no limit `MAX_ATTEMPTS` itself. The in-memory
+/// search used to saturate at `usize::MAX` without a limit (no practical
+/// bound) while streaming stopped at `MAX_ATTEMPTS`.
+///
+/// Never fewer than `MIN_DRAWS` either, so a small `stop_after` leaves the
+/// duplicate rate its chance to end the search. That holds only while
+/// attempts succeed: the cap counts failures too, `MIN_DRAWS` only successful
+/// draws, so where many attempts fail the cap ends a limited search first.
+fn attempt_cap(stop_after: Option<usize>) -> usize {
+    stop_after.map_or(MAX_ATTEMPTS, |limit| {
+        limit
+            .saturating_mul(MAX_DUP_LOOPS as usize)
+            .clamp(MIN_DRAWS as usize, MAX_ATTEMPTS)
+    })
+}
 
 // Internal struct to hold the final, validated parameters (generic version)
 #[derive(Debug)]
@@ -594,8 +615,7 @@ where
     // the grid's real resolution, which for a multi-item scale is finer than a
     // whole scale point.
     let grid = <Sprite as SampleFormat<U>>::value_grid(scale_min, scale_max, items);
-    let n_distributions = stop_after.unwrap_or(usize::MAX);
-    let counts = find_distributions_all_internal(&params, grid, n_distributions);
+    let counts = find_distributions_all_internal(&params, grid, stop_after);
 
     // Calculate all statistics using the shared function from lib.rs SPRITE
     // searches the solution space at random rather than enumerating it, so a
@@ -808,7 +828,7 @@ fn find_distributions_all_streaming<U>(
     let cumulative_duplicates = Arc::new(AtomicU64::new(0));
 
     let batch_size = 100;
-    let max_iterations = 100_000_000;
+    let max_iterations = attempt_cap(stop_after);
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
         if should_stop.load(Ordering::Relaxed) || writer_failed.load(Ordering::Relaxed) == 1 {
@@ -924,7 +944,7 @@ fn find_distributions_all_streaming<U>(
 fn find_distributions_all_internal<U>(
     params: &SpriteParams<U>,
     grid: ValueGrid,
-    n_distributions: usize,
+    stop_after: Option<usize>,
 ) -> SampleCounts
 where
     U: IntegerType,
@@ -943,12 +963,8 @@ where
 
     // Process in batches for better control and early termination
     let batch_size = 100;
-    // Saturating: `stop_after = None` arrives here as `usize::MAX`. Never fewer
-    // than `MIN_DRAWS`, or a small `stop_after` would cut the search shorter
-    // than the duplicate rate may.
-    let max_iterations = n_distributions
-        .saturating_mul(MAX_DUP_LOOPS as usize)
-        .max(MIN_DRAWS as usize);
+    let n_distributions = stop_after.unwrap_or(usize::MAX);
+    let max_iterations = attempt_cap(stop_after);
 
     for batch_start in (0..max_iterations).step_by(batch_size) {
         if should_stop.load(Ordering::Relaxed) || results.nrow() >= n_distributions {
@@ -1886,6 +1902,18 @@ pub mod tests {
              (CLOSURE finds 24,907 for these inputs). \
              LP stopping criterion may be broken."
         );
+    }
+
+    #[test]
+    fn the_attempt_cap_is_bounded_without_a_limit_and_never_wraps() {
+        // `stop_after = None` used to become `usize::MAX`, then times 20:
+        // a panic in debug builds, a silent wrap in release. Just past
+        // `usize::MAX / 20` a wrapped product falls below 20.
+        assert_eq!(attempt_cap(None), MAX_ATTEMPTS);
+        assert_eq!(attempt_cap(Some(usize::MAX / 20 + 1)), MAX_ATTEMPTS);
+        assert_eq!(attempt_cap(Some(usize::MAX)), MAX_ATTEMPTS);
+        assert_eq!(attempt_cap(Some(1)), MIN_DRAWS as usize);
+        assert_eq!(attempt_cap(Some(1_000)), 20_000);
     }
 
     #[test]
