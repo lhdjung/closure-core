@@ -454,7 +454,12 @@ fn classify_from_runs(runs: &[Run], min_prominence_counts: u32) -> ShapeClass {
             let near_summit = |r: &Run| summit - r.height < t;
             if runs.iter().take_while(|r| r.start < start).all(near_summit) {
                 ShapeClass::OneModeLowEdge
-            } else if runs.iter().rev().take_while(|r| r.end > end).all(near_summit) {
+            } else if runs
+                .iter()
+                .rev()
+                .take_while(|r| r.end > end)
+                .all(near_summit)
+            {
                 ShapeClass::OneModeHighEdge
             } else {
                 ShapeClass::OneModeInterior
@@ -1687,7 +1692,10 @@ mod tests {
         // must not decide between a bell and a floor effect.
         assert_eq!(classify(&[31, 29, 30, 5, 5], 5), ShapeClass::OneModeLowEdge);
         assert_eq!(classify(&[30, 29, 31, 5, 5], 5), ShapeClass::OneModeLowEdge);
-        assert_eq!(classify(&[5, 5, 31, 29, 30], 5), ShapeClass::OneModeHighEdge);
+        assert_eq!(
+            classify(&[5, 5, 31, 29, 30], 5),
+            ShapeClass::OneModeHighEdge
+        );
         // 40 of 50 observations on the bottom two values, 2 apart.
         assert_eq!(classify(&[19, 21, 2, 2, 6], 5), ShapeClass::OneModeLowEdge);
         // A drop of the full cutoff between the peak and the end keeps it
@@ -1756,7 +1764,10 @@ mod tests {
                     let class = classify(row, t);
                     assert_eq!(classify(&reversed, t), mirror(class), "{row:?} at {t}");
                     if let Some(p) = previous {
-                        assert!(stage(p) <= stage(class), "{row:?}: {p:?} then {class:?} at {t}");
+                        assert!(
+                            stage(p) <= stage(class),
+                            "{row:?}: {p:?} then {class:?} at {t}"
+                        );
                         if stage(p) == 3 && stage(class) == 3 {
                             assert_eq!(p, class, "{row:?} switched edges at {t}");
                         }
@@ -1891,7 +1902,11 @@ mod tests {
         assert_eq!(shapes.n_scanned, 0);
         assert!(shapes.exhaustive);
         // The rungs are in observations of the run's n, not of n = 0.
-        let rungs: Vec<u32> = shapes.ladder.iter().map(|r| r.min_prominence_counts).collect();
+        let rungs: Vec<u32> = shapes
+            .ladder
+            .iter()
+            .map(|r| r.min_prominence_counts)
+            .collect();
         assert_eq!(rungs, vec![2, 5, 10]);
         assert_eq!(shapes.can_be_unimodal(), None);
         assert_eq!(shapes.can_be_bell_shaped(), None);

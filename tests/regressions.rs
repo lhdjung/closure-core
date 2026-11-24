@@ -179,11 +179,14 @@ fn a_complete_search_that_finds_nothing_is_exhaustive() {
     assert_eq!(results.results.len(), 0);
     let shapes = &results.modality_shapes;
     assert!(shapes.exhaustive);
-    assert_eq!(shapes.can_be_unimodal(), None, "no samples, no shape inference");
+    assert_eq!(
+        shapes.can_be_unimodal(),
+        None,
+        "no samples, no shape inference"
+    );
 
     let results =
-        closure_parallel::<f64, i32>(3.0, 5.0, 100, 1, 5, 0.05, 0.05, 1, None, None, None)
-            .unwrap();
+        closure_parallel::<f64, i32>(3.0, 5.0, 100, 1, 5, 0.05, 0.05, 1, None, None, None).unwrap();
     let rungs: Vec<u32> = results
         .modality_shapes
         .ladder
