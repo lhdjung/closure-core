@@ -540,8 +540,11 @@ impl ModalityShapes {
     /// or `None` when it is empty throughout.
     ///
     /// Every whole-observation threshold in the band counts, not only the
-    /// rungs, so the answer need not be a rung. Above the lowest rung it is
-    /// reported as `t / n` for a threshold of `t` observations.
+    /// rungs, so the answer need not be a rung. At the lowest rung the answer
+    /// is that rung's fraction, the exact minimum. Above it a threshold of `t`
+    /// observations admits every fraction in `((t − 1) / n, t / n]`, which
+    /// has no least element, so it is reported as `t / n`, capped at the top
+    /// rung. Either way the answer lies in the band and rounds to `t`.
     ///
     /// This is the robustness number behind a `Some(false)`: it says how far the
     /// prominence rule would have to be relaxed or tightened before the shape
@@ -915,7 +918,10 @@ impl ShapeAccumulator {
         let n = self.n_scanned;
         let primary = self.primary;
         let (band_lo_fraction, band_lo) = self.ladder[0];
+        let band_hi_fraction = self.ladder[self.ladder.len() - 1].0;
         let sample_size = self.n.max(1) as f64;
+        // Capped at the top rung, which rounds to the same `t`: uncapped, the
+        // top rung's threshold read 13 / 128 = 0.1016 for a band ending at 0.10.
         let band_min_prominence = self
             .band_min
             .iter()
@@ -924,7 +930,7 @@ impl ShapeAccumulator {
                     if t <= band_lo {
                         band_lo_fraction
                     } else {
-                        t as f64 / sample_size
+                        (t as f64 / sample_size).min(band_hi_fraction)
                     }
                 })
             })
@@ -1319,6 +1325,20 @@ mod tests {
         assert_eq!(
             shapes.min_prominence_admitting(ShapeClass::TwoModes),
             Some(0.02)
+        );
+    }
+
+    #[test]
+    fn the_admitting_threshold_stays_inside_the_band() {
+        // At n = 128 the 0.10 rung is 13 observations, and this sample is a
+        // bell only from 13 on. Reported as 13 / 128, that read 0.1016 for a
+        // band ending at 0.10.
+        let mut acc = ShapeAccumulator::new(5, 128, DEFAULT_MODE_PROMINENCE);
+        acc.update(&[10, 40, 26, 38, 10]);
+        let shapes = acc.finish(true);
+        assert_eq!(
+            shapes.min_prominence_admitting(ShapeClass::OneModeInterior),
+            Some(0.10)
         );
     }
 
