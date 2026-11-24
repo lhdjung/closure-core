@@ -14,9 +14,10 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
 /// The system allocator, plus a running total of live heap bytes and its peak.
-/// Heap bytes rather than RSS: RSS only ever grows within a process, so it
-/// can't be split between cases, and it includes memory the allocator holds
-/// on to after it was freed.
+/// Heap bytes rather than RSS: the peak RSS the OS reports is a high-water mark
+/// for the whole process, so it can't be split between cases, and current RSS
+/// depends on when the allocator hands freed pages back to the OS, not on what
+/// the code still has live.
 struct Counting;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -37,12 +38,18 @@ unsafe impl GlobalAlloc for Counting {
         System.dealloc(ptr, layout)
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = System.realloc(ptr, layout, new_size);
+        if new_ptr != ptr {
+            // The block moved, so the old and the new block were both live
+            // while it was copied. LIVE still counts the old one here.
+            PEAK.fetch_max(LIVE.load(Relaxed) + new_size, Relaxed);
+        }
         if new_size > layout.size() {
             grow(new_size - layout.size());
         } else {
             LIVE.fetch_sub(layout.size() - new_size, Relaxed);
         }
-        System.realloc(ptr, layout, new_size)
+        new_ptr
     }
 }
 
