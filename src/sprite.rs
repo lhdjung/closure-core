@@ -519,7 +519,9 @@ impl<T: FloatType, U: IntegerType + 'static> crate::Technique<T, U> for Sprite {
 ///
 /// # Returns
 /// A `ResultListFromMeanSdN<U>` containing all distributions and comprehensive statistics
-/// including horns metrics and frequency distributions.
+/// including horns metrics and frequency distributions. Samples are reported
+/// in hundredths of a scale point, which round multi-item values when `items`
+/// does not divide 100; see [`crate::ResultsTable::sample`].
 ///
 /// # Example
 /// ```ignore

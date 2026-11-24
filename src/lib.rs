@@ -633,6 +633,13 @@ impl<U: IntegerType> ResultsTable<U> {
     }
 
     /// Reconstruct sample `i` as a sorted vector of values.
+    ///
+    /// Values are in the technique's sample unit: whole scale points for
+    /// CLOSURE, hundredths for SPRITE. For a multi-item SPRITE scale whose
+    /// `items` does not divide 100, such as 3, hundredths round the grid
+    /// values (4/3 becomes 133), so statistics recomputed from them can miss
+    /// a tight tolerance the sample itself meets. For exact values, read
+    /// `counts.row(i)` against `counts.grid().values()`.
     pub fn sample(&self, i: usize) -> Vec<U> {
         self.counts.sample_at(i)
     }
