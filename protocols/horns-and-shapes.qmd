@@ -1,0 +1,572 @@
+---
+title: "What the horns index can and cannot say about shape"
+subtitle: "The single-peak ceiling, the 4/9 limit, and the numbers behind closure-core's shape verdicts"
+date: 2026-11-24
+format:
+  html:
+    toc: true
+    number-sections: true
+    html-math-method: katex
+execute:
+  echo: true
+---
+
+## Summary
+
+- **Pooling horns values across samples adds nothing.** The horns index is a
+  sample's variance divided by the largest variance the scale allows. The
+  reported SD fixes the variance, so every sample that matches the reported
+  statistics has the same horns index, up to the SD's rounding. Its mean,
+  median, minimum and maximum over the samples restate the reported SD.
+- **The horns index of a uniform histogram depends only on the number of
+  scale values $k$:** $(k+1)/(3(k-1))$, so 0.5 on a 1–5 scale. It is not the
+  line between single-peaked and not.
+- **There is such a line, and it is exact.** No single-peaked histogram on $k$
+  evenly spaced values has a horns index above
+  $$
+  \frac{(2k-1)^2}{9(k-1)^2},
+  $$
+  which is 0.5625 on 5 values and 0.52 on 7, and falls towards $4/9$ on long
+  scales. A floor or ceiling effect reaches it. On a 1–$k$ scale it means: no
+  single-peaked histogram has a population SD above $(2k-1)/6$, which is 1.5
+  on 1–5.
+- **So the reported SD alone can show that the data was not single-peaked.**
+  closure-core reports the ceiling and a flag, `beyond_single_peak`, in
+  `metrics_horns`. The flag needs no samples, no search and no cutoff, so it
+  also works for SPRITE and for truncated runs. Neither of those can rule out
+  a shape by itself, because neither sees every sample.
+- **It only works in one direction.** A high horns index rules out a single
+  peak; a low one rules out nothing.
+- **Each shape verdict now comes with the number it rests on:** `bar_gap_*`
+  for flat, `second_peak_*` for multimodal, and `edge_drop_*` for bell versus
+  floor or ceiling effect. Each number is exactly the cutoff at which the
+  verdict changes.
+
+Throughout, *shape inference* means the second of the two kinds of conclusion
+closure-core draws: samples exist, and all of them, hence the original data,
+share a property. It is distinct from the *consistency* finding that no sample
+exists at all, which says the reported statistics contradict each other. A
+shape conclusion only matters when the statistics are consistent.
+
+## Setting and notation
+
+A scale runs from $l$ to $u$. With `items` items averaged, a response can take
+every value $l + j/\text{items}$; for one item these are the whole numbers from
+$l$ to $u$. Call these the $k$ *grid values* and number their positions
+$0, 1, \dots, m$ with $m = k - 1$. One grid step is $1/\text{items}$ scale
+points.
+
+A histogram is a vector of counts $c_0, \dots, c_m$ summing to $n$, or
+equivalently the proportions $p_i = c_i / n$. Let $X$ be the position of a
+response drawn at random from the histogram. Its mean and population variance
+in grid steps are
+$$
+\mu = \sum_i p_i\, i, \qquad \sigma^2 = \sum_i p_i\,(i - \mu)^2 .
+$$
+A reported SD $s$ is a sample SD, with $n - 1$ in the denominator, in scale
+points. In grid steps it is $s \cdot \text{items}$, and the population variance
+is
+$$
+\sigma^2 = \frac{n-1}{n}\,(s \cdot \text{items})^2 .
+$$
+
+### The horns index
+
+The horns index is
+$$
+h = \frac{\sigma^2}{m^2/4}.
+$$
+The denominator is the largest variance any histogram on the scale can have.
+Proof: every response lies within $m/2$ of the midpoint $m/2$, and the variance
+is the smallest mean squared distance from any constant (see
+@sec-variance-facts), so
+$$
+\sigma^2 \le \mathbb{E}\big[(X - m/2)^2\big] \le (m/2)^2 .
+$$
+Half the responses at each end reach it. So $0 \le h \le 1$: 0 when every
+response is the same, 1 when the sample splits into two equal halves at the
+two ends of the scale (the "horns").
+
+Shifting or stretching the value axis multiplies $\sigma^2$ and $m^2/4$ by the
+same factor, so $h$ is the same in scale points and in grid steps. That is why
+closure-core computes it on grid positions.
+
+### Two facts about variance {#sec-variance-facts}
+
+Both are used below.
+
+1. **Variance is the least mean squared distance.** For any constant $c$,
+   $$
+   \mathbb{E}\big[(X-c)^2\big] = \sigma^2 + (\mu - c)^2 \ \ge\ \sigma^2 ,
+   $$
+   with equality only at $c = \mu$. (Expand $(X - \mu + \mu - c)^2$; the
+   cross term has mean 0.)
+2. **The law of total variance.** If $X$ is drawn by first picking a group $R$
+   and then drawing within it,
+   $$
+   \operatorname{Var}(X) = \mathbb{E}\big[\operatorname{Var}(X \mid R)\big]
+     + \operatorname{Var}\big(\mathbb{E}[X \mid R]\big):
+   $$
+   the average spread within the groups plus the spread of the group means.
+   For finitely many groups with weights $w_r$ and means $y_r$, the second
+   term can be written with pairs instead of a grand mean:
+   $$
+   \operatorname{Var}(Y) = \tfrac12 \sum_r \sum_s w_r w_s\,(y_r - y_s)^2 .
+   $$
+
+The code below defines the helpers the checks in this document use.
+
+```{r}
+#| label: helpers
+# Every vector of n counts over k values, one per row.
+compositions <- function(n, k) {
+  if (k == 1) return(matrix(n, 1, 1))
+  do.call(rbind, lapply(0:n, function(c) cbind(c, compositions(n - c, k - 1))))
+}
+
+# Population variance in grid steps, and the horns index.
+pop_var <- function(x) {
+  p <- x / sum(x); pos <- seq_along(x) - 1
+  mu <- sum(p * pos)
+  sum(p * (pos - mu)^2)
+}
+horns <- function(x) pop_var(x) / ((length(x) - 1)^2 / 4)
+
+# Rises, then falls: no dip anywhere. Ties are allowed, so flat counts.
+single_peaked <- function(x) {
+  d <- sign(diff(x)); d <- d[d != 0]
+  !any(head(d, -1) < 0 & tail(d, -1) > 0)
+}
+
+ceiling_horns <- function(k) (2 * k - 1)^2 / (9 * (k - 1)^2)
+uniform_horns <- function(k) (k + 1) / (3 * (k - 1))
+```
+
+## Why pooling horns across samples adds nothing {#sec-pinned}
+
+Every sample CLOSURE or SPRITE returns has an SD within the reported SD's
+rounding error $r$ of the reported SD $s$. Its horns index is therefore
+$$
+h = \frac{4\,(n-1)\,(s' \cdot \text{items})^2}{n\,m^2}
+\qquad \text{for some } s' \in [\,s - r,\ s + r\,],
+$$
+an interval fixed before any search. Its relative width is about $4r/s$:
+
+```{r}
+#| label: pinned
+horns_range <- function(sd, r, n, k, items = 1) {
+  m <- k - 1
+  f <- function(s) 4 * (n - 1) * (s * items)^2 / (n * m^2)
+  c(low = f(sd - r), high = f(sd + r))
+}
+round(horns_range(sd = 1.13, r = 0.005, n = 100, k = 5), 4)
+```
+
+In closure-core, CLOSURE on mean 3, SD 1.13, $n = 100$ on 1–5 finds 313
+samples, and every one of them has horns 0.3150. The interval above is wider
+than that only because whole-number counts can reach few variances. So the
+mean, median, minimum and maximum of the samples' horns values, which
+`metrics_horns` reports, all restate the reported SD. They cannot tell a
+bell-shaped sample from a two-peaked one with the same SD; that takes the
+arrangement of the counts, not their spread.
+
+What the horns index *can* do is set limits on the shapes an SD allows, as the
+rest of this document shows.
+
+## The uniform histogram {#sec-uniform}
+
+On a uniform histogram every position $0, \dots, m$ has probability
+$1/(m+1)$. Using $\sum_{i=0}^{m} i = m(m+1)/2$ and
+$\sum_{i=0}^{m} i^2 = m(m+1)(2m+1)/6$,
+$$
+\mu = \frac{m}{2}, \qquad
+\mathbb{E}[X^2] = \frac{m(2m+1)}{6}, \qquad
+\sigma^2 = \frac{m(2m+1)}{6} - \frac{m^2}{4} = \frac{m(m+2)}{12}.
+$$
+So
+$$
+h_{\text{uniform}} = \frac{m(m+2)/12}{m^2/4} = \frac{m+2}{3m} = \frac{k+1}{3(k-1)} .
+$$
+It depends on $k$ alone: 1 on two values, 0.5 on five, 0.444 on seven, and
+falling towards $1/3$, the continuous uniform's value, on long scales. $n$
+only matters in that a sample is exactly uniform only when $k$ divides $n$.
+
+The formula $\sigma^2 = L(L+2)/12$ for a uniform block of $L + 1$ consecutive
+positions is used again below.
+
+## The single-peak ceiling {#sec-ceiling}
+
+Call a histogram **single-peaked** if it rises and then falls with no dip:
+there is a position $j$ with
+$$
+p_0 \le p_1 \le \dots \le p_j \ \ge\ p_{j+1} \ge \dots \ge p_m .
+$$
+Ties are allowed, so plateaus and a flat histogram count. In closure-core's
+terms this is a histogram with a unimodality deficit of 0.
+
+::: {.callout-important}
+## Theorem
+
+Every single-peaked histogram on $m + 1$ evenly spaced positions has
+$$
+\sigma^2 \le \left(\frac{2m+1}{6}\right)^2,
+\qquad\text{so}\qquad
+h \le \frac{(2m+1)^2}{9m^2} = \frac{(2k-1)^2}{9(k-1)^2}.
+$$
+Equality holds exactly for
+$$
+p = (1-q)\,\delta_0 + q\,U_{\{0,\dots,m\}},
+\qquad q = \frac{2m+1}{3m},
+$$
+and its mirror image: a uniform histogram with an extra share
+$1 - q = (m-1)/(3m)$ of the sample on one end.
+:::
+
+On 1–5 ($m = 4$), $q = 3/4$: an extra quarter of the sample on the bottom
+value, so $n = 100$ gives the counts $(40, 15, 15, 15, 15)$, a floor effect.
+
+### Proof
+
+The idea: a single-peaked histogram is a stack of uniform blocks; sliding every
+block down to the bottom of the scale cannot lower the variance; and for a
+stack of blocks that all start at the bottom, one quadratic bound gives the
+ceiling.
+
+**Step 1: a single-peaked histogram is a mixture of nested uniform blocks.**
+Let $0 = t_0 < t_1 < \dots < t_R$ be 0 and the distinct positive values among
+the $p_i$, and let $S_r = \{\, i : p_i \ge t_r \,\}$ for $r = 1, \dots, R$.
+
+Each $S_r$ is a run of consecutive positions. Suppose $a < b < c$ with $a$ and
+$c$ in $S_r$. If $b$ lies at or before the peak $j$, the histogram rises from
+$a$ to $b$, so $p_b \ge p_a \ge t_r$; otherwise it falls from $b$ to $c$, so
+$p_b \ge p_c \ge t_r$. Either way $b \in S_r$.
+
+The runs are nested, $S_1 \supseteq S_2 \supseteq \dots \supseteq S_R$, since
+a higher level selects fewer positions. Each $p_i$ is the sum of the steps
+$t_r - t_{r-1}$ over the levels it reaches:
+$$
+p_i = \sum_{r\,:\, i \in S_r} (t_r - t_{r-1}).
+$$
+Write $U_S$ for the uniform histogram on a run $S$. Then
+$$
+p = \sum_{r=1}^{R} w_r\, U_{S_r}, \qquad w_r = (t_r - t_{r-1})\,|S_r| \ \ge 0,
+$$
+and the weights sum to $\sum_i p_i = 1$. In words: cut the histogram into
+horizontal slices; each slice is a block of equal bars over a run of positions.
+
+**Step 2: split the variance.** Draw a block $R$ with probability $w_r$, then
+a position uniformly within $S_R$. That position has exactly the distribution
+$p$. Write $S_r = \{a_r, \dots, b_r\}$ with length $L_r = b_r - a_r$ and
+midpoint $y_r = (a_r + b_r)/2$. By the law of total variance and
+@sec-uniform,
+$$
+\sigma^2(p) = \sum_r w_r\,\frac{L_r(L_r + 2)}{12}
+  + \tfrac12 \sum_r \sum_s w_r w_s\,(y_r - y_s)^2 .
+$$
+
+**Step 3: sliding every block to the bottom never lowers the variance.**
+Let $p^*$ be the same blocks, each slid down to start at position 0:
+$$
+p^* = \sum_r w_r\, U_{\{0,\dots,L_r\}} .
+$$
+The blocks are nested and start at 0, so $p^*$ only falls. It is the
+histogram $p$ with its bars sorted from tallest to shortest.
+
+The first term of the split is the same for $p$ and $p^*$, since it depends
+only on the lengths. In the second term, the midpoints of $p^*$ are
+$y^*_r = L_r / 2$. Take two blocks with $S_s \subseteq S_r$, so $a_r \le a_s$
+and $b_s \le b_r$. Then
+$$
+|y_r - y_s| = \tfrac12\,\big|(a_r - a_s) + (b_r - b_s)\big|
+\ \le\ \tfrac12\,\big((a_s - a_r) + (b_r - b_s)\big)
+= \tfrac12\,(L_r - L_s) = |y^*_r - y^*_s| .
+$$
+The inequality is the triangle inequality: $a_r - a_s \le 0 \le b_r - b_s$.
+Every pair of midpoints is at least as far apart in $p^*$ as in $p$, so the
+pairwise form of the second term is at least as large:
+$$
+\sigma^2(p) \le \sigma^2(p^*) .
+$$
+Intuitively, nested blocks in the middle of the scale sit on top of each other,
+while blocks slid to the bottom fan out by their lengths.
+
+**Step 4: the bound for blocks that start at the bottom.** Let
+$c = (2m+1)/6$. By the first fact in @sec-variance-facts,
+$$
+\sigma^2(p^*) \le \mathbb{E}_{p^*}\big[(X - c)^2\big]
+= \sum_r w_r\, f(L_r),
+\qquad
+f(L) = \frac{L(L+2)}{12} + \left(\frac{L}{2} - c\right)^2 ,
+$$
+where $f(L)$ is the mean squared distance from $c$ of a uniform block on
+$0, \dots, L$: its variance plus its squared offset from $c$. As a function
+of $L$, $f$ is a quadratic with leading coefficient $\tfrac1{12} + \tfrac14 =
+\tfrac13 > 0$, so on $0 \le L \le m$ it is largest at an end. Both ends give
+the same value:
+$$
+f(0) = c^2,
+\qquad
+f(m) = \frac{m(m+2)}{12} + \left(\frac{m-1}{6}\right)^2
+= \frac{3m(m+2) + (m-1)^2}{36} = \frac{(2m+1)^2}{36} = c^2 .
+$$
+(Here $m/2 - c = (m-1)/6$.) Hence $f(L_r) \le c^2$ for every block, and
+$$
+\sigma^2(p) \le \sigma^2(p^*) \le \sum_r w_r\, c^2 = c^2 = \left(\frac{2m+1}{6}\right)^2 .
+$$
+Dividing by $m^2/4$ gives $h \le (2m+1)^2 / (9m^2)$. $\blacksquare$
+
+**Where equality holds.** Step 4 is tight only if every block with positive
+weight has $f(L_r) = c^2$, which for the convex $f$ means $L_r \in \{0, m\}$,
+and if the mean of $p^*$ is $c$. Blocks of length 0 and $m$ starting at 0 are
+$\delta_0$ and the full uniform, so
+$p^* = (1-q)\,\delta_0 + q\,U_{\{0..m\}}$ with mean $q\,m/2 = c$, that is
+$q = (2m+1)/(3m)$, which lies in $(0, 1]$ for every $m \ge 1$. Before
+sliding, $p$ has the same two blocks, but its one-position block may sit at
+any position $j$. Then the block midpoints are $m/2$ and $j$, and the second
+term of Step 2 is $q(1-q)(m/2 - j)^2$, which is largest only for $j = 0$ or
+$j = m$. So the ceiling is reached exactly by the floor effect and its mirror
+image, the ceiling effect, and both are single-peaked.
+A histogram of $n$ whole responses reaches it exactly when these proportions
+are multiples of $1/n$, as for $n = 100$ on 1–5.
+
+### Checking it by brute force
+
+Every histogram of $n$ responses on $k$ values: the highest horns index among
+the single-peaked ones never exceeds the ceiling, and sorting the bars of a
+single-peaked histogram (Step 3) never lowers its variance.
+
+```{r}
+#| label: brute-force
+check <- function(k, n) {
+  x <- compositions(n, k)
+  sp <- apply(x, 1, single_peaked)
+  h <- apply(x[sp, , drop = FALSE], 1, horns)
+  sorted_gain <- apply(x[sp, , drop = FALSE], 1,
+                       function(r) pop_var(sort(r, decreasing = TRUE)) - pop_var(r))
+  data.frame(k, n, histograms = nrow(x), single_peaked = sum(sp),
+             highest_horns = max(h), ceiling = ceiling_horns(k),
+             sorting_never_lowers = all(sorted_gain > -1e-12))
+}
+res <- do.call(rbind, list(check(3, 60), check(4, 36), check(5, 40),
+                           check(6, 20), check(7, 14)))
+res
+stopifnot(all(res$highest_horns <= res$ceiling + 1e-12),
+          all(res$sorting_never_lowers))
+# Reached exactly where the extreme histogram has whole counts:
+stopifnot(abs(horns(c(40, 15, 15, 15, 15)) - 0.5625) < 1e-12,
+          res$highest_horns[res$k == 5] == 0.5625)
+```
+
+### The 4/9 limit, and the continuous version
+
+$$
+\frac{(2m+1)^2}{9m^2} = \frac{(2 + 1/m)^2}{9}
+$$
+falls as $m$ grows and tends to $4/9 \approx 0.444$. The extreme histogram
+tends to one third of the sample on one end of the scale and two thirds
+spread evenly ($1 - q \to 1/3$).
+
+The same proof works for a continuous single-peaked distribution on $[0, 1]$.
+A uniform block of length $L$ has variance $L^2/12$, so with $c = 1/3$,
+$f(L) = L^2/12 + (L/2 - 1/3)^2$, and $f(0) = f(1) = 1/9$. So the variance is
+at most $1/9$ of the squared range and the horns index at most
+$(1/9) / (1/4) = 4/9$. This matches the known bound for unimodal
+distributions on an interval, and the discrete ceiling approaches it from
+above.
+
+### Ceiling versus uniform
+
+$$
+\frac{(2m+1)^2}{9m^2} - \frac{m+2}{3m}
+= \frac{(2m+1)^2 - 3m(m+2)}{9m^2}
+= \frac{(m-1)^2}{9m^2} \ \ge 0 .
+$$
+The ceiling lies above the uniform histogram's horns index on every scale with
+three or more values, and equals it on two values, where every histogram is
+single-peaked. So "more spread out than uniform" is not yet "cannot be
+single-peaked": on 1–5, a horns index between 0.5 and 0.5625 is more spread
+out than uniform, yet a floor effect fits.
+
+```{r}
+#| label: table
+k <- c(2:11, 21, 101)
+data.frame(k,
+           uniform = round(uniform_horns(k), 4),
+           ceiling = round(ceiling_horns(k), 4),
+           gap = round((k - 2)^2 / (9 * (k - 1)^2), 4),
+           max_pop_sd_on_1_to_k = round((2 * k - 1) / 6, 4))
+```
+
+## From the ceiling to a reported SD {#sec-sd}
+
+In grid steps the ceiling on the population SD is $(2m+1)/6$; in scale points
+it is $(2m+1)/(6\,\text{items})$. For one item on a 1–$k$ scale this is
+simply
+$$
+\sigma_{\max} = \frac{2k-1}{6}:
+$$
+1.5 on 1–5, 2.17 on 1–7, 3.5 on 0–10. A reported sample SD corresponds to the
+population SD $\sigma = s\sqrt{(n-1)/n}$, so the line for a reported SD is
+$\sigma_{\max}\sqrt{n/(n-1)}$.
+
+Because a reported SD is rounded, the flag uses the lowest SD the rounding
+allows: `beyond_single_peak` is true when even $s - r$ is past the line.
+closure-core decides this exactly, without floating point. Its search bounds
+already hold the smallest admissible value of $n\sum x^2 - (\sum x)^2$, in grid
+steps, as an integer `m2n_lo`, and $n\sum x^2 - (\sum x)^2 = n^2\sigma^2$. So
+$$
+\text{beyond\_single\_peak} \iff 36 \cdot \text{m2n\_lo} > (2m+1)^2\, n^2 .
+$$
+
+```{r}
+#| label: thresholds
+# Smallest reported SD, at two decimals with rounding error 0.005, that is
+# flagged on a single-item 1..k scale.
+flagged_from <- function(k, n, r = 0.005) {
+  line <- (2 * k - 1) / 6 * sqrt(n / (n - 1))
+  ceiling((line + r) * 100 + 1e-9) / 100
+}
+expand.grid(k = c(5, 7), n = c(20, 50, 100, 1000)) |>
+  transform(flagged_from_sd = mapply(flagged_from, k, n))
+```
+
+On 1–5 with $n = 100$: SD 1.52 is flagged, since even 1.515 is past the line
+of 1.5076; SD 1.51 is not, since 1.505 is below it. closure-core's test
+`an_sd_beyond_the_single_peak_ceiling_is_flagged` runs this case. For mean
+2.5 and SD 1.52, CLOSURE finds 150 samples and every one has a dip, as the
+theorem says it must. SPRITE raises the flag for the same input, although its
+own samples could never have ruled a shape out.
+
+### What the flag says, and what it does not
+
+- **It is a shape inference.** If the reported statistics are right, the
+  original data had a dip somewhere, so it was not single-peaked. It follows
+  from the reported SD and the scale; the mean, the samples and the
+  prominence cutoffs play no part.
+- **It does not replace the consistency test.** If CLOSURE finds no sample at
+  all, the reported statistics contradict each other, and that is the finding.
+  The flag is still computed then, but there is no data whose shape it could
+  describe.
+- **It is about strict single peaks.** A histogram with a small dip, which the
+  shape classes count as one mode at a cutoff above the dip, is not covered.
+  So a flagged result can still contain samples classed as one mode at the
+  default cutoffs. The flag's claim is the narrower one: none of them is free
+  of dips.
+- **It only looks upward.** A low horns index rules out nothing. Two peaks
+  side by side, $(0, 10, 0, 10, 0)$, have horns 0.25, half the uniform value.
+- **Below the ceiling, a single peak may or may not fit.** For mean 2.5 and
+  SD 1.49 on 1–5 with $n = 100$, the horns index is 0.55, below 0.5625, so
+  the flag stays down; yet all 363 CLOSURE samples have a dip. Where CLOSURE
+  can run, its own numbers (`deficit_min`, and those in
+  @sec-verdict-numbers) catch such cases.
+- **It ignores the mean.** The ceiling is the highest variance at *any* mean.
+  By the equality case, only a mean of exactly $(2m+1)/6$ grid steps from one
+  end reaches it, 2.5 or 3.5 on 1–5. At other means the true line is lower,
+  so a ceiling that depends on the mean would flag more cases. Working it out
+  is a natural next step.
+
+```{r}
+#| label: limits
+horns(c(0, 10, 0, 10, 0))
+```
+
+## The numbers behind the shape verdicts {#sec-verdict-numbers}
+
+closure-core classifies each sample into one of six shape classes at a
+*cutoff* $t$: a bump counts as a mode only if it stands at least $t$
+observations above the dip separating it from any taller bar. The cutoff is a
+convention: 5% of $n$ for the per-class counts, every whole-observation cutoff
+from 2% to 10% for the shape queries. A verdict that rests on a convention is
+more useful with the number behind it, so a reader can weigh it against $n$.
+For each sample, closure-core computes three such numbers and reports their
+smallest and largest values in `modality_summary`, in observations.
+
+| Verdict | Number | Per sample |
+|---|---|---|
+| flat | `bar_gap` | tallest bar minus shortest bar |
+| multimodal | `second_peak` | largest cutoff at which the sample still has two or more modes; 0 if it never does |
+| bell vs floor or ceiling effect | `edge_drop` | how far the tallest bar stands above the lowest bar between it and the nearer end of the scale; 0 if a tallest bar sits at an end |
+
+Each number is exactly the cutoff at which its verdict changes:
+
+- a sample is **flat** at cutoff $t$ if and only if $t > \text{bar\_gap}$;
+- it has **two or more modes** at $t$ if and only if $t \le \text{second\_peak}$;
+- if it has **one mode** at $t$, the mode is **interior (a bell)** if and only
+  if $t \le \text{edge\_drop}$, and a floor or ceiling effect otherwise.
+
+So "`second_peak_min` is 7" says every sample is multimodal at every cutoff
+up to 7 observations. "`edge_drop_min` is 8" says every single-peaked sample
+is a bell at every cutoff up to 8.
+
+### Why the numbers are exact
+
+**Flat.** By definition a sample is flat at $t$ when its tallest bar exceeds
+its shortest by less than $t$, that is, when $\text{bar\_gap} < t$.
+
+**Multimodal.** The number of modes never rises as $t$ rises:
+
+- *Tied tallest runs* merge into one mode when the dip between them is less
+  than $t$ deep. A larger $t$ merges more, never less.
+- *A lower peak* is a mode when its prominence, its height above the higher
+  of the two dips separating it from taller bars, is at least $t$. A larger
+  $t$ admits fewer.
+- *Equal lower peaks* merge when the dip between them is less than $t$ deep.
+  A merged group's prominence is at most that of each of its members: for a
+  member on its own, the dips on the way to a taller bar include the dip
+  inside the group, so its key dips are no higher than the group's. Merging
+  therefore never creates a mode, and the groups at a larger $t$ are unions
+  of groups at a smaller one.
+
+So the cutoffs at which a sample has two or more modes form a run
+$1, \dots, X$, and $X$ is `second_peak`. closure-core finds it by binary
+search over $t$, reusing the band scan where the change falls inside the band.
+
+**Bell or edge.** When a sample has one mode at $t$, that mode is the merged
+group of all its tallest runs: the tallest runs always form at least one mode,
+so with one mode they form exactly one. The classifier places the mode at the
+low end when every bar between the first tallest run and the low end is within
+$t$ of the summit (the same "less than $t$ apart is one broad peak" rule that
+merges tied tallest runs). With $D_{\text{low}}$ the summit minus the lowest
+bar on that side,
+$$
+\text{low end} \iff D_{\text{low}} < t ,
+$$
+and likewise on the high side. The mode is interior exactly when both
+$D_{\text{low}} \ge t$ and $D_{\text{high}} \ge t$, that is when
+$\text{edge\_drop} = \min(D_{\text{low}}, D_{\text{high}}) \ge t$. It cannot
+reach both ends at once: every bar would then be within $t$ of the summit,
+which is flat.
+
+Together these give the order in which a sample's class changes as the cutoff
+rises: three or more modes, then two, then a bell, then a floor or ceiling
+effect, then flat. Each stage may be empty, and no stage comes back.
+closure-core's tests check this order, mirror symmetry, and all three
+equivalences above on every count vector of $n = 30$ on 3 values, 16 on 5 and
+9 on 7, at every cutoff.
+
+### Why the edge rule changed
+
+Earlier, a single mode was a floor effect only if the very tallest bar sat on
+the bottom value. At a cutoff of 5, $(31, 29, 30, 5, 5)$ was then a floor
+effect and $(30, 29, 31, 5, 5)$ a bell, although everywhere else, for
+flatness and for merging tied peaks, the cutoff treats differences of 1 or 2
+observations as noise. Under the current rule both are floor effects, as is
+$(19, 21, 2, 2, 6)$, with 40 of its 50 responses on the bottom two values.
+`edge_drop` makes the rule visible. For $(30, 29, 31, 5, 5)$ it is 2. At
+cutoff 1 the bottom bar, 1 above its dip, still counts as a second mode
+(`second_peak` is 1); at cutoff 2 the sample is a bell; from 3 on it is a
+floor effect.
+
+## How the pieces fit
+
+| Question | Answer from the SD alone | Answer from the samples |
+|---|---|---|
+| Could the data have been strictly single-peaked? | No, if `beyond_single_peak` (any mean, any $n$, CLOSURE or SPRITE) | `deficit_min > 0` in an exhaustive CLOSURE run says no, at this mean |
+| How clearly does a second peak stand out, at least? | — | `second_peak_min` |
+| Could the data have been a bell rather than a floor or ceiling effect? | — | `edge_drop_*`, and the band queries |
+| Could it have been flat? | — | `bar_gap_*` |
+| How spread out was it? | the horns index, from the reported SD | the same number again, for every sample |
+
+The horns index earns its place in the first row: a cheap, cutoff-free,
+search-free check that turns "the SD is large" into "the data cannot have had
+a single peak", with the exact line $(2k-1)^2/(9(k-1)^2)$.
