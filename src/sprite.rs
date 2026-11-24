@@ -19,6 +19,7 @@ use std::sync::mpsc::channel;
 use std::thread;
 
 const MAX_DELTA_LOOPS_LOWER: u32 = 20_000;
+/// The SD loop limit's floor for its upper end; see [`loop_limits`].
 const MAX_DELTA_LOOPS_UPPER: u32 = 1_000_000;
 /// Attempts per sample asked for, under `stop_after`.
 const MAX_DUP_LOOPS: u32 = 20;
@@ -1028,6 +1029,29 @@ where
     results
 }
 
+/// Most steps one attempt takes to adjust the mean, and most shifts toward
+/// the SD, for `n` values on `k` free grid values.
+///
+/// Each shift moves two values one grid step, so walking the sample across
+/// the grid takes on the order of `n·k` shifts. The SD limit is `n·k²`
+/// between 20,000 and the larger of 1,000,000 and `n·k`. A fixed 1,000,000
+/// defeated fine, wide grids: mean 16, sd 13, n 1000 on 1..=31 at 100 items
+/// needs over a million shifts from its direct start, and no attempt got
+/// there. Typical Likert inputs stay at 20,000.
+///
+/// Computed in u64 and saturated to u32: `n·k²` in u32 wrapped on wide
+/// multi-item grids (n = 50,000 on 0..=100 at items = 3 is 4.5e9).
+fn loop_limits(n: usize, k: usize) -> (u32, u32) {
+    let (n, k) = (n as u64, k as u64);
+    let n_k = n.saturating_mul(k);
+    let upper = n_k.max(MAX_DELTA_LOOPS_UPPER as u64);
+    let sd = n_k
+        .saturating_mul(k)
+        .clamp(MAX_DELTA_LOOPS_LOWER as u64, upper);
+    let to_u32 = |x: u64| x.min(u32::MAX as u64) as u32;
+    (to_u32(n_k), to_u32(sd))
+}
+
 /// Internal function to find a single distribution
 fn find_distribution_internal<U>(
     params: &SpriteParams<U>,
@@ -1102,17 +1126,8 @@ where
 
     // Mean correction: no-op on the direct path (sum is exact); brings the
     // random fill to an admissible total.
-    // Both limits are computed in u64: n * k² overflows u32 on wide
-    // multi-item grids (n = 50,000 on 0..=100 at items = 3 is 4.5e9).
-    let n_u64 = n_usize as u64;
-    let k_u64 = pv.len() as u64;
-    let max_loops_mean = (n_u64 * k_u64).min(u32::MAX as u64) as u32;
+    let (max_loops_mean, max_loops_sd) = loop_limits(n_usize, pv.len());
     adjust_mean_internal(&mut vec, params, max_loops_mean, rng)?;
-
-    let max_loops_sd = n_u64
-        .saturating_mul(k_u64 * k_u64)
-        .clamp(MAX_DELTA_LOOPS_LOWER as u64, MAX_DELTA_LOOPS_UPPER as u64)
-        as u32;
 
     // Running sums for the mutable part of the distribution. Shifts keep the
     // total, so only the sum of squares runs.
@@ -1990,5 +2005,18 @@ pub mod tests {
         vec.sort();
         assert_eq!(vec, vec![1, 5, 5, 5, 5]);
         assert_eq!(sum_sq, vec.iter().map(|v| (v * v) as i64).sum::<i64>());
+    }
+
+    #[test]
+    fn loop_limits_grow_with_the_grid_and_never_wrap() {
+        // Likert inputs keep the old floor.
+        assert_eq!(loop_limits(100, 5), (500, 20_000));
+        // Mean 16, sd 13, n 1000 on 1..=31 at 100 items needs over a million
+        // shifts; a fixed cap of 1,000,000 failed every direct start.
+        assert_eq!(loop_limits(1_000, 3_001), (3_001_000, 3_001_000));
+        // `n·k²` used to be a u32: here 2^32, which wrapped to 0 and then
+        // clamped to the floor of 20,000.
+        assert_eq!(loop_limits(65_536, 256), (16_777_216, 16_777_216));
+        assert_eq!(loop_limits(usize::MAX, 100_000), (u32::MAX, u32::MAX));
     }
 }
