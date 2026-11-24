@@ -12,13 +12,13 @@ fn main() {
         1,    // items
         None, // restrictions_exact
         RestrictionsOption::Default,
-        None, // parquet_config
-        Some(5),
-        None, // stop_after
+        None,    // parquet_config
+        Some(5), // stop_after
+        None,    // prominence
     )
     .unwrap();
 
     println!("Generated {} distributions", result.results.len());
-    // Note: stop_after is a suggestion, actual count may vary slightly
+    // stop_after is an upper bound: SPRITE may stop early with fewer
     assert!(!result.results.is_empty());
 }
