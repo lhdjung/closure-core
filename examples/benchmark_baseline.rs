@@ -90,7 +90,7 @@ fn main() {
                 1,
                 None,
                 None,
-                None,
+                None, // prominence
             )
             .unwrap()
             .results
@@ -110,7 +110,7 @@ fn main() {
                 RestrictionsOption::Default,
                 None,
                 Some(SPRITE_STOP_AFTER),
-                None,
+                None, // prominence
             )
             .unwrap()
             .results
