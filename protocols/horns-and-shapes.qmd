@@ -27,9 +27,10 @@ execute:
   \frac{(2k-1)^2}{9(k-1)^2},
   $$
   which is 0.5625 on 5 values and 0.52 on 7, and falls towards $4/9$ on long
-  scales. A floor or ceiling effect reaches it. On a 1–$k$ scale it means: no
-  single-peaked histogram has a population SD above $(2k-1)/6$, which is 1.5
-  on 1–5.
+  scales. A floor or ceiling effect reaches it. In scale points: no
+  single-peaked histogram on whole numbers with range $R = u - l$ has a
+  population SD above $R/3 + 1/6$, which is 1.5 on 1–5. The continuous
+  ceiling is $R/3$; the $1/6$ is what whole numbers add.
 - **So the reported SD alone can show that the data was not single-peaked.**
   closure-core reports the ceiling and a flag, `beyond_single_peak`, in
   `metrics_horns`. The flag needs no samples, no search and no cutoff, so it
@@ -85,7 +86,16 @@ $$
 $$
 Half the responses at each end reach it. So $0 \le h \le 1$: 0 when every
 response is the same, 1 when the sample splits into two equal halves at the
-two ends of the scale (the "horns").
+two ends of the scale (the "horns"). With an odd $n$ no such split exists, and
+the largest horns index is $1 - 1/n^2$ (Popoviciu's odd-$n$ maximum; Appendix
+B of the BRIMMER manuscript proves it).
+
+This is the definition of unsum's `horns()`, which calls the denominator
+Popoviciu's bound and keeps it free of $n$ and the mean on purpose. unsum's
+`special-scripts/horns-discrete-implementation.R` also tries a finite-sample
+version that divides by the largest variance reachable at the given $n$ (with
+the parity and $n - 1$ corrections). Everything below uses the $n$-free
+version, as closure-core and unsum do.
 
 Shifting or stretching the value axis multiplies $\sigma^2$ and $m^2/4$ by the
 same factor, so $h$ is the same in scale points and in grid steps. That is why
@@ -190,6 +200,7 @@ $$
 It depends on $k$ alone: 1 on two values, 0.5 on five, 0.444 on seven, and
 falling towards $1/3$, the continuous uniform's value, on long scales. $n$
 only matters in that a sample is exactly uniform only when $k$ divides $n$.
+unsum's `horns()` documentation gives the same closed form.
 
 The formula $\sigma^2 = L(L+2)/12$ for a uniform block of $L + 1$ consecutive
 positions is used again below.
@@ -387,6 +398,17 @@ single-peaked. So "more spread out than uniform" is not yet "cannot be
 single-peaked": on 1–5, a horns index between 0.5 and 0.5625 is more spread
 out than uniform, yet a floor effect fits.
 
+### In scale points
+
+In scale points, with range $R = u - l$ and grid step $d = 1/\text{items}$,
+so that $m = R/d$, the ceiling on the population SD is
+$$
+\sigma_{\max} = \frac{(2m+1)\,d}{6} = \frac{R}{3} + \frac{d}{6}.
+$$
+The continuous ceiling is $R/3$, the square root of the $R^2/9$ above; the
+grid adds a sixth of a step. For one item on whole numbers that is
+$R/3 + 1/6$: 1.5 on 1–5, 2.17 on 1–7, 3.5 on 0–10.
+
 ```{r}
 #| label: table
 k <- c(2:11, 21, 101)
@@ -462,8 +484,15 @@ own samples could never have ruled a shape out.
 - **It ignores the mean.** The ceiling is the highest variance at *any* mean.
   By the equality case, only a mean of exactly $(2m+1)/6$ grid steps from one
   end reaches it, 2.5 or 3.5 on 1–5. At other means the true line is lower,
-  so a ceiling that depends on the mean would flag more cases. Working it out
-  is a natural next step.
+  so a ceiling that depends on the mean would flag more cases. Navard et al.
+  (1993) derive mean- and mode-dependent variance bounds for discrete
+  unimodal distributions; see @sec-related.
+- **It is not sharp for a given $n$.** The extreme histogram has whole counts
+  only for some $n$: on 1–7 with $n = 14$, the highest single-peaked horns
+  index is 0.472, against a ceiling of 0.522. Like the range-only bound
+  before Popoviciu's odd-$n$ correction, the ceiling is sharp only when the
+  proportions are free (the BRIMMER manuscript's quasi-integer sense). An
+  $n$-sharp version would flag more small samples.
 
 ```{r}
 #| label: limits
@@ -556,6 +585,69 @@ $(19, 21, 2, 2, 6)$, with 40 of its 50 responses on the bottom two values.
 cutoff 1 the bottom bar, 1 above its dip, still counts as a second mode
 (`second_peak` is 1); at cutoff 2 the sample is a bell; from 3 on it is a
 floor effect.
+
+## Relation to other work {#sec-related}
+
+**The mean-conditional ceiling (Muilwijk 1966, Bhatia–Davis 2000).** Without
+any shape assumption, the population variance at mean $\bar{x}$ is at most
+$(u - \bar{x})(\bar{x} - l)$. In horns units that is the arch
+$h \le 1 - \big((2\bar{x} - l - u)/R\big)^2$, against which the single-peak
+ceiling is a horizontal line. An SD past the arch is a consistency failure,
+BRIMMER's territory. An SD between the line and the arch is consistent, but no
+single-peaked histogram has it. That band only exists for means near the
+middle of the scale:
+
+```{r}
+#| label: band
+band <- function(l, u) {
+  R <- u - l
+  half <- sqrt(R^2 / 4 - (R / 3 + 1 / 6)^2)
+  c(from = (l + u) / 2 - half, to = (l + u) / 2 + half)
+}
+round(rbind(`1-5` = band(1, 5), `1-7` = band(1, 7)), 3)
+```
+
+On 1–5, for means below 1.68 or above 4.32, any SD past the single-peak line
+is already past the arch: the statistics contradict each other, and there is
+no shape to infer. closure-core reports `beyond_single_peak` regardless. For
+CLOSURE that case shows up as an empty result. For SPRITE it shows up too,
+because SPRITE checks the Bhatia–Davis bound before searching. So read the
+flag as a shape inference only when the statistics pass the consistency
+checks.
+
+**The same inequality, read the other way.** The BRIMMER manuscript bounds the
+SD under constraints such as $\{l, u, n, \bar{x}, \mathbb{Z}, \alpha\}$ and
+flags an SD outside those bounds. Its taxonomy has no shape constraint. Add
+"the data are single-peaked" as one, and the ceiling becomes a BRIMMER-style
+check: $s \le (R/3 + 1/6)\sqrt{n/(n-1)}$ for single-peaked integer data. It
+is conditional on an assumption, where closure-core uses the same inequality
+as an inference from a trusted SD to a shape.
+
+**Navard, Seaman and Young (1993).** They characterise discrete unimodality
+and derive variance upper bounds on $\{1, \dots, n\}$ under unimodality plus
+a known mean and/or mode ($B_{\mu,m}$, $B_m$, $B_\mu$). These are the
+mean-dependent refinement this document leaves open. Their Theorem 4.1, the
+discrete-uniform variance $(n^2-1)/12$ as an upper bound, holds only under
+extra conditions, according to the BRIMMER project's notes on the paper:
+a centred mean, and at most $1/n$ of the mass on each end value. Without them
+it fails. $(40, 15, 15, 15, 15)$ is unimodal, yet has variance 2.25 against
+$(25 - 1)/12 = 2$, and no unconditional discrete-unimodal bound can be lower
+than the ceiling here, which that histogram reaches. The exact conditions of
+$B_\mu$ and $B_{\mu,m}$ were not checked here, for lack of the paper.
+
+**The continuous bound.** $R^2/9$ for unimodal distributions on an interval
+belongs to a literature on variance bounds under unimodality that Navard et
+al. cite: Gray and Odell (1967), Jacobson (1969), Seaman, Young and Turner
+(1987), Dharmadhikari and Joag-Dev (1989). Which of these first states
+$R^2/9$ was not checked here. The discrete ceiling in this document,
+$\sigma \le R/3 + d/6$, with its proof by sliding blocks and its equality
+case, was derived independently.
+
+**unsum.** unsum's `horns()` documentation says that only CLOSURE gives
+certainty about the possible samples' horns indices, because SPRITE is not
+exhaustive. As @sec-pinned shows, the reported SD fixes the interval of
+possible horns values before any search, for SPRITE and CLOSURE alike.
+CLOSURE adds only which values inside that interval whole counts can reach.
 
 ## How the pieces fit
 
