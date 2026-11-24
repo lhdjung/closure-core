@@ -75,12 +75,29 @@
 //!   ([`ModalityShapes::bar_gap_max`] and friends). "Every sample's bars lie
 //!   within 2 observations of each other" can be judged without any cutoff.
 //!
-//! # The graded companion
+//! # The numbers behind the verdicts
 //!
-//! Because any threshold is a judgement call, [`unimodality_deficit`] reports
-//! the same question without one: the number of observations that would have to
-//! be removed before the histogram is single-peaked. It is zero exactly when the
-//! vector is weakly unimodal, and needs no tuning constant.
+//! Because any cutoff is a judgement call, each verdict also comes as the
+//! number it rests on, in observations, with its smallest and largest value
+//! over the samples:
+//!
+//! - Flat or not: the gap between the tallest and the shortest bar
+//!   ([`ModalityShapes::bar_gap_max`] and friends).
+//! - One peak or several: [`second_peak`], the largest cutoff at which a
+//!   sample still has two modes.
+//! - A bell or a floor or ceiling effect: [`edge_drop`], how far the tallest
+//!   bar stands above the lowest bar between it and the nearer end.
+//!
+//! A sample takes a class at a cutoff exactly when these numbers say so: it
+//! is multimodal at a cutoff up to its second peak, and a single peak is a
+//! bell at a cutoff up to its edge drop. So "every sample's second peak is at
+//! least 7" means every sample is multimodal at any cutoff up to 7, and a
+//! reader can weigh 7 observations against `n` without adopting this crate's
+//! cutoffs.
+//!
+//! [`unimodality_deficit`] asks a related question with no cutoff at all: the
+//! number of observations that would have to be removed before the histogram
+//! is single-peaked. It is zero exactly when the vector is weakly unimodal.
 
 use strum_macros::{EnumCount as EnumCountMacro, EnumIter, IntoStaticStr};
 
@@ -297,10 +314,30 @@ pub fn modes(counts: &[u32], min_prominence_counts: u32) -> Vec<usize> {
 /// runs form one broad mode; [`classify`] needs to know whether that mode
 /// touches a scale boundary.
 fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for_each_mode(runs, min_prominence_counts, |start, end| {
+        out.push((start, end))
+    });
+    out.sort_unstable();
+    out
+}
+
+/// How many modes `runs` has at this cutoff: [`mode_extents`] without
+/// collecting them, for the callers that only count.
+fn mode_number(runs: &[Run], min_prominence_counts: u32) -> usize {
+    let mut number = 0;
+    for_each_mode(runs, min_prominence_counts, |_, _| number += 1);
+    number
+}
+
+/// Call `emit(start, end)` once per mode of `runs`, in no particular order;
+/// the engine behind [`mode_extents`]. Allocates nothing, since it runs for
+/// every sample at several cutoffs.
+fn for_each_mode(runs: &[Run], min_prominence_counts: u32, mut emit: impl FnMut(usize, usize)) {
     let min_prominence_counts = min_prominence_counts.max(1);
     // A single run means every count is equal: flat, no mode.
     if runs.len() < 2 {
-        return Vec::new();
+        return;
     }
     let summit = runs
         .iter()
@@ -316,7 +353,7 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
         .min()
         .expect("runs is non-empty");
     if summit - floor < min_prominence_counts {
-        return Vec::new();
+        return;
     }
 
     // Group the summit runs: consecutive tied tallest runs merge when the
@@ -324,12 +361,12 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
     // this resolution the dip is texture, not a separation. Merging is
     // transitive by construction and keeps the result mirror-symmetric, which
     // designating one tied run as "the" maximum would not.
-    let mut groups: Vec<(usize, usize)> = Vec::new(); // (first, last) run index
+    let mut group: Option<(usize, usize)> = None; // (first, last) run index
     for (i, run) in runs.iter().enumerate() {
         if run.height < summit {
             continue;
         }
-        let merges = groups.last().is_some_and(|&(_, last)| {
+        let merges = group.is_some_and(|(_, last)| {
             // Two summit runs cannot be adjacent (adjacent runs differ in
             // height), so there is at least one run between them.
             let valley = runs[last + 1..i]
@@ -339,16 +376,18 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
                 .expect("summit runs are separated by at least one run");
             summit - valley < min_prominence_counts
         });
-        match groups.last_mut() {
-            Some(group) if merges => group.1 = i,
-            _ => groups.push((i, i)),
-        }
+        group = match group {
+            Some((first, _)) if merges => Some((first, i)),
+            Some((first, last)) => {
+                emit(runs[first].start, runs[last].end);
+                Some((i, i))
+            }
+            None => Some((i, i)),
+        };
     }
-
-    let mut out: Vec<(usize, usize)> = groups
-        .iter()
-        .map(|&(first, last)| (runs[first].start, runs[last].end))
-        .collect();
+    if let Some((first, last)) = group {
+        emit(runs[first].start, runs[last].end);
+    }
 
     // Local maxima below the summit (handled by the grouping above).
     let is_lower_peak = |i: usize| {
@@ -415,12 +454,10 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
 
         let col = left_col.unwrap_or(0).max(right_col.unwrap_or(0));
         if height - col >= min_prominence_counts {
-            out.push((runs[i].start, runs[last].end));
+            emit(runs[i].start, runs[last].end);
         }
         i = last + 1;
     }
-    out.sort_unstable();
-    out
 }
 
 /// Classify a count vector into exactly one [`ShapeClass`].
@@ -433,11 +470,15 @@ pub fn classify(counts: &[u32], min_prominence_counts: u32) -> ShapeClass {
 
 /// [`classify`], on a run decomposition computed once by the caller.
 fn classify_from_runs(runs: &[Run], min_prominence_counts: u32) -> ShapeClass {
-    let peaks = mode_extents(runs, min_prominence_counts);
-    match peaks[..] {
+    let (mut number, mut only) = (0, (0, 0));
+    for_each_mode(runs, min_prominence_counts, |start, end| {
+        number += 1;
+        only = (start, end);
+    });
+    match (number, only) {
         // No distinguishable mode: every difference between bars is below the
         // cutoff. See [`modes`].
-        [] => ShapeClass::Flat,
+        (0, _) => ShapeClass::Flat,
         // A lone mode sits at an edge when its bars reach that end of the
         // scale without dropping the cutoff below the summit: the bars between
         // are within the cutoff of it, so by the rule that merges tied tallest
@@ -448,7 +489,7 @@ fn classify_from_runs(runs: &[Run], min_prominence_counts: u32) -> ShapeClass {
         // A lone mode cannot reach both edges: every bar would then be within
         // the cutoff of the summit, which is flat. So the edge tests below are
         // mutually exclusive.
-        [(start, end)] => {
+        (1, (start, end)) => {
             let t = min_prominence_counts.max(1);
             let summit = runs.iter().map(|r| r.height).max().unwrap_or(0);
             let near_summit = |r: &Run| summit - r.height < t;
@@ -465,7 +506,7 @@ fn classify_from_runs(runs: &[Run], min_prominence_counts: u32) -> ShapeClass {
                 ShapeClass::OneModeInterior
             }
         }
-        [_, _] => ShapeClass::TwoModes,
+        (2, _) => ShapeClass::TwoModes,
         _ => ShapeClass::ThreeOrMoreModes,
     }
 }
@@ -627,6 +668,28 @@ pub struct ModalityShapes {
     pub bar_gap_min_share: f64,
     /// [`Self::bar_gap_max`] as a share of the average bar, `n / k`.
     pub bar_gap_max_share: f64,
+    /// Smallest [`second_peak`] over the scanned samples, in observations; 0
+    /// when nothing was scanned.
+    ///
+    /// The cutoff-free version of the multimodal verdict. If it is 7, every
+    /// sample has a second peak standing at least 7 observations above its
+    /// dip, so every sample counts as multimodal at any cutoff up to 7.
+    pub second_peak_min: u32,
+    /// Largest [`second_peak`]: no sample has two modes at a cutoff above
+    /// this. 0 means no sample has two modes at any cutoff.
+    pub second_peak_max: u32,
+    /// Smallest [`edge_drop`] over the scanned samples, in observations; 0
+    /// when nothing was scanned.
+    ///
+    /// The cutoff-free version of the bell-or-edge verdict. If it is 8, every
+    /// sample's tallest bar stands at least 8 observations above the lowest
+    /// bar between it and either end of the scale, so every single-peaked
+    /// sample is a bell at any cutoff up to 8.
+    pub edge_drop_min: u32,
+    /// Largest [`edge_drop`]: every single-peaked sample reaches a scale end,
+    /// a floor or ceiling effect, at any cutoff above this. 0 means every
+    /// sample's tallest bar sits at an end of the scale.
+    pub edge_drop_max: u32,
 }
 
 impl ModalityShapes {
@@ -795,26 +858,87 @@ fn mode_count(class: ShapeClass) -> u8 {
     }
 }
 
+/// How far the tallest bars stand above the lowest bar between them and each
+/// end of the scale, `(low side, high side)`; 0 for a side the tallest bars
+/// reach. Measured from the first tallest run on the left and the last on the
+/// right, which is the extent of the one mode a sample has when it has one.
+fn edge_drops(runs: &[Run]) -> (u32, u32) {
+    let Some(summit) = runs.iter().map(|r| r.height).max() else {
+        return (0, 0);
+    };
+    let first = runs.iter().position(|r| r.height == summit).unwrap_or(0);
+    let last = runs.iter().rposition(|r| r.height == summit).unwrap_or(0);
+    let drop = |side: &[Run]| side.iter().map(|r| summit - r.height).max().unwrap_or(0);
+    (drop(&runs[..first]), drop(&runs[last + 1..]))
+}
+
 /// For a sample whose tallest runs form one mode, the edge class it takes once
 /// that mode reaches a scale end, and the lowest threshold at which it does;
 /// `None` when the tallest bar already sits at an end, where nothing changes.
 ///
 /// The mode reaches the low end once every bar left of its first tallest run
-/// is within the threshold of the summit: from `summit − (lowest such bar) + 1`.
-/// Likewise on the right. At most one side can get there before the sample
-/// turns flat, so the earlier side is the one that counts.
+/// is within the threshold of the summit: from one above the [`edge_drops`] on
+/// that side. Likewise on the right. At most one side can get there before the
+/// sample turns flat, so the earlier side is the one that counts.
 fn edge_from(runs: &[Run]) -> Option<(ShapeClass, u32)> {
-    let summit = runs.iter().map(|r| r.height).max()?;
-    let first = runs.iter().position(|r| r.height == summit)?;
-    let last = runs.iter().rposition(|r| r.height == summit)?;
-    let from = |side: &[Run]| side.iter().map(|r| summit - r.height + 1).max();
-    let low = from(&runs[..first])?;
-    let high = from(&runs[last + 1..])?;
-    Some(if low <= high {
-        (ShapeClass::OneModeLowEdge, low)
-    } else {
-        (ShapeClass::OneModeHighEdge, high)
-    })
+    match edge_drops(runs) {
+        (0, _) | (_, 0) => None,
+        (low, high) if low <= high => Some((ShapeClass::OneModeLowEdge, low + 1)),
+        (_, high) => Some((ShapeClass::OneModeHighEdge, high + 1)),
+    }
+}
+
+/// How far a peak is from the nearer end of the scale, in observations: how
+/// far the tallest bar stands above the lowest bar between it and that end. 0
+/// when a tallest bar sits at an end.
+///
+/// This is the number the bell-or-edge verdict rests on. A sample with one
+/// mode is [`ShapeClass::OneModeInterior`] at a cutoff exactly when its edge
+/// drop is at least the cutoff, and a floor or ceiling effect below that. So
+/// "every sample has an edge drop of at least 8" says every single-peaked
+/// sample is a bell at any cutoff up to 8 observations, without choosing one.
+pub fn edge_drop(counts: &[u32]) -> u32 {
+    let (low, high) = edge_drops(&runs_of(counts));
+    low.min(high)
+}
+
+/// How clearly a second peak stands out, in observations: the largest cutoff
+/// at which `counts` still has two or more modes, or 0 when it has fewer at
+/// every cutoff.
+///
+/// At any cutoff up to this, the sample counts as multimodal; above it, as
+/// single-peaked or flat. For a sample with one clear second peak this is that
+/// peak's height above the dip separating it from the taller one, which is
+/// what [`modes`] calls its prominence. Like [`edge_drop`], it is the number a
+/// verdict rests on rather than a verdict, so a reader can judge it against a
+/// cutoff of their own.
+pub fn second_peak(counts: &[u32]) -> u32 {
+    second_peak_from_runs(&runs_of(counts))
+}
+
+/// [`second_peak`], on a run decomposition computed once by the caller.
+///
+/// The number of modes never rises with the cutoff, and from `gap + 1` on the
+/// sample is flat, so the answer is a binary search over `1..=gap`.
+fn second_peak_from_runs(runs: &[Run]) -> u32 {
+    let summit = runs.iter().map(|r| r.height).max().unwrap_or(0);
+    let floor = runs.iter().map(|r| r.height).min().unwrap_or(0);
+    second_peak_between(runs, 0, summit - floor + 1)
+}
+
+/// [`second_peak`], known to lie in `at..above`: the sample has two or more
+/// modes at a cutoff of `at` (or `at` is 0) and fewer at `above`.
+fn second_peak_between(runs: &[Run], mut at: u32, mut above: u32) -> u32 {
+    let several = |t: u32| mode_number(runs, t) >= 2;
+    while above - at > 1 {
+        let mid = at + (above - at) / 2;
+        if several(mid) {
+            at = mid;
+        } else {
+            above = mid;
+        }
+    }
+    at
 }
 
 /// Running shape statistics over a stream of count vectors.
@@ -841,6 +965,11 @@ pub struct ShapeAccumulator {
     /// Smallest and largest gap between a sample's tallest and shortest count.
     bar_gap_min: u32,
     bar_gap_max: u32,
+    /// Smallest and largest [`second_peak`] and [`edge_drop`].
+    second_peak_min: u32,
+    second_peak_max: u32,
+    edge_drop_min: u32,
+    edge_drop_max: u32,
     n_scanned: u64,
     per_class: Vec<ShapeBounds>,
     deficit_min: u32,
@@ -897,6 +1026,10 @@ impl ShapeAccumulator {
             rung_classes: vec![ShapeClass::Flat; ladder.len()],
             bar_gap_min: u32::MAX,
             bar_gap_max: 0,
+            second_peak_min: u32::MAX,
+            second_peak_max: 0,
+            edge_drop_min: u32::MAX,
+            edge_drop_max: 0,
             ladder,
             primary,
             n_scanned: 0,
@@ -932,7 +1065,23 @@ impl ShapeAccumulator {
         self.bar_gap_min = self.bar_gap_min.min(gap);
         self.bar_gap_max = self.bar_gap_max.max(gap);
 
-        self.update_band(&runs, &rung_classes, gap);
+        // Where the sample drops to one mode inside the band, the band scan
+        // has already found the second peak; search only outside it.
+        let one = self.first_at_most(&runs, &rung_classes, 1);
+        let (lo, hi) = (self.ladder[0].1, self.ladder[self.ladder.len() - 1].1);
+        let second = match one {
+            _ if mode_count(rung_classes[0]) <= 1 => second_peak_between(&runs, 0, lo),
+            Some((t, _)) => t - 1,
+            None => second_peak_between(&runs, hi, gap + 1),
+        };
+        self.second_peak_min = self.second_peak_min.min(second);
+        self.second_peak_max = self.second_peak_max.max(second);
+        let (low, high) = edge_drops(&runs);
+        let drop = low.min(high);
+        self.edge_drop_min = self.edge_drop_min.min(drop);
+        self.edge_drop_max = self.edge_drop_max.max(drop);
+
+        self.update_band(&runs, &rung_classes, gap, one);
 
         let class = rung_classes[self.primary];
         self.rung_classes = rung_classes;
@@ -977,7 +1126,16 @@ impl ShapeAccumulator {
     /// modes, then two, then interior, then an edge class, then flat, each
     /// part possibly empty. The first two boundaries are each a binary search
     /// between the two rungs they fall between; the others are known.
-    fn update_band(&mut self, runs: &[Run], rung_classes: &[ShapeClass], gap: u32) {
+    ///
+    /// `one` is [`Self::first_at_most`] for one mode, which the caller needs
+    /// too.
+    fn update_band(
+        &mut self,
+        runs: &[Run],
+        rung_classes: &[ShapeClass],
+        gap: u32,
+        one: Option<(u32, ShapeClass)>,
+    ) {
         let (lo, hi) = (self.ladder[0].1, self.ladder[self.ladder.len() - 1].1);
         if mode_count(rung_classes[0]) >= 3 {
             self.record_band(ShapeClass::ThreeOrMoreModes, lo);
@@ -988,7 +1146,7 @@ impl ShapeAccumulator {
             }
         }
         let flat_from = gap.saturating_add(1).max(lo);
-        if let Some((t, class)) = self.first_at_most(runs, rung_classes, 1) {
+        if let Some((t, class)) = one {
             if mode_count(class) == 1 {
                 self.record_band(class, t);
             }
@@ -1063,6 +1221,10 @@ impl ShapeAccumulator {
         }
         self.bar_gap_min = self.bar_gap_min.min(other.bar_gap_min);
         self.bar_gap_max = self.bar_gap_max.max(other.bar_gap_max);
+        self.second_peak_min = self.second_peak_min.min(other.second_peak_min);
+        self.second_peak_max = self.second_peak_max.max(other.second_peak_max);
+        self.edge_drop_min = self.edge_drop_min.min(other.edge_drop_min);
+        self.edge_drop_max = self.edge_drop_max.max(other.edge_drop_max);
         for (a, b) in self.band_min.iter_mut().zip(other.band_min) {
             *a = match (*a, b) {
                 (Some(x), Some(y)) => Some(x.min(y)),
@@ -1157,6 +1319,10 @@ impl ShapeAccumulator {
             bar_gap_max: self.bar_gap_max,
             bar_gap_min_share: share(self.bar_gap_min),
             bar_gap_max_share: share(self.bar_gap_max),
+            second_peak_min: if n == 0 { 0 } else { self.second_peak_min },
+            second_peak_max: self.second_peak_max,
+            edge_drop_min: if n == 0 { 0 } else { self.edge_drop_min },
+            edge_drop_max: self.edge_drop_max,
         }
     }
 }
@@ -1725,6 +1891,23 @@ mod tests {
             }
             assert_eq!(acc.band_min, expected_min, "k={k} n={n}");
             assert_eq!(acc.finish(true).band_n_per_class, expected, "k={k} n={n}");
+
+            // The accumulator takes the second peak from the band scan where
+            // it can, and searches below or above the band otherwise. Each
+            // must agree with the direct search, so check every vector on its
+            // own, at the default band and at one narrow enough that many
+            // second peaks lie above it.
+            for band in [vec![0.02, 0.05, 0.10], vec![0.03, 0.04]] {
+                let thresholds = ProminenceThresholds {
+                    primary: band[0],
+                    band,
+                };
+                for row in &rows {
+                    let mut one = ShapeAccumulator::new(k, n as usize, &thresholds);
+                    one.update(row);
+                    assert_eq!(one.second_peak_min, second_peak(row), "{row:?}");
+                }
+            }
         }
     }
 
@@ -1744,6 +1927,59 @@ mod tests {
         // interior.
         assert_eq!(classify(&[26, 31, 5, 5, 5], 5), ShapeClass::OneModeInterior);
         assert_eq!(classify(&[27, 31, 5, 5, 5], 5), ShapeClass::OneModeLowEdge);
+    }
+
+    #[test]
+    fn second_peak_and_edge_drop_are_where_the_class_changes() {
+        // Over every count vector of a few (k, n) and every cutoff: a sample
+        // has two or more modes exactly up to its second peak, and a sample
+        // with one mode is a bell exactly up to its edge drop.
+        fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+            if row.len() == k - 1 {
+                row.push(n);
+                out.push(row.clone());
+                row.pop();
+                return;
+            }
+            for c in 0..=n {
+                row.push(c);
+                compositions(k, n - c, row, out);
+                row.pop();
+            }
+        }
+        for (k, n) in [(3, 30), (5, 16), (7, 9)] {
+            let mut rows = Vec::new();
+            compositions(k, n, &mut Vec::new(), &mut rows);
+            for row in &rows {
+                let (second, drop) = (second_peak(row), edge_drop(row));
+                for t in 1..=n + 1 {
+                    let class = classify(row, t);
+                    assert_eq!(class.is_multimodal(), t <= second, "{row:?} at {t}");
+                    if class.is_unimodal() {
+                        assert_eq!(class.is_bell(), t <= drop, "{row:?} at {t}");
+                    }
+                }
+            }
+        }
+        assert_eq!(second_peak(&[20, 7, 8, 33, 32]), 13);
+        assert_eq!(second_peak(&[5, 24, 42, 24, 5]), 0);
+        assert_eq!(edge_drop(&[30, 29, 31, 5, 5]), 2);
+        assert_eq!(edge_drop(&[5, 24, 42, 24, 5]), 37);
+    }
+
+    #[test]
+    fn the_summary_reports_the_spread_of_both_numbers() {
+        let mut acc = ShapeAccumulator::new(5, 100, &ProminenceThresholds::default());
+        acc.update(&[20, 7, 8, 33, 32]); // second peak 13, tallest bar 1 from the top
+        acc.update(&[5, 24, 42, 24, 5]); // one peak, 37 above either end
+        let mut other = ShapeAccumulator::new(5, 100, &ProminenceThresholds::default());
+        other.update(&[40, 10, 10, 10, 30]); // second peak 20, tallest bar at an end
+        acc.merge(other);
+        let shapes = acc.finish(true);
+        assert_eq!((shapes.second_peak_min, shapes.second_peak_max), (0, 20));
+        assert_eq!((shapes.edge_drop_min, shapes.edge_drop_max), (0, 37));
+        let empty = empty_shapes(5, 100, &ProminenceThresholds::default(), true);
+        assert_eq!((empty.second_peak_min, empty.edge_drop_min), (0, 0));
     }
 
     #[test]

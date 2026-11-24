@@ -35,7 +35,7 @@
 //! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics |
 //! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
 //! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
-//! | `modality_summary` | one row: samples per shape class at the primary cutoff (`n_*`) and anywhere in the band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread, and the smallest and largest gap between a sample's tallest and shortest bar (`bar_gap_*`, in observations and as a share of the average bar) |
+//! | `modality_summary` | one row: samples per shape class at the primary cutoff (`n_*`) and anywhere in the band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread, the smallest and largest gap between a sample's tallest and shortest bar (`bar_gap_*`, in observations and as a share of the average bar), how clearly a second peak stands out (`second_peak_*`) and how far the tallest peak stands above the bars towards the nearer scale end (`edge_drop_*`), both in observations |
 //! | `modality_prominence` | samples per shape class at each threshold in the prominence envelope |
 //!
 //! # Reading the shape output
@@ -64,8 +64,10 @@
 //! that the shape queries check throughout) are choices, not derived values,
 //! and [`ProminenceThresholds`] sets others. Where a verdict depends on the
 //! cutoff, the output also reports the number behind it, so a reader can judge
-//! directly: `bar_gap_*` in `modality_summary`, for example, says how close
-//! together every sample's bars are.
+//! directly. In `modality_summary`, `bar_gap_*` says how close together every
+//! sample's bars are (flatness), `second_peak_*` how clearly a second peak
+//! stands out (multimodality), and `edge_drop_*` how far the tallest peak is
+//! from the nearer end of the scale (a bell or a floor or ceiling effect).
 //!
 //! Two more points on reading the output:
 //!
@@ -2328,6 +2330,10 @@ fn write_modality_to_parquet<U>(
         Field::new("bar_gap_max", DataType::UInt32, false),
         Field::new("bar_gap_min_share", DataType::Float64, false),
         Field::new("bar_gap_max_share", DataType::Float64, false),
+        Field::new("second_peak_min", DataType::UInt32, false),
+        Field::new("second_peak_max", DataType::UInt32, false),
+        Field::new("edge_drop_min", DataType::UInt32, false),
+        Field::new("edge_drop_max", DataType::UInt32, false),
     ];
     let mut columns: Vec<arrow::array::ArrayRef> = vec![
         Arc::new(BooleanArray::from(vec![shapes.exhaustive])),
@@ -2340,6 +2346,10 @@ fn write_modality_to_parquet<U>(
         Arc::new(UInt32Array::from(vec![shapes.bar_gap_max])),
         Arc::new(Float64Array::from(vec![shapes.bar_gap_min_share])),
         Arc::new(Float64Array::from(vec![shapes.bar_gap_max_share])),
+        Arc::new(UInt32Array::from(vec![shapes.second_peak_min])),
+        Arc::new(UInt32Array::from(vec![shapes.second_peak_max])),
+        Arc::new(UInt32Array::from(vec![shapes.edge_drop_min])),
+        Arc::new(UInt32Array::from(vec![shapes.edge_drop_max])),
     ];
     for class in ShapeClass::all() {
         fields.push(Field::new(
@@ -3270,8 +3280,28 @@ mod tests {
             modality::DEFAULT_PROMINENCE_LADDER.len() * ShapeClass::all().count()
         );
 
+        // Readers such as unsum check these names in order.
         let summary = parquet_columns(&format!("{base}modality_summary.parquet"));
-        assert!(summary.contains(&"exhaustive".to_string()));
+        assert_eq!(
+            summary[..14],
+            [
+                "exhaustive",
+                "n_scanned",
+                "min_prominence",
+                "deficit_min",
+                "deficit_mean",
+                "deficit_max",
+                "bar_gap_min",
+                "bar_gap_max",
+                "bar_gap_min_share",
+                "bar_gap_max_share",
+                "second_peak_min",
+                "second_peak_max",
+                "edge_drop_min",
+                "edge_drop_max",
+            ]
+        );
+        assert_eq!(summary.len(), 14 + 2 * ShapeClass::all().count());
         assert!(summary.contains(&"n_one_mode_interior".to_string()));
 
         let _ = std::fs::remove_dir_all(&dir);
