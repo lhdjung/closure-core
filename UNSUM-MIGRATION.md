@@ -6,7 +6,7 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `7bf2a52` on `optimize`.
+- **To:** closure-core `08d8e80` on `optimize`.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -14,7 +14,7 @@ this guide set out, is done in unsum `6d83a70`. That version is still in the
 history: `git show 21d63b9:UNSUM-MIGRATION.md`.
 
 Everything marked *verified* was run. The binding patch in section 3 was
-compiled with `cargo check` against `7bf2a52`, without warnings. The R changes
+compiled with `cargo check` against `08d8e80`, without warnings. The R changes
 in section 4 were not run.
 
 ---
@@ -59,7 +59,7 @@ and at `7054029` the patch in section 3 does not compile: there is no
 
 1. In closure-core: `git push origin optimize`.
 2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
-   `Cargo.lock` now names `7bf2a52` or later.
+   `Cargo.lock` now names `08d8e80` or later.
 3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
    `rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
    that tarball, so the old copy would otherwise keep being compiled.
@@ -295,7 +295,9 @@ them belong in `NEWS.md`.
   practical bound; streaming with `stop_after` used to try up to 100 million
   times. (`533ea9a`)
 - **Hopeless SDs return at once with no samples**, including when fixed
-  responses (restrictions) rule the SD out. (`15d2f6c`, `72bcf94`)
+  responses (restrictions) rule the SD out, and when the SD is wider than any
+  whole-number sample allows (on 1–5 with n = 5 and mean 3.20, anything above
+  2.05). (`15d2f6c`, `72bcf94`, `08d8e80`)
 - **Near the narrowest possible SD, runs finish in milliseconds.** An attempt
   gives up when no move is left, or when ten shifts in a row bring it no closer
   to the SD. Mean 3, SD 0.08, `n = 300` on 1–5 took 66 s and now takes about
@@ -375,6 +377,8 @@ and refactors.
 | `f862887` | Near-uniform samples are flat; `bar_gap_*` columns (3, 4, 5) |
 | `a248020` | `second_peak_*` and `edge_drop_*` columns (3) |
 | `7bf2a52` | `single_peak_ceiling` and `beyond_single_peak` in `metrics_horns` (3) |
+| `ea27622`, `dd9da52` | `beyond_single_peak` uses the bound at the reported mean, proved for every mean (3) |
+| `08d8e80` | SPRITE rejects SDs wider than any whole-number sample up front (5) |
 | `d3749b6` | A single peak's edge is decided by the bars within the cutoff (5) |
 | `dc2cf02` | Equal lower peaks merge (5) |
 | `47784a3` | Cutoffs must lie between 0 and 1; a cutoff of 0 reads as 1 (6) |
