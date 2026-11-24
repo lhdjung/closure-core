@@ -1825,6 +1825,9 @@ where
     for branch in branches {
         results.extend_from_slice(&branch);
     }
+    // A run that stopped short of its limit saw the whole space: no branch
+    // was skipped or cut, since either takes `limit` samples found.
+    let exhaustive = stop_after.is_none_or(|limit| results.len() / k < limit);
     if let Some(limit) = stop_after {
         results.truncate(limit * k);
     }
@@ -1835,10 +1838,9 @@ where
         n_usize,
         results,
     );
-    // `stop_after` truncates the enumeration, so the result set is then only
+    // When `stop_after` truncates the enumeration, the result set is only
     // part of the solution space and an unseen shape is not an impossible one.
-    let closure_results: ResultListFromMeanSdN<U> =
-        counts_to_result_list(counts, stop_after.is_none());
+    let closure_results: ResultListFromMeanSdN<U> = counts_to_result_list(counts, exhaustive);
 
     // Write to Parquet if configured
     if let Some(config) = parquet_config {
@@ -2586,8 +2588,9 @@ where
                 n_usize,
                 &grid,
                 final_freq_state,
-                // A truncated search saw only part of the space.
-                stop_after.is_none(),
+                // A search that reached its limit may have seen only part of
+                // the space.
+                found_count < limit,
             )?;
 
             return Ok(StreamingResult {
@@ -2695,7 +2698,9 @@ where
         n_usize,
         &grid,
         final_freq_state,
-        stop_after.is_none(),
+        // Every branch adds all it found to the counter, so a total below the
+        // limit means no branch was skipped or cut short.
+        stop_after.is_none_or(|limit| total_counter.load(Ordering::Relaxed) < limit),
     )?;
 
     Ok(StreamingResult {

@@ -1031,3 +1031,24 @@ fn sprite_samples_far_from_zero_match_their_sd() {
         assert!((sd - 1.5).abs() <= 0.005 + 1e-9, "sd {sd}");
     }
 }
+
+#[test]
+fn a_limited_run_that_saw_everything_is_exhaustive() {
+    // `stop_after` used to mark every limited run as partial, so `can_be`
+    // answered `None` even when the limit was never reached.
+    let total = closure_count(3.0, 1.2, 20, 1, 5, 0.05, 0.05).unwrap() as usize;
+    assert!(total > 0);
+    for limit in [total + 1, 1_000_000] {
+        let results =
+            closure_parallel::<f64, i32>(3.0, 1.2, 20, 1, 5, 0.05, 0.05, 1, None, Some(limit))
+                .unwrap();
+        assert_eq!(results.results.len(), total);
+        assert!(results.modality_shapes.exhaustive, "stop_after = {limit}");
+    }
+    let results =
+        closure_parallel::<f64, i32>(3.0, 1.2, 20, 1, 5, 0.05, 0.05, 1, None, Some(total)).unwrap();
+    assert!(
+        !results.modality_shapes.exhaustive,
+        "reaching the limit proves nothing"
+    );
+}
