@@ -4,7 +4,7 @@
 //! without enumerating them, using dynamic programming over frequency
 //! assignments for each scale value.
 
-use crate::{ClosureSearchContext, ParameterError, SearchBounds};
+use crate::{ClosureInputs, ParameterError, SearchBounds};
 use std::collections::HashMap;
 
 /// Count valid sorted combinations that CLOSURE would find.
@@ -46,9 +46,11 @@ pub fn closure_count(
     rounding_error_mean: f64,
     rounding_error_sd: f64,
 ) -> Result<u64, ParameterError> {
-    // The same validation `closure_parallel` runs. Without it a negative `sd`
-    // was read as a band of SDs from 0 up to |sd| minus the tolerance.
-    ClosureSearchContext::new(
+    // The same validation `closure_parallel` runs, and the same integer
+    // thresholds its DFS uses, so the two agree on every sample by
+    // construction. Without the validation a negative `sd` was read as a band
+    // of SDs from 0 up to |sd| minus the tolerance.
+    let ClosureInputs { bounds, .. } = ClosureInputs::new(
         mean,
         sd,
         n,
@@ -58,29 +60,30 @@ pub fn closure_count(
         rounding_error_sd,
     )?;
 
-    let n_usize = n as usize;
     let n_i64 = n as i64;
-    let n_f64 = n as f64;
-
-    // The same integer thresholds the DFS in `lib.rs` uses, so the two agree
-    // on every sample by construction.
-    let bounds = SearchBounds::new(mean, sd, n_usize, rounding_error_mean, rounding_error_sd);
     let sum_lower = bounds.sum_lo.max(n_i64 * scale_min as i64);
     let sum_upper = bounds.sum_hi.min(n_i64 * scale_max as i64);
     if sum_lower > sum_upper {
         return Ok(0);
     }
 
-    // Global sum_sq bounds for pruning (across all valid sums).
-    // var_nm1 = sum_sq - sum²/n, so sum_sq = var_nm1 + sum²/n.
+    // Global sum_sq bounds for pruning, across all valid sums. Since
+    // `n·Σx² = m2n + (Σx)²` with `m2n` between the integer bounds, these are
+    // exact in i128. They used to be f64, where the ±1 slack vanished once
+    // `(Σx)²/n` passed 2^53, and valid states were pruned.
     let min_abs_sum = if sum_lower <= 0 && sum_upper >= 0 {
-        0.0
+        0
     } else {
-        (sum_lower.unsigned_abs().min(sum_upper.unsigned_abs())) as f64
+        sum_lower.unsigned_abs().min(sum_upper.unsigned_abs()) as i128
     };
-    let max_abs_sum = (sum_lower.unsigned_abs().max(sum_upper.unsigned_abs())) as f64;
-    let global_sq_lo = (bounds.var_nm1_lo + min_abs_sum * min_abs_sum / n_f64 - 1.0) as i64;
-    let global_sq_hi = (bounds.var_nm1_hi + max_abs_sum * max_abs_sum / n_f64 + 1.0) as i64;
+    let max_abs_sum = sum_lower.unsigned_abs().max(sum_upper.unsigned_abs()) as i128;
+    let n_i128 = n as i128;
+    // The numerator is never negative, so this is a ceiling division.
+    let global_sq_lo = (bounds.m2n_lo as i128 + min_abs_sum * min_abs_sum + n_i128 - 1) / n_i128;
+    let global_sq_hi = (bounds.m2n_hi as i128 + max_abs_sum * max_abs_sum) / n_i128;
+    // Every reachable sum of squares fits in i64, so clamping loses nothing.
+    let global_sq_lo = global_sq_lo.clamp(0, i64::MAX as i128) as i64;
+    let global_sq_hi = global_sq_hi.clamp(0, i64::MAX as i128) as i64;
 
     // --- DP ---
     let scale_max_i64 = scale_max as i64;

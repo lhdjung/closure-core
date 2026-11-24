@@ -690,7 +690,23 @@ impl<U: IntegerType> ResultListFromMeanSdN<U> {
 /// `(sd + rounding_error_sd)²` is rarely exact either. A slack far below one
 /// unit but far above f64 error keeps a sample whose statistic sits exactly on
 /// a bound from being dropped by the last bit of that arithmetic.
+///
+/// The f64 error grows with the threshold, so a fixed slack stops covering it
+/// for large ones: at n = 1e6 the SD bound `n·(n−1)·sd²` is about 1.5e11 and
+/// is off by more than 1e-6. [`with_slack`] adds a relative part, far above
+/// f64's relative error of about 1e-15 and, below 1e13, still under one unit.
 const BOUND_TOLERANCE: f64 = 1e-6;
+
+/// Widen `x` by [`BOUND_TOLERANCE`] plus `1e-13 · |x|`, towards `+∞` when
+/// `up` is true and towards `−∞` otherwise.
+fn with_slack(x: f64, up: bool) -> f64 {
+    let slack = BOUND_TOLERANCE + x.abs() * 1e-13;
+    if up {
+        x + slack
+    } else {
+        x - slack
+    }
+}
 
 /// Integer-exact acceptance bounds for a CLOSURE search.
 ///
@@ -705,8 +721,6 @@ pub(crate) struct SearchBounds {
     pub sum_hi: i64,
     pub m2n_lo: i64,
     pub m2n_hi: i64,
-    /// `(n−1)·(sd − rounding_error_sd)²`, floored at zero.
-    pub var_nm1_lo: f64,
     /// `(n−1)·(sd + rounding_error_sd)²`.
     pub var_nm1_hi: f64,
 }
@@ -721,11 +735,10 @@ impl SearchBounds {
         let var_nm1_lo = sd_lo * sd_lo * (n_f - 1.0);
         let var_nm1_hi = sd_hi * sd_hi * (n_f - 1.0);
         Self {
-            sum_lo: (target_sum - sum_slack - BOUND_TOLERANCE).ceil() as i64,
-            sum_hi: (target_sum + sum_slack + BOUND_TOLERANCE).floor() as i64,
-            m2n_lo: (n_f * var_nm1_lo - BOUND_TOLERANCE).ceil() as i64,
-            m2n_hi: (n_f * var_nm1_hi + BOUND_TOLERANCE).floor() as i64,
-            var_nm1_lo,
+            sum_lo: with_slack(target_sum - sum_slack, false).ceil() as i64,
+            sum_hi: with_slack(target_sum + sum_slack, true).floor() as i64,
+            m2n_lo: with_slack(n_f * var_nm1_lo, false).ceil() as i64,
+            m2n_hi: with_slack(n_f * var_nm1_hi, true).floor() as i64,
             var_nm1_hi,
         }
     }
@@ -749,8 +762,20 @@ struct ClosureSearchContext {
     m2_hi: Vec<i64>,
 }
 
-impl ClosureSearchContext {
-    fn new<T: FloatType, U: IntegerType>(
+/// CLOSURE input that passed validation, with its acceptance bounds.
+///
+/// Shared by [`closure_parallel`], its streaming variant and
+/// [`closure_count`](crate::count::closure_count), so all three reject the
+/// same input with the same error.
+pub(crate) struct ClosureInputs {
+    pub n: usize,
+    pub scale_min: i64,
+    pub scale_max: i64,
+    pub bounds: SearchBounds,
+}
+
+impl ClosureInputs {
+    pub(crate) fn new<T: FloatType, U: IntegerType>(
         mean: T,
         sd: T,
         n: U,
@@ -804,9 +829,41 @@ impl ClosureSearchContext {
             return invalid("sd and the rounding errors must not be negative");
         }
         let n = n_i64 as usize;
-        let bounds = SearchBounds::new(mean, sd, n, re_mean, re_sd);
+        Ok(Self {
+            n,
+            scale_min,
+            scale_max,
+            bounds: SearchBounds::new(mean, sd, n, re_mean, re_sd),
+        })
+    }
+}
+
+impl ClosureSearchContext {
+    fn new<T: FloatType, U: IntegerType>(
+        mean: T,
+        sd: T,
+        n: U,
+        scale_min: U,
+        scale_max: U,
+        rounding_error_mean: T,
+        rounding_error_sd: T,
+    ) -> Result<Self, ParameterError> {
+        let ClosureInputs {
+            n,
+            scale_min,
+            scale_max,
+            bounds,
+        } = ClosureInputs::new(
+            mean,
+            sd,
+            n,
+            scale_min,
+            scale_max,
+            rounding_error_mean,
+            rounding_error_sd,
+        )?;
         let m2_hi = (0..=n)
-            .map(|k| (k as f64 * bounds.var_nm1_hi + BOUND_TOLERANCE).floor() as i64)
+            .map(|k| with_slack(k as f64 * bounds.var_nm1_hi, true).floor() as i64)
             .collect();
         Ok(Self {
             n,

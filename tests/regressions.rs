@@ -920,3 +920,35 @@ fn sprite_keeps_drawing_long_enough_to_find_rare_samples() {
         );
     }
 }
+
+#[test]
+fn the_counter_agrees_with_the_search_far_from_zero() {
+    // Scale values near 2.1e7 are within the accepted range, but the counter
+    // bounded Σx² in f64, where its ±1 slack vanished past 2^53, and pruned
+    // the one valid state: 0 against the search's 1.
+    let (n, low) = (141_i64, 21_000_000_i64);
+    let mean = ((n - 1) * low + low + 1) as f64 / n as f64;
+    let sd = (1.0 / n as f64).sqrt();
+    let found = closure_parallel::<f64, i32>(
+        mean, sd, 141, 21_000_000, 21_000_001, 0.0, 0.0, 1, None, None,
+    )
+    .unwrap()
+    .results
+    .len();
+    assert_eq!(found, 1);
+    assert_eq!(
+        closure_count(mean, sd, 141, 21_000_000, 21_000_001, 0.0, 0.0).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn a_bound_hit_exactly_at_a_large_n_is_found() {
+    // 187,110 ones in a million have mean 0.18711 and SD 0.39 exactly. The
+    // SD bound `n·(n−1)·sd²` is about 1.5e11, where f64 error passed the
+    // fixed 1e-6 slack and the bound rounded one unit past the sample.
+    assert_eq!(
+        closure_count(0.18711, 0.39, 1_000_000, 0, 1, 0.0, 0.0).unwrap(),
+        1
+    );
+}
