@@ -1874,8 +1874,11 @@ pub(crate) fn prepare_output_dir(file_path: &str) -> Result<String, ParameterErr
 
 /// Append a trailing separator so `{base_path}name.parquet` lands inside the
 /// directory the caller named.
+/// An empty path means the current directory, not the filesystem root.
 fn normalize_base_path(file_path: &str) -> String {
-    if file_path.ends_with('/') {
+    if file_path.is_empty() {
+        "./".to_string()
+    } else if file_path.ends_with('/') {
         file_path.to_string()
     } else {
         format!("{}/", file_path)
@@ -2818,6 +2821,14 @@ fn closure_branch_recurse(
 mod tests {
     use super::*;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    #[test]
+    fn an_empty_output_path_is_the_current_directory() {
+        // Appending a separator turned "" into "/", the filesystem root.
+        assert_eq!(normalize_base_path(""), "./");
+        assert_eq!(normalize_base_path("out"), "out/");
+        assert_eq!(normalize_base_path("out/"), "out/");
+    }
 
     /// Column names of a Parquet file, in order.
     fn parquet_columns(path: &str) -> Vec<String> {
