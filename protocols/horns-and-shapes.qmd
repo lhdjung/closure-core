@@ -36,6 +36,11 @@ execute:
   `metrics_horns`. The flag needs no samples, no search and no cutoff, so it
   also works for SPRITE and for truncated runs. Neither of those can rule out
   a shape by itself, because neither sees every sample.
+- **At a given mean the line is lower.** Navard, Seaman and Young (1993)
+  give it, $B_\mu$, under side conditions; exact checks indicate it holds
+  without them, and its maximum over the mean is the ceiling above. A proof
+  for every mean is still open, so closure-core flags against the mean-free
+  ceiling.
 - **It only works in one direction.** A high horns index rules out a single
   peak; a low one rules out nothing.
 - **Each shape verdict now comes with the number it rests on:** `bar_gap_*`
@@ -419,6 +424,130 @@ data.frame(k,
            max_pop_sd_on_1_to_k = round((2 * k - 1) / 6, 4))
 ```
 
+## The ceiling at a given mean {#sec-mean-ceiling}
+
+Navard, Seaman and Young (1993, Corollary 4.1.2) bound the variance of a
+discrete unimodal distribution on the categories $1, \dots, n$ with mean
+$\mu$ by
+$$
+B_\mu =
+\begin{cases}
+\dfrac{(4n+1)\mu - n(n+1)}{3} - \mu^2 & \text{if } 2\mu > n + 1,\\[6pt]
+\dfrac{n^2 - 1}{12} & \text{if } 2\mu = n + 1,\\[6pt]
+\dfrac{(2n+5)\mu - 2(n+1)}{3} - \mu^2 & \text{if } 2\mu < n + 1.
+\end{cases}
+$$
+Here $n$ is the number of categories, our $k$, not a sample size. The two
+outer branches are mirror images. Their definition of unimodality is ours:
+rising up to a mode and falling after it, ties allowed. They prove the bound
+only under side conditions: the lowest mode lies in a certain range, and each
+end category's share is capped by quantities $\alpha_1$, $\alpha_2$ that
+depend on $\mu$ and the mode.
+
+**Its maximum over the mean is the single-peak ceiling.** On the upper branch,
+$B_\mu$ is a downward parabola in $\mu$ with its vertex at
+$\mu = (4n+1)/6$, where
+$$
+B_\mu = \frac{(4n+1)^2}{36} - \frac{n(n+1)}{3}
+= \frac{(2n-1)^2}{36} = \left(\frac{2m+1}{6}\right)^2 .
+$$
+The distribution that attains it is their step-mass function with its step at
+the last category: equal mass on $1, \dots, n-1$ and more on $n$. That is the
+mirror image of the floor effect in @sec-ceiling. So the value of the ceiling
+is already in Navard et al. What they do not state is the mean-free bound
+itself, without side conditions.
+
+**Without the side conditions.** Whether $B_\mu$ needs those conditions can be
+checked exactly, because the largest variance at a given mean reduces to a
+finite search.
+
+> **Lemma.** Among single-peaked distributions on positions $0, \dots, m$ with
+> a mode at $j$ and mean $\mu$, the largest variance is reached by a mixture
+> of at most two of the uniform blocks $\{j\}$, $\{0..j\}$, $\{j..m\}$ and
+> $\{0..m\}$.
+
+*Proof.* (1) The single-peaked distributions with a mode at $j$ are exactly
+the mixtures of uniform blocks that contain $j$. Step 1 of @sec-ceiling
+writes each of them as such a mixture. Conversely, every uniform block
+containing $j$ rises (weakly) up to $j$ and falls after it, and mixtures keep
+that. (2) At a fixed mean, the variance is $\mathbb{E}[X^2] - \mu^2$, and
+$\mathbb{E}[X^2]$ is linear in the block weights. Maximising it subject to
+the weights summing to 1 and the mean being $\mu$ is a linear program, so an
+optimum uses at most two blocks. By duality its value is
+$\min_\beta \max_{S \ni j} \big(\mathbb{E}_S[X^2] + \beta\,(\mathbb{E}_S[X] - \mu)\big)$.
+(3) For a block $\{a..b\}$,
+$\mathbb{E}_S[X^2] + \beta\,\mathbb{E}_S[X] = (b-a)(b-a+2)/12 + ((a+b)/2)^2 + \beta (a+b)/2$.
+Its Hessian in $(a, b)$ is $\left(\begin{smallmatrix} 2/3 & 1/3 \\ 1/3 & 2/3 \end{smallmatrix}\right)$,
+which is positive definite. So the expression is convex on the box
+$0 \le a \le j \le b \le m$, and its maximum over the blocks lies at a
+corner. Hence the dual over all blocks equals the dual over the four corner
+blocks, and so do the primal values. $\blacksquare$
+
+The largest variance at mean $\mu$ is therefore the maximum, over $j$ and over
+pairs of corner blocks whose means bracket $\mu$, of the variance of the
+mixture with mean $\mu$. This is exact at each mean, with proportions free.
+
+```{r}
+#| label: mean-ceiling
+# Largest variance of a single-peaked distribution on 0..m with mean mu,
+# by the corner-block reduction.
+exact_max <- function(m, mu) {
+  blk <- function(a, b) {             # mean and E[X^2] of the uniform on a..b
+    L <- b - a; mn <- (a + b) / 2
+    c(mn, L * (L + 2) / 12 + mn^2)
+  }
+  best <- -Inf
+  for (j in 0:m) {
+    S <- rbind(blk(j, j), blk(0, j), blk(j, m), blk(0, m))
+    for (a in 1:4) for (b in 1:4) {
+      ma <- S[a, 1]; mb <- S[b, 1]
+      if (ma < mb && ma <= mu && mu <= mb) {
+        w <- (mb - mu) / (mb - ma)
+        best <- max(best, w * S[a, 2] + (1 - w) * S[b, 2] - mu^2)
+      } else if (ma == mb && abs(ma - mu) < 1e-12) {
+        best <- max(best, S[a, 2] - mu^2)
+      }
+    }
+  }
+  best
+}
+# Navard et al.'s bound, categories 1..n, mean mu1.
+B_mu <- function(mu1, n) {
+  if (2 * mu1 > n + 1) ((4 * n + 1) * mu1 - n * (n + 1)) / 3 - mu1^2
+  else if (2 * mu1 == n + 1) (n^2 - 1) / 12
+  else ((2 * n + 5) * mu1 - 2 * (n + 1)) / 3 - mu1^2
+}
+gap <- 0
+for (m in 1:14) for (mu in seq(0, m, length.out = 141)) {
+  gap <- max(gap, abs(exact_max(m, mu) - B_mu(mu + 1, m + 1)))
+}
+gap
+stopifnot(gap < 1e-9)
+```
+
+The exact maximum and $B_\mu$ agree at every mean tested, for every scale up
+to 15 values. A separate check in exact rational arithmetic gave the same
+result for scales up to 41 values at 401 means each. So $B_\mu$ appears to be
+the exact largest variance of a single-peaked distribution at a given mean,
+with no side conditions. That is not yet a proof for every mean: between the
+tested means, another pair of corner blocks could in principle rise above it.
+Proving that the step at the far end is always the best pair would settle it.
+
+At the centred mean this is Navard et al.'s Theorem 4.1. They state it with
+the end categories' shares below $1/n$, but at the centred mean the only
+single-peaked histogram that fails this is the uniform itself, which sits
+exactly at $1/n$. Brute force over all histograms of 50 responses on 5 values
+and 21 on 7 values finds no single-peaked histogram at the centred mean above
+$(n^2-1)/12$.
+
+**What it would add.** In the sweep over reported statistics in
+`protocols/when-closure-is-useful.md`, CLOSURE finds that every sample has a
+dip in 46, 96 and 199 cases (1–5 with $n = 20$ and $50$; 1–7 with $n = 30$).
+The mean-free ceiling catches 20, 52 and 86 of them from the SD alone; a check
+against $B_\mu$ would catch 24, 79 and 126. It never flagged a case where
+CLOSURE found a single-peaked sample. closure-core's `beyond_single_peak` still
+uses the mean-free ceiling, which is proved.
+
 ## From the ceiling to a reported SD {#sec-sd}
 
 In grid steps the ceiling on the population SD is $(2m+1)/6$; in scale points
@@ -484,9 +613,9 @@ own samples could never have ruled a shape out.
 - **It ignores the mean.** The ceiling is the highest variance at *any* mean.
   By the equality case, only a mean of exactly $(2m+1)/6$ grid steps from one
   end reaches it, 2.5 or 3.5 on 1–5. At other means the true line is lower,
-  so a ceiling that depends on the mean would flag more cases. Navard et al.
-  (1993) derive mean- and mode-dependent variance bounds for discrete
-  unimodal distributions; see @sec-related.
+  and @sec-mean-ceiling gives it: a bound of Navard et al. (1993) that
+  appears to hold without their conditions. It would flag more cases, but
+  closure-core does not use it until it is proved for every mean.
 - **It is not sharp for a given $n$.** The extreme histogram has whole counts
   only for some $n$: on 1–7 with $n = 14$, the highest single-peaked horns
   index is 0.472, against a ceiling of 0.522. Like the range-only bound
@@ -624,24 +753,29 @@ is conditional on an assumption, where closure-core uses the same inequality
 as an inference from a trusted SD to a shape.
 
 **Navard, Seaman and Young (1993).** They characterise discrete unimodality
-and derive variance upper bounds on $\{1, \dots, n\}$ under unimodality plus
-a known mean and/or mode ($B_{\mu,m}$, $B_m$, $B_\mu$). These are the
-mean-dependent refinement this document leaves open. Their Theorem 4.1, the
-discrete-uniform variance $(n^2-1)/12$ as an upper bound, holds only under
-extra conditions, according to the BRIMMER project's notes on the paper:
-a centred mean, and at most $1/n$ of the mass on each end value. Without them
-it fails. $(40, 15, 15, 15, 15)$ is unimodal, yet has variance 2.25 against
-$(25 - 1)/12 = 2$, and no unconditional discrete-unimodal bound can be lower
-than the ceiling here, which that histogram reaches. The exact conditions of
-$B_\mu$ and $B_{\mu,m}$ were not checked here, for lack of the paper.
+and derive variance upper bounds on the categories $\{1, \dots, n\}$ under
+unimodality plus a known mean and/or mode: $B_{\mu,m}$ (Theorem 4.2), $B_m$
+and $B_\mu$ (Corollaries 4.1.1 and 4.1.2). All three are proved under side
+conditions on the mode (for $B_{\mu,m}$ and $B_m$ the lowest mode must not be
+the first category; for $B_\mu$ it must lie in a range set by $\mu$) and
+caps on the end categories' shares. Their Theorem 4.1, the discrete-uniform
+variance $(n^2-1)/12$ as an upper bound, assumes a centred mean and end
+categories below $1/n$. The centred mean is essential:
+$(40, 15, 15, 15, 15)$ is unimodal with mean 2.5 and variance 2.25, against
+$(25 - 1)/12 = 2$. @sec-mean-ceiling shows that the maximum of their $B_\mu$
+over the mean is the single-peak ceiling. It also shows that $B_\mu$ itself
+appears to hold without the side conditions.
 
 **The continuous bound.** $R^2/9$ for unimodal distributions on an interval
 belongs to a literature on variance bounds under unimodality that Navard et
 al. cite: Gray and Odell (1967), Jacobson (1969), Seaman, Young and Turner
 (1987), Dharmadhikari and Joag-Dev (1989). Which of these first states
 $R^2/9$ was not checked here. The discrete ceiling in this document,
-$\sigma \le R/3 + d/6$, with its proof by sliding blocks and its equality
-case, was derived independently.
+$\sigma \le R/3 + d/6$, was derived independently, with its proof by sliding
+blocks and its equality case. Its value is the maximum of Navard et al.'s
+$B_\mu$ over the mean, so it is implicit in their Corollary 4.1.2. The new
+parts are the statement without side conditions, its proof, and its use as a
+shape inference.
 
 **unsum.** unsum's `horns()` documentation says that only CLOSURE gives
 certainty about the possible samples' horns indices, because SPRITE is not
