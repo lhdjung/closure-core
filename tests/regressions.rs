@@ -365,11 +365,12 @@ fn sprite_takes_its_tolerances_literally() {
 
     // A tolerance of 0.02 used to be reinterpreted as "one decimal place",
     // i.e. widened to 0.05; 0.01 on the mean was narrowed to 0.005. Both are
-    // now the inclusive half-widths CLOSURE uses.
+    // now the inclusive half-widths CLOSURE uses. At n = 100, mean 2.2 ± 0.01
+    // admits the totals 219, 220 and 221, but ± 0.005 only 220.
     let results = sprite_parallel::<f64, i32>(
-        2.205,
+        2.2,
         1.3,
-        20,
+        100,
         1,
         5,
         0.01,
@@ -382,7 +383,7 @@ fn sprite_takes_its_tolerances_literally() {
         None,
     )
     .unwrap();
-    assert!(!results.results.is_empty());
+    let mut totals = std::collections::BTreeSet::new();
     for i in 0..results.results.len() {
         let sample: Vec<f64> = results
             .results
@@ -390,14 +391,13 @@ fn sprite_takes_its_tolerances_literally() {
             .iter()
             .map(|&v| v as f64 / 100.0)
             .collect();
-        let mean = sample.iter().sum::<f64>() / 20.0;
-        let sd = (sample.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / 19.0).sqrt();
-        assert!(
-            (mean - 2.205).abs() <= 0.01 + 1e-9,
-            "sample {i}: mean {mean}"
-        );
+        let mean = sample.iter().sum::<f64>() / 100.0;
+        let sd = (sample.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / 99.0).sqrt();
+        assert!((mean - 2.2).abs() <= 0.01 + 1e-9, "sample {i}: mean {mean}");
         assert!((sd - 1.3).abs() <= 0.02 + 1e-9, "sample {i}: sd {sd}");
+        totals.insert((mean * 100.0).round() as i64);
     }
+    assert_eq!(totals, [219, 220, 221].into_iter().collect());
 }
 
 /// Mean and SD of a result row, computed on the real grid values.
