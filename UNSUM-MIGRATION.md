@@ -49,7 +49,7 @@ skipped.
 | 5 | `ResultsTable.sample` field was removed | compile | Use `results.sample(i)` | `lib.rs` `results_table_to_robj` |
 | 6 | Error messages come through `Display` | readable errors | `format!("{}", e)`, not `{:?}` | `lib.rs`, 3 places |
 | 7 | `closure_count` returns `Result<u64, ParameterError>` | nothing at compile time; see 3.6 | Match on the result | `lib.rs` `count_closure_combinations`, `R/count.R` |
-| 7a | The four entry points take a `prominence` argument | compile | Pass `None` (3.7) | `lib.rs`, 4 calls |
+| 7a | The four entry points take a `prominence` argument; `modality_summary` has four `bar_gap_*` columns | compile; schema check | Pass `None`; export and expect the new columns (3.7) | `lib.rs` 4 calls and the summary list, `R/constants.R` |
 | 8 | `frequency` columns: `f_count` → `f_expected` + `f_representative`; `value` is now double | every generator call | Update the schema check and every `f_count` use | `R/utils.R`, plots, predicates, docs |
 | 9 | `value` columns of `frequency_dist`, `modality_counts`, `modality_pairs` are now double | every generator call | Update the schema check | `R/utils.R` |
 | 10 | `modality_conclusion` can be `NA`, and its columns mean different things | results, docs | Handle `NA` and update the docs | `R/s7-result.R`, docs |
@@ -164,8 +164,11 @@ In the verification, SPRITE with `stop_after = 30` gave
 `TRUE TRUE TRUE NA`: `j_shape_high` was not found and not ruled out.
 
 `ModalityShapes` also answers `can_be_bell_shaped()` (one mode away from both
-ends). That is the claim papers usually make, and a candidate fifth column. For
-exactly two modes, use `can_be(|c| c == ShapeClass::TwoModes)`.
+ends), the claim papers usually make, and `can_be_flat()`. `must_be(...)`
+asks the converse: whether every sample has a shape, e.g.
+`must_be(|c| c == ShapeClass::Flat)` for "the original data was essentially
+uniform". Each is a candidate column. For exactly two modes, use
+`can_be(|c| c == ShapeClass::TwoModes)`.
 
 The patch also exports three new tibbles, each identical to the file of the
 same name that streaming writes (see [section 8](#8-file-reference)):
@@ -248,7 +251,7 @@ character result the way `generate-basic.R` does: abort with the message.
 Normally unsum's own argument checks catch invalid input before it gets that
 far.
 
-### 3.7 Cutoffs are a parameter
+### 3.7 Cutoffs are a parameter, and the flatness numbers are reported
 
 `closure_parallel`, `closure_parallel_streaming`, `sprite_parallel` and
 `sprite_parallel_streaming` take a last argument,
@@ -256,7 +259,20 @@ far.
 classification, as fractions of `n`. `None` keeps the defaults (5% of `n`,
 band 2%–10%). Add `None` to the four calls in `src/rust/src/lib.rs` (lines
 421, 434, 468 and 481). Exposing the cutoffs to R would mean building a
-`ProminenceThresholds { primary, band }` from two R arguments instead. Not
+`ProminenceThresholds { primary, band }` from two R arguments instead.
+
+`modality_summary` gains four columns. Streaming writes them; in memory mode the
+binding builds the tibble itself, so add them to its column list next to
+`deficit_max`:
+
+```rust
+("bar_gap_min".into(), (ms.bar_gap_min as f64).into()),
+("bar_gap_max".into(), (ms.bar_gap_max as f64).into()),
+("bar_gap_min_share".into(), ms.bar_gap_min_share.into()),
+("bar_gap_max_share".into(), ms.bar_gap_max_share.into()),
+```
+
+and to `R/constants.R` as `integer`, `integer`, `double`, `double`. Not
 built against unsum.
 
 ---
@@ -493,6 +509,13 @@ all of them belong in `NEWS.md`.
 - `modality_conclusion` is derived per sample now (see 3.2). The old
   `j_shape_*` flags came from a heuristic on per-value count ranges.
   (`e51484c` and following)
+- **Near-uniform samples are flat.** A sample is flat when its tallest bar
+  exceeds its shortest by less than the cutoff. The tallest bar used to be a
+  mode at every cutoff, so `(30, 30, 30, 30, 29)` read as a floor effect and
+  `(29, 30, 30, 30, 29)` as a bell. `n_flat` and `band_n_flat` rise; the
+  one-mode classes and `can_be_unimodal`, `j_shape_*` fall accordingly. On
+  scales with many values and a small `n`, where bars hold few observations,
+  many more samples are flat. (cutoff and flatness changes)
 - Equal lower peaks separated by a dip below the threshold now merge into one
   mode, as tied tallest runs already did. `(8, 7, 8, 2, 20)` has two modes at
   thresholds 2–6, not three, matching its mirror image. Per-class counts in
@@ -584,7 +607,7 @@ the same values in memory mode and in streaming.
 | `modality_counts` | `value` dbl, `count_lo` int, `count_hi` int: per-value count range over all samples |
 | `modality_pairs` | `value_a` dbl, `value_b` dbl, `resolved` lgl, `a_greater` lgl: whether each adjacent ordering is fixed |
 | `modality_shapes` | `class` chr, `n_samples` dbl, `value` dbl, `count_lo` int, `count_hi` int: per-value count range **within each shape class**. Classes with no samples have no rows. |
-| `modality_summary` | one row: `exhaustive` lgl, `n_scanned` dbl, `min_prominence` dbl, `deficit_min` int, `deficit_mean` dbl, `deficit_max` int, `n_<class>` dbl ×6 (at the primary threshold), `band_n_<class>` dbl ×6 (anywhere in the band) |
+| `modality_summary` | one row: `exhaustive` lgl, `n_scanned` dbl, `min_prominence` dbl, `deficit_min` int, `deficit_mean` dbl, `deficit_max` int, `bar_gap_min` int, `bar_gap_max` int, `bar_gap_min_share` dbl, `bar_gap_max_share` dbl, `n_<class>` dbl ×6 (at the primary threshold), `band_n_<class>` dbl ×6 (anywhere in the band) |
 | `modality_prominence` | `min_prominence` dbl, `min_prominence_counts` int, `primary` lgl, `class` chr, `n_samples` dbl: class counts at each rung of the threshold band (by default 0.02, 0.05, 0.10 of n) |
 | `sample` (Samples layout) | `pos1..posN` int. Unchanged; SPRITE values in hundredths. |
 | `horns` (Samples layout) | `horns` dbl. Unchanged. |
@@ -627,7 +650,7 @@ Commits since `1fe8f95` that affect unsum; the rest are tests, docs or tooling.
 | `df52c88` | No stderr warnings from in-memory SPRITE |
 | `33bb164` | At least 5,000 SPRITE draws before the duplicate rate may stop |
 | `15d2f6c`, `abae5c7` | SPRITE gives up fast on impossible SDs and trapped attempts |
-| cutoff and flatness changes after `4c8969d` | `prominence` argument on all four entry points (3.7) |
+| cutoff and flatness changes after `4c8969d` | Near-uniform samples are flat; `prominence` argument on all four entry points; `bar_gap_*` columns; `must_be` and `can_be_flat` (3.7) |
 | review fixes after `7054029` | Exact `closure_count` pruning; bound slack grows with the bound; limited runs below their limit are exhaustive; SPRITE accepts with CLOSURE's integer rule, keeps searching while moves are left, and rejects scales too wide for the grid or for exact arithmetic; `file_path = ""` means the current directory |
 
 ---

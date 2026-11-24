@@ -35,7 +35,7 @@
 //! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics |
 //! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
 //! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
-//! | `modality_summary` | one row: samples per shape class at the primary threshold (`n_*`) and anywhere in the prominence band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread |
+//! | `modality_summary` | one row: samples per shape class at the primary cutoff (`n_*`) and anywhere in the band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread, and the smallest and largest gap between a sample's tallest and shortest bar (`bar_gap_*`, in observations and as a share of the average bar) |
 //! | `modality_prominence` | samples per shape class at each threshold in the prominence envelope |
 //!
 //! # Reading the shape output
@@ -2247,6 +2247,10 @@ fn write_modality_to_parquet<U>(
         Field::new("deficit_min", DataType::UInt32, false),
         Field::new("deficit_mean", DataType::Float64, false),
         Field::new("deficit_max", DataType::UInt32, false),
+        Field::new("bar_gap_min", DataType::UInt32, false),
+        Field::new("bar_gap_max", DataType::UInt32, false),
+        Field::new("bar_gap_min_share", DataType::Float64, false),
+        Field::new("bar_gap_max_share", DataType::Float64, false),
     ];
     let mut columns: Vec<arrow::array::ArrayRef> = vec![
         Arc::new(BooleanArray::from(vec![shapes.exhaustive])),
@@ -2255,6 +2259,10 @@ fn write_modality_to_parquet<U>(
         Arc::new(UInt32Array::from(vec![shapes.deficit_min])),
         Arc::new(Float64Array::from(vec![shapes.deficit_mean])),
         Arc::new(UInt32Array::from(vec![shapes.deficit_max])),
+        Arc::new(UInt32Array::from(vec![shapes.bar_gap_min])),
+        Arc::new(UInt32Array::from(vec![shapes.bar_gap_max])),
+        Arc::new(Float64Array::from(vec![shapes.bar_gap_min_share])),
+        Arc::new(Float64Array::from(vec![shapes.bar_gap_max_share])),
     ];
     for class in ShapeClass::all() {
         fields.push(Field::new(

@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | one mode | [`OneModeInterior`] ("bell") | [`OneModeLowEdge`] / [`OneModeHighEdge`] (J) |
 //! | two or more | [`TwoModes`] | [`ThreeOrMoreModes`] |
-//! | no unique mode | [`Flat`] | — |
+//! | none distinguishable | [`Flat`] | — |
 //!
 //! [`OneModeInterior`]: ShapeClass::OneModeInterior
 //! [`OneModeLowEdge`]: ShapeClass::OneModeLowEdge
@@ -35,15 +35,23 @@
 //! observation creates or destroys a "peak". So a bump counts as a mode only if
 //! it stands out by at least a cutoff, measured in observations: its height
 //! above the dip that separates it from any taller bar (its *prominence*). The
-//! tallest runs of a sample have no taller peak to be measured against, so they
-//! are measured against each other; see [`modes`].
+//! same cutoff decides flatness. A histogram is [`Flat`] when its tallest bar
+//! exceeds its shortest by less than the cutoff, so `(30, 30, 30, 30, 29)` is
+//! flat at any cutoff of two observations or more.
 //!
 //! Nothing derives the cutoff. The defaults, 5% of `n` for the per-class counts
 //! and every whole-observation cutoff from 2% to 10% of `n` for the shape
 //! queries, are conventional choices; other values would be as defensible.
-//! [`ProminenceThresholds`] sets others. [`ModalityShapes::can_be`] looks at
-//! every cutoff in the band, so a shape counts as seen if any of them shows it,
-//! and [`ModalityShapes::min_prominence_admitting`] reports the margin.
+//! [`ProminenceThresholds`] sets others. Two things limit how much rests on the
+//! choice:
+//!
+//! - [`ModalityShapes::can_be`] looks at every cutoff in the band, so a shape
+//!   counts as seen if any of them shows it.
+//! - The summary reports the numbers a flatness verdict depends on: the
+//!   smallest and largest gap between a sample's tallest and shortest bar, in
+//!   observations and as a share of the average bar
+//!   ([`ModalityShapes::bar_gap_max`] and friends). "Every sample's bars lie
+//!   within 2 observations of each other" can be judged without any cutoff.
 //!
 //! # The graded companion
 //!
@@ -54,8 +62,9 @@
 
 use strum_macros::{EnumCount as EnumCountMacro, EnumIter, IntoStaticStr};
 
-/// Default cutoff for a mode, as a fraction of the sample size: a peak must
-/// rise 5% of `n` above the dip separating it from any taller bar.
+/// Default cutoff for a mode, and for flatness, as a fraction of the sample
+/// size: a peak must rise 5% of `n` above the dip separating it from any
+/// taller bar.
 ///
 /// A convention, not a derived value; see [the module docs](self). Pass
 /// [`ProminenceThresholds`] for another. [`unimodality_deficit`] is a
@@ -120,9 +129,9 @@ impl ProminenceThresholds {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumCountMacro, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum ShapeClass {
-    /// No distinguishable mode at the threshold: every count is the same, or
-    /// the tied tallest runs and the sub-threshold dips between them span the
-    /// entire scale. See [`modes`].
+    /// No distinguishable mode: the tallest count exceeds the smallest by less
+    /// than the cutoff, so every difference between bars is below it. See
+    /// [`modes`].
     Flat,
     /// One mode, away from both ends of the scale — the "bell" case.
     OneModeInterior,
@@ -199,9 +208,16 @@ fn runs_of(counts: &[u32]) -> Vec<Run> {
 
 /// Grid positions of the modes of `counts`, ascending.
 ///
-/// A mode is a maximal run of equal counts that is strictly higher than the runs
-/// on either side of it (a missing neighbour counts as lower, so a peak may sit
-/// at either end of the scale), and that stands out from the rest of the sample:
+/// A sample whose tallest count exceeds its smallest by less than
+/// `min_prominence_counts` has no mode: every difference between its bars is
+/// below the cutoff, so it is [`ShapeClass::Flat`]. `(30, 30, 30, 30, 29)` is
+/// flat at any cutoff of 2 or more. The cutoff is a convention; see [the module
+/// docs](self).
+///
+/// Otherwise a mode is a maximal run of equal counts that is strictly higher
+/// than the runs on either side of it (a missing neighbour counts as lower, so
+/// a peak may sit at either end of the scale), and that stands out from the
+/// rest of the sample:
 ///
 /// - A run *below* the tallest needs topographic prominence of at least
 ///   `min_prominence_counts` observations: its height minus the higher of its
@@ -214,20 +230,12 @@ fn runs_of(counts: &[u32]) -> Vec<Run> {
 ///   so they are measured against each other: consecutive tied tallest runs
 ///   merge into one broad mode when the valley between them dips less than
 ///   `min_prominence_counts` below the summit, and stay distinct modes when it
-///   dips at least that far. A unique tallest run is thus a mode at every
-///   threshold — which keeps a textbook-unimodal histogram on a wide grid,
-///   whose tallest bar is only about `n / k`, from being reported as having no
-///   mode. Wide grids arise for real: a multi-item SPRITE grid is
-///   `(scale_max - scale_min) * items + 1` positions across.
+///   dips at least that far. Since the sample is not flat, the tallest bar
+///   stands at least the cutoff above the shortest, so there is always a mode.
 ///
-/// Merging (rather than exempting each tied tallest run from the threshold) is
+/// Merging (rather than exempting each tied tallest run from the cutoff) is
 /// what stops a one-count wobble around a tied maximum, like
-/// `(30, 29, 30, 29, 30)`, from reading as multimodal at every threshold.
-///
-/// A sample therefore has no mode in exactly two cases, and both classify as
-/// [`ShapeClass::Flat`]: every count is equal, or the tied tallest runs and
-/// every dip between them merge into a single region spanning the entire scale
-/// — flat at this resolution.
+/// `(30, 29, 30, 29, 26)`, from reading as multimodal.
 ///
 /// Each mode is reported by the first position of its (first) run.
 pub fn modes(counts: &[u32], min_prominence_counts: u32) -> Vec<usize> {
@@ -255,6 +263,17 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
         .map(|r| r.height)
         .max()
         .expect("runs is non-empty");
+    // Every difference between bars is below the cutoff: flat. Without this
+    // the tallest bar was a mode at every cutoff, so `(30, 30, 30, 30, 29)`
+    // read as a floor effect.
+    let floor = runs
+        .iter()
+        .map(|r| r.height)
+        .min()
+        .expect("runs is non-empty");
+    if summit - floor < min_prominence_counts {
+        return Vec::new();
+    }
 
     // Group the summit runs: consecutive tied tallest runs merge when the
     // valley between them dips less than the threshold below the summit — at
@@ -280,16 +299,6 @@ fn mode_extents(runs: &[Run], min_prominence_counts: u32) -> Vec<(usize, usize)>
             Some(group) if merges => group.1 = i,
             _ => groups.push((i, i)),
         }
-    }
-
-    // A single group reaching from the first run to the last means every dip
-    // in the vector is below the threshold: the sample is flat at this
-    // resolution and has no distinguishable mode, exactly like a constant
-    // vector. No lower run can qualify either — any local maximum sits between
-    // two merged summit runs, so its key cols are at least the sub-threshold
-    // valley floor and its prominence falls short of the threshold.
-    if groups == [(0, runs.len() - 1)] {
-        return Vec::new();
     }
 
     let mut out: Vec<(usize, usize)> = groups
@@ -382,11 +391,12 @@ pub fn classify(counts: &[u32], min_prominence_counts: u32) -> ShapeClass {
 fn classify_from_runs(runs: &[Run], k: usize, min_prominence_counts: u32) -> ShapeClass {
     let peaks = mode_extents(runs, min_prominence_counts);
     match peaks[..] {
-        // No distinguishable mode: every count is equal, or nothing but
-        // sub-threshold texture across the whole scale. See [`modes`].
+        // No distinguishable mode: every difference between bars is below the
+        // cutoff. See [`modes`].
         [] => ShapeClass::Flat,
-        // A lone mode spanning both edges would have classified as `Flat`
-        // above, so the edge tests below are mutually exclusive.
+        // A lone mode cannot span both edges: its group would hold every
+        // bar within the cutoff of the summit, which is flat. So the edge
+        // tests below are mutually exclusive.
         [(start, end)] => {
             if start == 0 {
                 ShapeClass::OneModeLowEdge
@@ -530,6 +540,24 @@ pub struct ModalityShapes {
     pub deficit_max: u32,
     /// Prominence threshold used for mode detection, as a fraction of `n`.
     pub min_prominence: f64,
+    /// Smallest gap, in observations, between a sample's tallest and shortest
+    /// count, over the scanned samples: the flattest sample. 0 when nothing
+    /// was scanned.
+    ///
+    /// Together with [`Self::bar_gap_max`] this is the cutoff-free version of
+    /// the flatness verdict. If the largest gap is 2, every sample's bars lie
+    /// within 2 observations of each other, and a reader can judge whether
+    /// that is essentially uniform without choosing a cutoff.
+    pub bar_gap_min: u32,
+    /// Largest gap between a sample's tallest and shortest count: every
+    /// scanned sample's bars lie within this many observations of each other.
+    pub bar_gap_max: u32,
+    /// [`Self::bar_gap_min`] as a share of the average bar, `n / k`. Unlike a
+    /// share of `n`, this does not make scales with more values look flatter.
+    /// `NaN` when nothing was scanned.
+    pub bar_gap_min_share: f64,
+    /// [`Self::bar_gap_max`] as a share of the average bar, `n / k`.
+    pub bar_gap_max_share: f64,
 }
 
 impl ModalityShapes {
@@ -616,6 +644,17 @@ impl ModalityShapes {
         }
     }
 
+    /// Whether the original data must have had a shape satisfying `predicate`:
+    /// [`Self::can_be`] for the opposite shapes, negated.
+    ///
+    /// `Some(true)` when samples exist, the search found all of them, and every
+    /// one has such a shape at every cutoff in the band, so the original data
+    /// had it too. `Some(false)` when some sample has another shape at some
+    /// cutoff. `None` under the same conditions as [`Self::can_be`].
+    pub fn must_be(&self, predicate: impl Fn(ShapeClass) -> bool) -> Option<bool> {
+        self.can_be(|c| !predicate(c)).map(|other| !other)
+    }
+
     /// [`Self::can_be`], answered from the primary threshold alone.
     ///
     /// Reported for continuity with the per-class counts and conditional bounds,
@@ -663,6 +702,12 @@ impl ModalityShapes {
     pub fn can_be_j_shape_high(&self) -> Option<bool> {
         self.can_be(|c| c == ShapeClass::OneModeHighEdge)
     }
+
+    /// Could the original data have been flat, every bar within the cutoff of
+    /// every other? See [`Self::bar_gap_max`] for the cutoff-free version.
+    pub fn can_be_flat(&self) -> Option<bool> {
+        self.can_be(|c| c == ShapeClass::Flat)
+    }
 }
 
 /// Modes a class stands for, with three or more counted as 3.
@@ -696,6 +741,9 @@ pub struct ShapeAccumulator {
     band_min: Vec<Option<u32>>,
     /// Scratch space for one sample's class at each rung.
     rung_classes: Vec<ShapeClass>,
+    /// Smallest and largest gap between a sample's tallest and shortest count.
+    bar_gap_min: u32,
+    bar_gap_max: u32,
     n_scanned: u64,
     per_class: Vec<ShapeBounds>,
     deficit_min: u32,
@@ -746,6 +794,8 @@ impl ShapeAccumulator {
             band_counts: vec![0; n_classes],
             band_min: vec![None; n_classes],
             rung_classes: vec![ShapeClass::Flat; ladder.len()],
+            bar_gap_min: u32::MAX,
+            bar_gap_max: 0,
             ladder,
             primary,
             n_scanned: 0,
@@ -775,7 +825,13 @@ impl ShapeAccumulator {
             rung_classes[rung] = class;
         }
 
-        self.update_band(&runs, counts.len(), &rung_classes);
+        let tallest = counts.iter().copied().max().unwrap_or(0);
+        let shortest = counts.iter().copied().min().unwrap_or(0);
+        let gap = tallest - shortest;
+        self.bar_gap_min = self.bar_gap_min.min(gap);
+        self.bar_gap_max = self.bar_gap_max.max(gap);
+
+        self.update_band(&runs, counts.len(), &rung_classes, gap);
 
         let class = rung_classes[self.primary];
         self.rung_classes = rung_classes;
@@ -805,35 +861,37 @@ impl ShapeAccumulator {
     }
 
     /// Record every class `runs` takes at some whole-observation threshold
-    /// between the lowest and the highest rung, given its class at each rung.
+    /// between the lowest and the highest rung, given its class at each rung
+    /// and the gap between its tallest and shortest count.
     ///
     /// This leans on how classification moves as the threshold `t` rises. The
     /// number of modes never goes up: merging tied tallest runs (`summit −
-    /// valley < t`) only becomes more likely, a lower peak only drops out
-    /// (`height − col >= t`), and once every summit run has merged into one
-    /// group spanning the scale it stays that way. A single mode is the one
-    /// summit group, whose extent no longer changes, so a one-mode or `Flat`
-    /// class holds from where it first appears to the top of the band. The
-    /// class sequence is therefore three-or-more modes, then two, then one
-    /// fixed class of at most one mode, each part possibly empty. Only the two
-    /// boundaries need finding, and each is a binary search between the two
-    /// rungs it falls between.
-    fn update_band(&mut self, runs: &[Run], k: usize, rung_classes: &[ShapeClass]) {
-        let last = rung_classes.len() - 1;
+    /// valley < t`) only becomes more likely, and a lower peak only drops out
+    /// (`height − col >= t`). A single mode is the one group of all tallest
+    /// runs, whose extent no longer changes, so a one-mode class holds until
+    /// the sample turns flat, at `t = gap + 1`, and flat holds from there on.
+    /// The class sequence is therefore three-or-more modes, then two, then one
+    /// fixed one-mode class, then flat, each part possibly empty. The first
+    /// two boundaries are each a binary search between the two rungs they
+    /// fall between; the last is known.
+    fn update_band(&mut self, runs: &[Run], k: usize, rung_classes: &[ShapeClass], gap: u32) {
+        let (lo, hi) = (self.ladder[0].1, self.ladder[self.ladder.len() - 1].1);
         if mode_count(rung_classes[0]) >= 3 {
-            self.record_band(ShapeClass::ThreeOrMoreModes, self.ladder[0].1);
+            self.record_band(ShapeClass::ThreeOrMoreModes, lo);
         }
         if let Some((t, class)) = self.first_at_most(runs, k, rung_classes, 2) {
             if class == ShapeClass::TwoModes {
                 self.record_band(class, t);
             }
         }
-        let top = rung_classes[last];
-        if mode_count(top) <= 1 {
-            let (t, _) = self
-                .first_at_most(runs, k, rung_classes, 1)
-                .expect("the top rung qualifies");
-            self.record_band(top, t);
+        if let Some((t, class)) = self.first_at_most(runs, k, rung_classes, 1) {
+            if mode_count(class) == 1 {
+                self.record_band(class, t);
+            }
+        }
+        let flat_from = gap.saturating_add(1).max(lo);
+        if flat_from <= hi {
+            self.record_band(ShapeClass::Flat, flat_from);
         }
     }
 
@@ -893,6 +951,8 @@ impl ShapeAccumulator {
         for (a, b) in self.band_counts.iter_mut().zip(other.band_counts) {
             *a += b;
         }
+        self.bar_gap_min = self.bar_gap_min.min(other.bar_gap_min);
+        self.bar_gap_max = self.bar_gap_max.max(other.bar_gap_max);
         for (a, b) in self.band_min.iter_mut().zip(other.band_min) {
             *a = match (*a, b) {
                 (Some(x), Some(y)) => Some(x.min(y)),
@@ -932,6 +992,14 @@ impl ShapeAccumulator {
         let (band_lo_fraction, band_lo) = self.ladder[0];
         let band_hi_fraction = self.ladder[self.ladder.len() - 1].0;
         let sample_size = self.n.max(1) as f64;
+        // A gap as a share of the average bar, `n / k`.
+        let share = |gap: u32| {
+            if n == 0 {
+                f64::NAN
+            } else {
+                gap as f64 * self.k as f64 / sample_size
+            }
+        };
         // Capped at the top rung, which rounds to the same `t`: uncapped, the
         // top rung's threshold read 13 / 128 = 0.1016 for a band ending at 0.10.
         let band_min_prominence = self
@@ -974,6 +1042,10 @@ impl ShapeAccumulator {
             },
             deficit_max: self.deficit_max,
             min_prominence: self.min_prominence,
+            bar_gap_min: if n == 0 { 0 } else { self.bar_gap_min },
+            bar_gap_max: self.bar_gap_max,
+            bar_gap_min_share: share(self.bar_gap_min),
+            bar_gap_max_share: share(self.bar_gap_max),
         }
     }
 }
@@ -1057,12 +1129,32 @@ mod tests {
 
     #[test]
     fn prominence_suppresses_noise_peaks() {
-        // Near-flat with three strict local maxima. Any threshold above the
-        // 1-3 count wobble must call this flat-ish rather than trimodal.
+        // Near-flat with three strict local maxima. A cutoff above the
+        // one-count wobble leaves only the bar at 32; one above the whole
+        // 3-count spread calls it flat.
         let noisy = [30, 29, 30, 29, 32];
         assert_eq!(classify(&noisy, LOOSE), ShapeClass::ThreeOrMoreModes);
-        // 5% of n=150 is 8 observations, far above the wobble.
-        assert_eq!(classify(&noisy, 8), ShapeClass::OneModeHighEdge);
+        assert_eq!(classify(&noisy, 3), ShapeClass::OneModeHighEdge);
+        // 5% of n = 150 is 8 observations.
+        assert_eq!(classify(&noisy, 4), ShapeClass::Flat);
+        assert_eq!(classify(&noisy, 8), ShapeClass::Flat);
+    }
+
+    #[test]
+    fn bars_within_the_cutoff_of_each_other_are_flat() {
+        // One observation short at one end. The tallest bars used to be a
+        // mode at every cutoff, so this read as a floor effect.
+        let row = [30, 30, 30, 30, 29];
+        assert_eq!(classify(&row, 1), ShapeClass::OneModeLowEdge);
+        assert_eq!(classify(&row, 2), ShapeClass::Flat);
+        // Likewise for a one-observation "bell".
+        assert_eq!(classify(&[29, 30, 30, 30, 29], 2), ShapeClass::Flat);
+        // Flat holds from one above the gap on.
+        assert_eq!(
+            classify(&[33, 30, 30, 30, 30], 3),
+            ShapeClass::OneModeLowEdge
+        );
+        assert_eq!(classify(&[33, 30, 30, 30, 30], 4), ShapeClass::Flat);
     }
 
     #[test]
@@ -1077,34 +1169,47 @@ mod tests {
     }
 
     #[test]
-    fn the_tallest_bar_is_a_mode_however_wide_the_grid() {
-        // A textbook-unimodal histogram spread over 41 grid positions: 10
-        // everywhere, 11 at the centre. The tallest bar holds 11 of 411
-        // observations, so it cannot clear a 5%-of-n threshold (21) on its own.
-        //
-        // Treating "no bar clears the threshold" as flat would put this in
-        // `Flat`, which is not unimodal, and an exhaustive scan over samples
-        // like it would then answer `Some(false)` to *every* `can_be` query at
-        // once — proving the data had no shape at all. A unique tallest run is
-        // therefore always a mode.
+    fn a_one_observation_bump_on_a_wide_grid_is_flat() {
+        // 10 everywhere on 41 grid positions, 11 at the centre. The bump is
+        // one observation, far below any cutoff in the band, so this is flat,
+        // and an exhaustive scan of samples like it says the original data
+        // was flat. It used to read as a bell at every cutoff.
         let mut hump = vec![10u32; 41];
         hump[20] = 11;
         let n: u32 = hump.iter().sum();
         assert_eq!(n, 411);
         let thresh = ((DEFAULT_MODE_PROMINENCE * n as f64).ceil() as u32).max(1);
-        assert!(thresh > 11, "the premise: no bar reaches the threshold");
-
-        assert_eq!(modes(&hump, thresh), vec![20]);
-        assert_eq!(classify(&hump, thresh), ShapeClass::OneModeInterior);
-        // The threshold-free measure agrees it is unimodal, which is what makes
-        // a `Flat` verdict here demonstrably wrong rather than a judgement call.
-        assert_eq!(unimodality_deficit(&hump), 0);
+        assert_eq!(classify(&hump, thresh), ShapeClass::Flat);
+        // Only a cutoff of a single observation sees the bump.
+        assert_eq!(classify(&hump, 1), ShapeClass::OneModeInterior);
 
         let mut acc = ShapeAccumulator::new(41, n as usize, &at(DEFAULT_MODE_PROMINENCE));
         acc.update(&hump);
         let shapes = acc.finish(true);
-        assert_eq!(shapes.can_be_unimodal(), Some(true));
-        assert_eq!(shapes.can_be_bell_shaped(), Some(true));
+        assert_eq!(shapes.can_be_bell_shaped(), Some(false));
+        assert_eq!(shapes.can_be_flat(), Some(true));
+        assert_eq!(shapes.must_be(|c| c == ShapeClass::Flat), Some(true));
+        // The numbers the verdict rests on: bars within 1 observation of each
+        // other, a tenth of the average bar.
+        assert_eq!((shapes.bar_gap_min, shapes.bar_gap_max), (1, 1));
+        assert!((shapes.bar_gap_max_share - 41.0 / 411.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn must_be_needs_every_sample_at_every_cutoff() {
+        let mut acc = ShapeAccumulator::new(5, 100, &ProminenceThresholds::default());
+        acc.update(&[5, 15, 60, 15, 5]);
+        acc.update(&[10, 20, 40, 20, 10]);
+        let shapes = acc.finish(true);
+        assert_eq!(shapes.must_be(|c| c.is_bell()), Some(true));
+        assert_eq!(shapes.must_be(|c| c == ShapeClass::Flat), Some(false));
+        // A partial scan can still show that some sample breaks the pattern,
+        // but never that none does.
+        let mut acc = ShapeAccumulator::new(5, 100, &ProminenceThresholds::default());
+        acc.update(&[5, 15, 60, 15, 5]);
+        let partial = acc.finish(false);
+        assert_eq!(partial.must_be(|c| c.is_bell()), None);
+        assert_eq!(partial.must_be(|c| c == ShapeClass::Flat), Some(false));
     }
 
     #[test]
@@ -1114,12 +1219,11 @@ mod tests {
             band: vec![0.2, 0.3],
         };
         let mut acc = ShapeAccumulator::new(5, 100, &strict);
-        // A 15-observation second peak: two modes at the defaults, one at 20%.
-        acc.update(&[5, 40, 10, 25, 20]);
+        // A 10-observation bump: a mode at the defaults, flat at 20% and up.
+        acc.update(&[20, 20, 30, 20, 20]);
         let shapes = acc.finish(true);
         assert_eq!(shapes.min_prominence, 0.2);
-        assert_eq!(shapes.can_be_multimodal(), Some(false));
-        assert_eq!(shapes.can_be_bell_shaped(), Some(true));
+        assert_eq!(shapes.must_be(|c| c == ShapeClass::Flat), Some(true));
 
         for bad in [
             ProminenceThresholds {
