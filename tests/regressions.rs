@@ -1366,6 +1366,35 @@ fn sprite_restriction_keys_are_the_output_grid_labels() {
 }
 
 #[test]
+fn sprite_gives_up_quickly_on_an_sd_too_narrow_for_its_restrictions() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // The default restrictions fix a 1 and a 5, and with every other value
+    // at 3 that is already an SD of 0.028 at n = 20,000. The up-front check
+    // for SDs narrower than any sample ignored fixed responses, so every
+    // attempt ran first, about 6.6 s.
+    let start = std::time::Instant::now();
+    let results = sprite_parallel::<f64, i32>(
+        3.0,
+        0.005,
+        20_000,
+        1,
+        5,
+        0.0005,
+        0.0005,
+        1,
+        None,
+        RestrictionsOption::Default,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(results.results.is_empty());
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
 fn a_limited_run_that_saw_everything_is_exhaustive() {
     // `stop_after` used to mark every limited run as partial, so `can_be`
     // answered `None` even when the limit was never reached.

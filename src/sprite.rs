@@ -379,10 +379,16 @@ where
 ///
 /// - Most spread (Bhatia–Davis): values in `[lo, hi]` with total `S` have
 ///   `n·Σx² − S² <= (n·hi − S)(S − n·lo)`, a parabola in `S`.
-/// - Least spread: internal values are whole numbers, so at best they split
-///   between two neighbours, `r = S mod n` of them one above the rest, for
-///   `n·Σx² − S² = r (n − r)`. Any `n` consecutive totals include every
-///   remainder, so only those need checking.
+/// - Least spread: internal values are whole numbers, so at best the `m`
+///   free values split between two neighbours, `T mod m` of them one above
+///   the rest, for free total `T`; the fixed responses add their own squares.
+///   Within each run of `m` totals that is concave in `S`, so its least lies
+///   at an end of the range or where `T` is a multiple of `m`, and across
+///   those points it is convex, lowest where the free values average what
+///   the fixed ones do. Without fixed responses it is `r (n − r)` for
+///   `r = S mod n`. Ignoring them let mean 3, sd 0.005, n 20,000 on 1..=5
+///   with the default restrictions search for 6.6 s, though a 1 and a 5
+///   among 3s already have an SD of 0.028.
 fn feasibility<U: IntegerType>(
     bounds: &SearchBounds,
     n: usize,
@@ -422,11 +428,28 @@ fn feasibility<U: IntegerType>(
     if (bounds.m2n_lo as i128) > most {
         return (0, 0, Some("No sample on the scale reaches the SD."));
     }
-    let least = (s_lo..=s_hi.min(s_lo + n - 1))
-        .map(|s| {
-            let r = s.rem_euclid(n);
-            r * (n - r)
-        })
+    let fixed_sum_sq: i128 = fixed.iter().map(|v| (to_i64(v) as i128).pow(2)).sum();
+    let (fs, m) = (fixed_sum as i128, r_n as i128);
+    let least_at = |s: i128| {
+        let free_sq = if m == 0 {
+            0
+        } else {
+            let (q, r) = ((s - fs).div_euclid(m), (s - fs).rem_euclid(m));
+            m * q * q + r * (2 * q + 1)
+        };
+        n * (fixed_sum_sq + free_sq) - s * s
+    };
+    // Totals whose free part is a multiple of `m`, at or below `s`.
+    let split = |s: i128| fs + (s - fs).div_euclid(m.max(1)) * m;
+    let mut candidates = vec![s_lo, s_hi, split(s_lo + m - 1), split(s_hi)];
+    if m > 0 && n > m {
+        let even = split(fs + (fs * m).div_euclid(n - m));
+        candidates.extend([even, even + m]);
+    }
+    let least = candidates
+        .into_iter()
+        .filter(|s| (s_lo..=s_hi).contains(s))
+        .map(least_at)
         .min()
         .unwrap();
     if (bounds.m2n_hi as i128) < least {
