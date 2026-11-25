@@ -194,9 +194,13 @@ where
     let mean_f64 = T::to_f64(&mean).unwrap();
     let scale_min_f64 = U::to_f64(&scale_min).unwrap();
     let scale_max_f64 = U::to_f64(&scale_max).unwrap();
-    if !(mean_f64 >= scale_min_f64 && mean_f64 <= scale_max_f64) {
+    // Within the rounding error, as CLOSURE accepts: 5.004 ± 0.005 on 1..=5
+    // admits the sample of all 5s.
+    if !(mean_f64 + re_mean >= scale_min_f64 && mean_f64 - re_mean <= scale_max_f64) {
         return Err(ParameterError::InputValidation(
-            "Mean is outside the possible [scale_min, scale_max] range.".to_string(),
+            "Mean is outside the [scale_min, scale_max] range, even allowing for its \
+             rounding error."
+                .to_string(),
         ));
     }
 

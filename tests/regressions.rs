@@ -1640,3 +1640,46 @@ fn f32_inputs_are_widened_by_their_rounding_only() {
             .len();
     assert_eq!(f32_found, f64_found);
 }
+
+#[test]
+fn sprite_accepts_a_mean_past_the_scale_within_its_rounding() {
+    // SPRITE rejected 5.004 on 1..=5 as outside the scale, although ± 0.005
+    // admits the sample of all 5s, which CLOSURE finds.
+    let closure =
+        closure_parallel::<f64, i32>(5.004, 0.0, 5, 1, 5, 0.005, 0.005, 1, None, None, None)
+            .unwrap();
+    assert_eq!(closure.results.len(), 1);
+    let sprite = closure_core::sprite_parallel::<f64, i32>(
+        5.004,
+        0.0,
+        5,
+        1,
+        5,
+        0.005,
+        0.005,
+        1,
+        None,
+        closure_core::RestrictionsOption::Null,
+        None,
+        Some(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!(sprite.results.len(), 1);
+    assert!(closure_core::sprite_parallel::<f64, i32>(
+        5.006,
+        0.0,
+        5,
+        1,
+        5,
+        0.005,
+        0.005,
+        1,
+        None,
+        closure_core::RestrictionsOption::Null,
+        None,
+        Some(1),
+        None,
+    )
+    .is_err());
+}
