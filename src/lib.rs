@@ -886,8 +886,9 @@ const MAX_SEEDS: u128 = 10_000;
 /// statistic sits exactly on a bound was dropped: n = 16, mean 3.13 ± 0.005
 /// on 1..=5 admits 174 samples, all with mean 3.125, and f32 found none.
 /// Rounding to `T` moves each input by at most half its relative precision,
-/// so widening by twice that covers it. For f64 inputs the widening is about
-/// 1e-15 of the inputs and changes nothing.
+/// so widening by that covers it; any more would admit samples whose
+/// statistics round to a different `T` than the input. For f64 inputs the
+/// widening is about 1e-16 of the inputs and changes nothing.
 pub(crate) fn widened_for_precision<T: FloatType>(
     mean: f64,
     sd: f64,
@@ -896,8 +897,8 @@ pub(crate) fn widened_for_precision<T: FloatType>(
 ) -> (f64, f64) {
     let eps = T::epsilon().to_f64().unwrap_or(0.0);
     (
-        re_mean + 2.0 * eps * (mean.abs() + re_mean),
-        re_sd + 2.0 * eps * (sd + re_sd),
+        re_mean + 0.5 * eps * (mean.abs() + re_mean),
+        re_sd + 0.5 * eps * (sd + re_sd),
     )
 }
 

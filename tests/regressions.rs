@@ -1621,3 +1621,22 @@ fn listing_rejects_an_n_too_large_to_hold() {
         );
     }
 }
+
+#[test]
+fn f32_inputs_are_widened_by_their_rounding_only() {
+    // f32 inputs were widened by four times their rounding, so with no
+    // rounding error on the SD, f32 accepted two samples whose SD rounds to a
+    // different f32 than the input, and f64 accepted none.
+    let sd = 0.49025f32;
+    let f32_found =
+        closure_parallel::<f32, i32>(0.5, sd, 3000, 0, 1, 0.5, 0.0, 1, None, None, None)
+            .unwrap()
+            .results
+            .len();
+    let f64_found =
+        closure_parallel::<f64, i32>(0.5, sd as f64, 3000, 0, 1, 0.5, 0.0, 1, None, None, None)
+            .unwrap()
+            .results
+            .len();
+    assert_eq!(f32_found, f64_found);
+}
