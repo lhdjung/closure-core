@@ -14,9 +14,9 @@ statistics allows, and to check new analytic bounds.
 
 ## What else can now answer CLOSURE's questions
 
-| Question | Fastest exact answer today |
+| Question | Fastest answer today |
 |---|---|
-| Do the reported statistics fit together at all? | GRIM, GRIMMER and BRIMMER analytically; `closure_count` exactly, by dynamic programming, without listing datasets |
+| Do the reported statistics fit together at all? | `closure_count` exactly, by dynamic programming, without listing datasets. GRIM, GRIMMER and BRIMMER are quicker screens, but they test necessary conditions only |
 | Could the data have been strictly single-peaked? | Often the reported mean and SD alone: `beyond_single_peak`. Otherwise CLOSURE's `deficit_min` |
 | Must the data have had several peaks? | Almost always the reported statistics alone (see the sweep). Otherwise CLOSURE |
 | Could it have been a bell rather than a floor or ceiling effect? Flat? | CLOSURE, with `edge_drop_*`, `bar_gap_*` and the band queries |
@@ -39,6 +39,8 @@ a floor or ceiling effect is not obvious from the mean.
 |---|---|---|---|
 | consistent cases | 97 | 204 | 443 |
 | CLOSURE: must have several peaks | 22 | 52 | 87 |
+| … caught by the mean-free ceiling | 20 | 48 | 74 |
+| … caught by `beyond_single_peak` | 20 | 52 | 87 |
 | statistics only: beyond the mean-free ceiling | 20 | 52 | 86 |
 | statistics only: `beyond_single_peak` | 24 | 79 | 126 |
 | CLOSURE: every sample has a dip | 46 | 96 | 199 |
@@ -50,10 +52,11 @@ a floor or ceiling effect is not obvious from the mean.
 
 How to read it:
 
-- **"Must have several peaks" is nearly free.** Even the mean-free ceiling
-  reproduces almost every one of CLOSURE's verdicts, instantly and at any n.
+- **"Must have several peaks" is nearly free.** `beyond_single_peak` catches
+  all but two of CLOSURE's verdicts (20 of 22, 52 of 52, 87 of 87), instantly
+  and at any n. The mean-free ceiling alone catches fewer (20, 48, 74).
 - **"Every sample has a dip" is mostly free.** `beyond_single_peak` catches
-  about half to two thirds of these verdicts (24 of 46, 79 of 96, 126 of
+  about half to four fifths of these verdicts (24 of 46, 79 of 96, 126 of
   199). It sets the flag exactly when no single-peaked histogram with free
   proportions fits. What remains comes from whole-number effects at the
   actual n, which only an exact method sees.
@@ -61,10 +64,10 @@ How to read it:
   seems.** Most of these verdicts have a mean near an end of the scale, where
   a floor or ceiling effect is visible from the mean itself, or a flagged SD.
   With the mean in the middle third and no flag, they are 4–11% of cases.
-  They sit just below the line, with margins of 0–3 observations, so they
-  depend on the cutoff.
-- **At typical SDs with a central mean, CLOSURE finds every shape possible.**
-  There is nothing to infer, and no method could do better.
+  These verdicts are taken at the cutoff, so read them with `edge_drop_*` and
+  `second_peak_*` rather than on their own.
+- **At typical SDs with a central mean, samples of every shape fit.** There is
+  nothing to infer, and no method could do better.
 
 Caveats: the grid is not a sample of published statistics, the scales are
 two, and the sample sizes small. The pattern is clear enough to act on, but
@@ -88,18 +91,22 @@ its proportions should not be quoted as rates in the literature.
 ## When not to use it
 
 - **To check consistency only.** `closure_count` answers whether any dataset
-  exists, exactly and much faster; GRIM, GRIMMER and BRIMMER do it
-  analytically.
+  exists, exactly and much faster. GRIM, GRIMMER and BRIMMER screen
+  analytically, but passing them does not prove a dataset exists: mean 3,
+  SD 1.41, n = 3 on 1–5 passes GRIM, the parity of the sum of squares and the
+  largest-SD bound, yet no dataset has it.
 - **To screen many papers.** Run the fast checks first, and CLOSURE only on
   what they leave open.
-- **At large n or on wide scales.** Listing explodes: about 6.1 million
-  datasets for mean 4, SD 1.5, n = 100 on 1–7. There, SPRITE gives examples,
+- **At large n or on wide scales.** Listing explodes: for mean 4, SD 1.5,
+  n = 100 on 1–7, about 76,000 datasets at two decimals (rounding error
+  0.005), and about 6.1 million at one decimal (0.05). There, SPRITE gives examples,
   and absences of shapes can come only from `beyond_single_peak`.
 
 ## Suggested order
 
-1. Consistency: GRIM, GRIMMER, BRIMMER, or `closure_count`. If no dataset
-   exists, that is the finding; there is no shape to infer.
+1. Consistency: GRIM, GRIMMER and BRIMMER as quick screens, then
+   `closure_count`, which is exact. If no dataset exists, that is the
+   finding; there is no shape to infer.
 2. Shape from the reported statistics alone: `beyond_single_peak`. If set,
    the data was not single-peaked, for any n and with either technique.
 3. If questions remain and n is moderate: CLOSURE, for exact statements about
@@ -122,4 +129,4 @@ its proportions should not be quoted as rates in the literature.
 cargo run --release --example shape_conclusion_sweep
 ```
 
-It takes under a second in release mode.
+It takes a second or two in release mode.
