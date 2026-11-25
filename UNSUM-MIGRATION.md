@@ -197,7 +197,8 @@ statistics that contradict each other leave no shape to infer. The test works
 in one direction only: `FALSE` does not mean a single-peaked sample exists,
 because the bound ignores whole-number effects at the actual `n` (at mean
 2.5, SD 1.49, `n = 100` on 1–5, all 363 samples have a dip and the flag is
-down); `deficit_min` answers that. On 1–5 the line is a population SD
+down); `deficit_min` answers that. It reads the SD as a sample SD, like
+everything else: a population SD would set it falsely. On 1–5 the line is a population SD
 of 1.5 at means 2.5 and 3.5, and 1.41 at mean 3; at mean 3 and `n = 50`, a
 reported SD of 1.44 is flagged. The derivation is in closure-core's
 `protocols/horns-and-shapes.qmd`.

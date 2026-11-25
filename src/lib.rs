@@ -646,6 +646,10 @@ pub struct MetricsHorns {
     /// CLOSURE run that means the reported statistics contradict each other,
     /// a consistency failure with no shape to infer. For SPRITE an empty run
     /// leaves open whether samples exist, so it claims no shape either.
+    ///
+    /// Like every bound here, it reads the reported SD as a sample SD
+    /// (`n − 1`). A population SD read that way is too high by `√(n/(n−1))`,
+    /// and with this flag that is a false positive, not a missed case.
     pub beyond_single_peak: bool,
 }
 
