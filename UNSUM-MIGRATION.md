@@ -6,7 +6,10 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `ca48107` on `optimize`.
+- **To:** closure-core `f866ebf` on `optimize`.
+- **Status:** unsum's branch `adopt-closure-core-optimize` adopts `f866ebf`
+  (unsum `cc3d166` through `6f86c8e`), builds against it and passes its
+  tests; it is not on master yet.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -15,7 +18,7 @@ history: `git show 21d63b9:UNSUM-MIGRATION.md`.
 
 Everything marked *verified* was run. The binding patch in section 3 was
 compiled with `cargo check` against `08d8e80`, without warnings; closure-core's
-public API is unchanged from there to `ca48107`. The R changes in section 4
+public API is unchanged from there to `f866ebf`. The R changes in section 4
 were not run.
 
 ---
@@ -40,7 +43,7 @@ skipped.
 
 | # | What changed in closure-core | Blocks | What to change in unsum | Where |
 |---|---|---|---|---|
-| 1 | unsum's pin predates all of this | everything | Make sure GitHub's `optimize` has `ca48107`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
+| 1 | unsum's pin predates all of this | everything | Make sure GitHub's `optimize` has `f866ebf`, then update, re-vendor and rebuild clean | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
 | 2 | The four entry points take a last `prominence` argument | compile | Pass `None` | `src/rust/src/lib.rs`, the calls at lines 421, 434, 468 and 481 |
 | 3 | `modality_summary` has eight new columns: `bar_gap_*`, `second_peak_*`, `edge_drop_*` | the schema check, in memory and on disk | Export them, and expect 26 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
 | 3a | `metrics_horns` has two new columns: `single_peak_ceiling`, `beyond_single_peak` | the schema check, on disk at once and in memory once exported | Export them, and expect 11 columns | `src/rust/src/lib.rs` 287, `R/utils.R` 196–210 |
@@ -54,17 +57,21 @@ skipped.
 
 unsum already follows `branch = "optimize"`, but Cargo can only fetch what is
 on GitHub. The patch in section 3 compiles against `08d8e80`, whose public
-API `ca48107` keeps; before
+API `f866ebf` keeps; before
 `490a6c3` there is no `prominence` argument, and before `a248020` and
 `7bf2a52` some of the new summary fields are missing. So:
 
-1. In closure-core: check that GitHub's `optimize` contains `ca48107`
+1. In closure-core: check that GitHub's `optimize` contains `f866ebf`
    (`git ls-remote origin optimize`), and `git push origin optimize` if not.
 2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
-   `Cargo.lock` now names `ca48107` or later.
+   `Cargo.lock` now names `f866ebf` or later.
 3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
    `rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
    that tarball, so the old copy would otherwise keep being compiled.
+4. `rm -rf src/rust/target/debug`, then `touch src/entrypoint.c`, before
+   `devtools::load_all()` or `devtools::test()`. Cargo identifies the
+   vendored crate by name and version, always 1.0.0, not by content, so it
+   keeps reusing the old build. unsum's `AGENTS.md` has the full sequence.
 
 closure-core's dependencies are unchanged since `5d63b62`.
 
@@ -306,6 +313,11 @@ them belong in `NEWS.md`.
   none). With tolerances of 0.05 the same mean and SD admit about a million
   samples, so a run without `stop_after` goes on until the duplicate rate or
   the attempt cap ends it. (`33bb164`, `38adc9d`, `7223cc7`)
+- **Hopeless totals are skipped.** At a fixed total, `n·Σx² − (Σx)²` moves
+  in steps of `2n`, so a narrow SD band misses some totals. SPRITE now draws
+  only totals that can reach it; aiming at the others ran each attempt to
+  the loop limit, which `cbdd3b7` made `n·k`: mean 5000.01, SD 0.1,
+  `n = 1000` on 0–10000 took 25.6 s for 4 samples, now 0.47 s. (`b4929f7`)
 - **One attempt cap for both modes.** A search makes at most 20 attempts per
   sample asked for, between 5,000 and 100 million, and 100 million without
   `stop_after`. In memory, a run without `stop_after` used to have no
@@ -415,6 +427,7 @@ and refactors.
 | `4f2b079`, `cf5c659`, `7054029`, `cbdd3b7` | SPRITE reaches more samples (5) |
 | `15b08ab` | SPRITE accepts by CLOSURE's integer rule (5) |
 | `33bb164`, `38adc9d`, `abae5c7`, `7223cc7` | SPRITE run times on small and hard cases (5) |
+| `b4929f7` | SPRITE skips totals the SD cannot be reached from: wide grids with a narrow SD are fast again (5) |
 | `533ea9a` | One SPRITE attempt cap for memory and streaming (5) |
 | `15d2f6c`, `72bcf94` | SPRITE returns at once on hopeless SDs (5) |
 | `f2e83a4` | SPRITE restriction keys follow the grid labels (5) |
