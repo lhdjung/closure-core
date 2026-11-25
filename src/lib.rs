@@ -866,6 +866,14 @@ fn with_slack(x: f64, up: bool) -> f64 {
 /// such limit.
 pub(crate) const MAX_GRID_WIDTH: usize = 100_000;
 
+/// Largest `n` CLOSURE lists samples for. The search keeps one bound and, on
+/// deep branches, one stack entry per position, about 32 bytes per position
+/// per running branch, so `n` near `i32::MAX` asked for tens of GB and
+/// aborted the process when the allocation failed. A million positions take
+/// about 32 MB per branch. [`closure_count`](crate::count::closure_count)
+/// lists nothing and has no such limit.
+pub(crate) const MAX_LISTING_N: usize = 1_000_000;
+
 /// Most branches a CLOSURE search is split into up front; see
 /// [`ClosureSearchContext::seed_depth`].
 const MAX_SEEDS: u128 = 10_000;
@@ -1048,6 +1056,12 @@ impl ClosureSearchContext {
             rounding_error_mean,
             rounding_error_sd,
         )?;
+        if n > MAX_LISTING_N {
+            return Err(ParameterError::InputValidation(format!(
+                "n is {n}, but CLOSURE lists samples for n up to {MAX_LISTING_N}: its search \
+                 needs memory in proportion to n. closure_count has no such limit"
+            )));
+        }
         let width = (scale_max - scale_min + 1) as usize;
         if width > MAX_GRID_WIDTH {
             return Err(ParameterError::InputValidation(format!(

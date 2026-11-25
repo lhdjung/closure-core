@@ -1609,3 +1609,15 @@ fn a_search_just_below_the_old_recursion_cap_does_not_overflow_in_debug() {
         closure_parallel::<f64, i32>(0.5, 0.5, n, 0, 1, 0.5, 0.5, 1, None, Some(5), None).unwrap();
     assert_eq!(results.results.len(), 5);
 }
+
+#[test]
+fn listing_rejects_an_n_too_large_to_hold() {
+    // n near i32::MAX passed validation, and the search then asked for tens
+    // of GB and aborted when the allocation failed.
+    for n in [1_000_001, i32::MAX / 2] {
+        assert!(
+            closure_parallel::<f64, i32>(0.5, 0.5, n, 0, 1, 0.5, 0.5, 1, None, Some(1), None)
+                .is_err()
+        );
+    }
+}
