@@ -115,7 +115,7 @@ its proportions should not be quoted as rates in the literature.
 
 ## Where this could go
 
-- **An n-sharp ceiling**, like Popoviciu's odd-n correction for the range-only
+- **An n-sharp ceiling**, like the odd-n refinement of Popoviciu's range-only
   bound, would catch more small samples.
 - **A dynamic program for counts and shapes.** `closure_count` already counts
   datasets without listing them. The same approach could plausibly give

@@ -93,8 +93,8 @@ $$
 Half the responses at each end reach it. So $0 \le h \le 1$: 0 when every
 response is the same, 1 when the sample splits into two equal halves at the
 two ends of the scale (the "horns"). With an odd $n$ no such split exists, and
-the largest horns index is $1 - 1/n^2$ (Popoviciu's odd-$n$ maximum; Appendix
-B of the BRIMMER manuscript proves it).
+the largest horns index is $1 - 1/n^2$ (the odd-$n$ refinement of
+Popoviciu's range-only bound; Appendix B of the BRIMMER manuscript proves it).
 
 This is the definition of unsum's `horns()`, which calls the denominator
 Popoviciu's bound and keeps it free of $n$ and the mean on purpose. unsum's
@@ -563,10 +563,12 @@ worst
 stopifnot(worst < 1e-9)
 ```
 
-### An independent check
+### A second check
 
-The largest variance at a given mean can also be computed directly, which
-checks the theorem without its proof.
+The largest variance at a given mean can also be computed directly. This
+reuses the block decomposition (Step 1 of @sec-ceiling) and the convexity
+argument of Step 4, so it is not independent of the proof; the independent
+checks are the exhaustive enumeration in closure-core's tests.
 
 > **Lemma.** Among single-peaked distributions on positions $0, \dots, m$ with
 > a mode at $j$ and mean $\mu$, the largest variance is reached by a mixture
@@ -725,7 +727,7 @@ line, and every one of CLOSURE's 68 samples has a dip. closure-core's test
   on 1–7 with $n = 14$, the highest single-peaked horns index is 0.472,
   against a ceiling of 0.522. And for mean 2.5 and SD 1.49 on 1–5 with
   $n = 100$, the flag stays down, yet all 363 CLOSURE samples have a dip.
-  Like the range-only bound before Popoviciu's odd-$n$ correction, an
+  Like Popoviciu's range-only bound before its odd-$n$ refinement, an
   $n$-sharp version would flag more small samples. Where CLOSURE can run, its
   own numbers (`deficit_min`, and those in @sec-verdict-numbers) catch such
   cases.
