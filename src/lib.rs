@@ -889,7 +889,8 @@ const MAX_SEEDS: u128 = 10_000;
 /// Rounding to `T` moves each input by at most half its relative precision,
 /// so widening by that covers it; any more would admit samples whose
 /// statistics round to a different `T` than the input. For f64 inputs the
-/// widening is about 1e-16 of the inputs and changes nothing.
+/// widening is about 1e-16 of the inputs, though on a bound near 1e11 that
+/// still moves the last bits.
 pub(crate) fn widened_for_precision<T: FloatType>(
     mean: f64,
     sd: f64,
@@ -3250,6 +3251,18 @@ fn closure_branch_deep(
 mod tests {
     use super::*;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    #[test]
+    fn the_relative_slack_keeps_a_large_bound_hit_exactly() {
+        // 187,110 ones in a million: `n·Σx² − (Σx)²` is 152,099,847,900, and
+        // f64 computes the SD bound as that plus 3e-5, past the fixed 1e-6
+        // slack, so `m2n_lo` rounded up one unit past the sample. Unwidened
+        // bounds, because for f64 the precision widening of the public entry
+        // points happens to cover this case too.
+        let bounds = SearchBounds::new(0.18711, 0.39, 1_000_000, 0.0, 0.0);
+        let m2n = 1_000_000 * 187_110 - 187_110i64.pow(2);
+        assert!(bounds.m2n_lo <= m2n && m2n <= bounds.m2n_hi);
+    }
 
     #[test]
     fn the_deep_search_finds_what_the_recursive_one_finds() {
