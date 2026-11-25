@@ -6,7 +6,7 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `08d8e80` on `optimize`.
+- **To:** closure-core `ca48107` on `optimize`.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -14,8 +14,9 @@ this guide set out, is done in unsum `6d83a70`. That version is still in the
 history: `git show 21d63b9:UNSUM-MIGRATION.md`.
 
 Everything marked *verified* was run. The binding patch in section 3 was
-compiled with `cargo check` against `08d8e80`, without warnings. The R changes
-in section 4 were not run.
+compiled with `cargo check` against `08d8e80`, without warnings; closure-core's
+public API is unchanged from there to `ca48107`. The R changes in section 4
+were not run.
 
 ---
 
@@ -39,7 +40,7 @@ skipped.
 
 | # | What changed in closure-core | Blocks | What to change in unsum | Where |
 |---|---|---|---|---|
-| 1 | unsum's pin predates all of this | everything | Make sure GitHub's `optimize` has `08d8e80`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
+| 1 | unsum's pin predates all of this | everything | Make sure GitHub's `optimize` has `ca48107`, then update and re-vendor | closure-core, then `src/rust/Cargo.lock`, `vendor.tar.xz` |
 | 2 | The four entry points take a last `prominence` argument | compile | Pass `None` | `src/rust/src/lib.rs`, the calls at lines 421, 434, 468 and 481 |
 | 3 | `modality_summary` has eight new columns: `bar_gap_*`, `second_peak_*`, `edge_drop_*` | the schema check, in memory and on disk | Export them, and expect 26 columns | `src/rust/src/lib.rs` 145, `R/constants.R` 69, `R/utils.R` 327 |
 | 3a | `metrics_horns` has two new columns: `single_peak_ceiling`, `beyond_single_peak` | the schema check, on disk at once and in memory once exported | Export them, and expect 11 columns | `src/rust/src/lib.rs` 287, `R/utils.R` 196–210 |
@@ -52,14 +53,15 @@ skipped.
 ## 2. Step 1: get the new closure-core
 
 unsum already follows `branch = "optimize"`, but Cargo can only fetch what is
-on GitHub. The patch in section 3 compiles against `08d8e80`; before
+on GitHub. The patch in section 3 compiles against `08d8e80`, whose public
+API `ca48107` keeps; before
 `490a6c3` there is no `prominence` argument, and before `a248020` and
 `7bf2a52` some of the new summary fields are missing. So:
 
-1. In closure-core: check that GitHub's `optimize` contains `08d8e80`
+1. In closure-core: check that GitHub's `optimize` contains `ca48107`
    (`git ls-remote origin optimize`), and `git push origin optimize` if not.
 2. In unsum's `src/rust`: `cargo update -p closure-core`, and check that
-   `Cargo.lock` now names `08d8e80` or later.
+   `Cargo.lock` now names `ca48107` or later.
 3. Regenerate `src/rust/vendor.tar.xz` and `vendor-config.toml` (e.g.
    `rextendr::vendor_pkgs()`). The offline build in `src/Makevars.in` unpacks
    that tarball, so the old copy would otherwise keep being compiled.
@@ -185,9 +187,8 @@ In `metrics_horns`, `single_peak_ceiling` is the highest horns index any
 single-peaked histogram on the scale can have, `(2k − 1)² / (9 (k − 1)²)` for
 `k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when samples
 were found and no single-peaked histogram meets the reported statistics: at
-every mean the
-rounding allows, even the lowest SD it allows is beyond the largest a
-single-peaked histogram with that mean can have (Navard, Seaman and Young's
+every mean the rounding allows, even the lowest SD it allows is beyond the
+largest a single-peaked histogram with that mean can have (Navard, Seaman and Young's
 `B_μ`, whose maximum over the mean is the ceiling). Then every histogram with
 these statistics has a dip, so, if they are right, the original data was not
 single-peaked. It follows from the reported statistics alone, so it holds for
@@ -260,7 +261,9 @@ them belong in `NEWS.md`.
 
 - **Large samples no longer crash R.** The search recursed once per value, so
   from about `n = 20,000` it overflowed its stack and aborted the process.
-  Deep branches now run on an explicit stack. (`ae301d4`)
+  Deep branches now run on an explicit stack, from 1,024 values deep; at
+  4,096, debug builds still overflowed from about `n = 4000`. (`ae301d4`,
+  `80085ce`)
 - At large `n` (from about 18,000), samples exactly on an SD bound were
   dropped, because the bounds' fixed float slack no longer covered f64 error
   there. Counts can **rise**. (`72d2f41`)
@@ -274,6 +277,11 @@ them belong in `NEWS.md`.
   (`ce0783d`)
 - Wide scales are fast: a scale of 0–600 at `n = 3` took 11 s and 1.7 GB, and
   now takes under a millisecond. (`bc29dec`)
+- **`beyond_single_peak` is `FALSE` on an empty result.** It used to be `TRUE`
+  whenever the SD was past the single-peak line, even when no sample reached
+  that SD at all: a shape claim on statistics that contradict each other,
+  and plainly wrong on a two-value scale. Applies to SPRITE too, where an
+  empty run leaves open whether samples exist. (`b7e234d`)
 
 **SPRITE**
 
@@ -312,6 +320,9 @@ them belong in `NEWS.md`.
   35 ms. (`abae5c7`, `38adc9d`)
 - Memory mode no longer prints warnings to stderr when it stops early.
   (`df52c88`)
+- **A mean just past the scale is accepted within its rounding error**, as
+  CLOSURE accepts it: 5.004 ± 0.005 on 1–5 finds the sample of all 5s, where
+  it used to be an input error. (`bd050ad`)
 - Restriction keys are the output grid's own labels. At `items` = 40, 56 and
   80, a value ending in exactly half a hundredth used to need a different key
   from the one it is labelled with in the results. Matters only if
@@ -349,10 +360,12 @@ already turns that into `abort_in_export()`.
 | Condition | Error | Before |
 |---|---|---|
 | More than 100,000 scale values (CLOSURE), or grid values `(scale_max − scale_min) · items + 1` (SPRITE) | `InputValidation` | CLOSURE could list billions of seeds; SPRITE spent 40 MB per sample. `count_closure_combinations()` has no such limit. |
+| CLOSURE: `n` above 1,000,000 | `InputValidation` | the search asked for memory in proportion to `n`, tens of GB near `i32::MAX`, and aborted R when the allocation failed. `count_closure_combinations()` has no such limit. |
 | CLOSURE: `scale_min == scale_max` | `InputValidation` | every sample `Flat`, so an exhaustive run "proved" the data not unimodal |
 | SPRITE: `items > 100` | `InputValidation` | neighbouring grid values shared a key in hundredths |
 | SPRITE: scale values beyond ±21,474,836 | `InputValidation` | panic building the output grid |
 | SPRITE: an infinite SD or tolerance | `InputValidation` | an empty result |
+| SPRITE: a mean outside the scale by more than its rounding error (5.006 ± 0.005 on 1–5) | `InputValidation`, as before, but 5.004 ± 0.005 now runs | any mean outside the scale was an error |
 | SPRITE: restrictions fixing more responses than `n`, however large the counts | `InputValidation` | a huge count panicked or tried to allocate terabytes |
 | A prominence cutoff not above 0 and below 1 (only once cutoffs are exposed) | `InputValidation` | a cutoff of 5 meant as 5% classified every sample as flat |
 
@@ -387,11 +400,14 @@ and refactors.
 | `7bf2a52` | `single_peak_ceiling` and `beyond_single_peak` in `metrics_horns` (3) |
 | `ea27622`, `dd9da52` | `beyond_single_peak` uses the bound at the reported mean, proved for every mean (3) |
 | `08d8e80` | SPRITE rejects SDs wider than any whole-number sample up front (5) |
+| `b7e234d` | `beyond_single_peak` is `FALSE` on an empty result (5) |
 | `d3749b6` | A single peak's edge is decided by the bars within the cutoff (5) |
 | `dc2cf02` | Equal lower peaks merge (5) |
 | `47784a3` | Cutoffs must lie between 0 and 1; a cutoff of 0 reads as 1 (6) |
 | `ce0783d` | Complete empty runs are exhaustive; real `n` in `modality_prominence` (5) |
-| `ae301d4` | No stack overflow at large `n` (5) |
+| `ae301d4`, `80085ce` | No stack overflow at large `n` (5) |
+| `535674b` | CLOSURE lists samples for `n` up to 1,000,000 (6) |
+| `bd050ad` | SPRITE accepts a mean past the scale within its rounding error (5, 6) |
 | `bc29dec` | Wide CLOSURE scales are fast; at most 100,000 scale values (5, 6) |
 | `72d2f41` | Exact bounds at large `n` (5) |
 | `93cf367` | Limited runs below their limit are exhaustive (5) |
@@ -404,5 +420,6 @@ and refactors.
 | `4f2b079`, `236c6cc`, `6a1290e`, `67af72f`, `f55bf11` | New input errors (6) |
 | `e030a5b` | Multi-item SPRITE hundredths are rounded (7) |
 | `df52c88` | No stderr warnings from in-memory SPRITE (5) |
-| `03a04da` | f32 inputs keep samples on a bound; unsum passes f64, so nothing changes |
+| `03a04da`, `2325170` | f32 inputs keep samples on a bound, and only those; unsum passes f64, so nothing changes |
+| `45ca5dd` | `edge_drop` is measured towards the end with the smaller drop, as before; only its description changed |
 | `c718a69` | `file_path = ""` means the current directory; unsum always passes a folder |
