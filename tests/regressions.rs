@@ -426,6 +426,28 @@ fn an_sd_beyond_the_single_peak_ceiling_is_flagged() {
 }
 
 #[test]
+fn a_small_sample_beyond_its_own_single_peak_maximum_is_flagged() {
+    // On 1..=7 with n = 5, no single-peaked histogram has a population
+    // variance above 2 (tides_article, Theorem L.3: 1, 1, 1, 1, 1 on five
+    // neighbouring values). Mean 4.00 and SD 1.73 need variance 2.4, e.g.
+    // 1, 4, 5, 5, 5, which has a gap. B_μ allows variance 4 at mean 4, so
+    // only the bound at this n catches it.
+    let small = closure_parallel::<f64, i32>(4.0, 1.73, 5, 1, 7, 0.005, 0.005, 1, None, None, None)
+        .unwrap();
+    assert!(!small.results.is_empty());
+    assert!(small.metrics_horns.beyond_single_peak);
+    assert!(
+        small.modality_shapes.deficit_min > 0,
+        "every sample has a dip"
+    );
+    // SD 1.58 is (2, 3, 4, 5, 6), which is single-peaked: not flagged.
+    let flat = closure_parallel::<f64, i32>(4.0, 1.58, 5, 1, 7, 0.005, 0.005, 1, None, None, None)
+        .unwrap();
+    assert!(!flat.metrics_horns.beyond_single_peak);
+    assert_eq!(flat.modality_shapes.deficit_min, 0);
+}
+
+#[test]
 fn the_counter_rejects_what_the_search_rejects() {
     // `closure_count` skipped validation: sd = -1 with a 0.05 tolerance was
     // read as "SD between 0 and 0.95" and counted 10 samples. It now returns

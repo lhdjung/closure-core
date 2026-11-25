@@ -639,6 +639,17 @@ $n = 30$). The mean-free ceiling catches 20, 52 and 86 of them from the
 statistics alone; the flag, using $B_\mu$, catches 24, 79 and 126. It never
 fires where CLOSURE finds a single-peaked sample, as the theorem guarantees.
 
+The flag also tests the largest variance a single-peaked histogram of the
+actual $n$ values can have, whatever its mean. That maximum is sharp at every
+$n$ (tides_article, Appendix L, Theorem L.3): it is the largest
+$c\,w(w-1)(2w-1)/6 - c^2w^2(w-1)^2/(4n)$, divided by $n$, over whole numbers
+$2 \le w \le \min(m+1, n)$ and $1 \le c \le n/w$, reached by $c$ values on
+each of $w - 1$ neighbouring positions and the rest on the next. In the sweep
+above, with $n$ from 20 to 50, it adds no cases. It matters for small
+samples: on 1–7 with $n = 5$ the largest single-peaked population SD is
+$\sqrt{2}$, not $13/6$, so mean 4.00 and SD 1.73 are flagged although $B_\mu$
+allows them.
+
 ## From the ceiling to a reported SD {#sec-sd}
 
 In grid steps the ceiling on the population SD is $(2m+1)/6$; in scale points

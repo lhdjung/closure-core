@@ -83,7 +83,8 @@
 //! needs samples to exist: on an empty result the flag is down, because
 //! statistics that contradict each other leave no shape to infer. On a 1–5
 //! scale the mean-free line is a population SD of 1.5; at mean 3 it is 1.41,
-//! the uniform's.
+//! the uniform's. The flag also uses the mean-free line at the actual `n`,
+//! which is lower for small samples: on 1–7 with `n = 5` it is √2, not 2.17.
 //!
 //! Two more points on reading the output:
 //!
@@ -628,10 +629,15 @@ pub struct MetricsHorns {
     /// if the reported statistics are right, the original data was not
     /// single-peaked.
     ///
+    /// It also fires when even the lowest SD the rounding allows is beyond the
+    /// largest a single-peaked histogram of `n` values can have at any mean,
+    /// a bound that is sharp at the actual `n` (see `single_peak_m2n_max_x12`).
+    /// For small samples that bound is far below the ceiling.
+    ///
     /// The test works in one direction only. False does not mean a
-    /// single-peaked sample exists: the bound ignores whole-number effects at
-    /// the actual `n`, so every sample can have a dip with the flag down. Ask
-    /// the samples (`deficit_min`) for that.
+    /// single-peaked sample exists: at a given mean the bound ignores
+    /// whole-number effects at the actual `n`, so every sample can have a dip
+    /// with the flag down. Ask the samples (`deficit_min`) for that.
     ///
     /// The bound at a given mean is Navard, Seaman and Young's (1993) `B_μ`,
     /// whose largest value over all means is [`Self::single_peak_ceiling`]; so
@@ -669,6 +675,35 @@ pub fn single_peak_ceiling(k: usize) -> f64 {
     (2.0 * m + 1.0).powi(2) / (9.0 * m * m)
 }
 
+/// Twelve times the largest `n·Σx² − (Σx)²` that a single-peaked histogram of
+/// `n` values on `k` evenly spaced positions can have, in grid steps.
+///
+/// Without the mean, the largest sum of squared deviations of `n` such values
+/// on positions `0..=m` is the largest
+/// `S(w, c) = c·w(w − 1)(2w − 1)/6 − c²w²(w − 1)²/(4n)` over whole numbers
+/// `2 ≤ w ≤ min(m + 1, n)` and `1 ≤ c ≤ n/w`. It is reached by `c` values on
+/// each of `w − 1` neighbouring positions and the rest on the next one
+/// (tides_article, Appendix L, Theorem L.3). Unlike [`single_peak_ceiling`] it
+/// is sharp at every `n`, and for small `n` it is much lower: on 1–7 with
+/// `n = 5` the largest population SD is √2, not 13/6.
+///
+/// For a fixed `w`, `S` is a downward parabola in `c` with its vertex at
+/// `n(2w − 1)/(3w(w − 1))`, so only the two whole numbers around the vertex
+/// need checking. `12·n·S = 2n·c·d(2w − 1) − 3c²d²` with `d = w(w − 1)`.
+pub(crate) fn single_peak_m2n_max_x12(n: usize, k: usize) -> i128 {
+    let n = n as i128;
+    let mut best = 0;
+    for w in 2..=(k as i128).min(n) {
+        let d = w * (w - 1);
+        let below = n * (2 * w - 1) / (3 * d);
+        for c in [below, below + 1] {
+            let c = c.clamp(1, n / w);
+            best = best.max(2 * n * c * d * (2 * w - 1) - 3 * c * c * d * d);
+        }
+    }
+    best
+}
+
 /// Whether every sample the search bounds admit has a variance above the
 /// largest any single-peaked histogram with its mean can have, so that none of
 /// them is single-peaked.
@@ -686,6 +721,11 @@ pub fn single_peak_ceiling(k: usize) -> f64 {
 /// below the middle), so the test is `3 · m2n_lo > f(S)` for every admissible
 /// `S`. `f` is concave on each side of the middle, so its largest admissible
 /// value lies at an end of the range, at the middle, or next to a side's peak.
+///
+/// Before that, it tests the largest spread at this `n` without the mean,
+/// [`single_peak_m2n_max_x12`]. `B_μ` ignores whole-number effects at the
+/// actual `n`; this bound does not, and for small `n` it flags spreads that
+/// `B_μ` allows at every admissible mean.
 pub(crate) fn beyond_single_peak(
     m2n_lo: i64,
     sum_lo: i64,
@@ -698,6 +738,9 @@ pub(crate) fn beyond_single_peak(
     if lo > hi {
         // No admissible total: a consistency failure, with no shape to infer.
         return false;
+    }
+    if 12 * (m2n_lo as i128) > single_peak_m2n_max_x12(n as usize, k) {
+        return true;
     }
     let f = |s: i128| {
         let s = if 2 * s < n * m { n * m - s } else { s };
@@ -3353,8 +3396,10 @@ mod tests {
 
         // Every histogram of n over k values: a single-peaked one never has a
         // horns index above the ceiling, nor a variance above B_μ at its own
-        // mean, and the exact integer test flags a histogram's own total and
-        // spread exactly when its variance is above B_μ.
+        // mean, nor a spread above the largest at this n, which one of them
+        // reaches. The exact integer test flags a histogram's own total and
+        // spread exactly when its variance is above B_μ or its spread above
+        // that largest one.
         fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
             if row.len() == k - 1 {
                 row.push(n);
@@ -3372,6 +3417,7 @@ mod tests {
             let mut rows = Vec::new();
             compositions(k, n, &mut Vec::new(), &mut rows);
             let mut highest = 0.0f64;
+            let mut widest = 0i128;
             for row in rows {
                 let (sum, ssq) = row
                     .iter()
@@ -3394,13 +3440,24 @@ mod tests {
                     assert!(var <= b_mu + 1e-12, "{row:?}");
                     assert!(!flagged, "{row:?}");
                 }
-                assert_eq!(flagged, var > b_mu + 1e-12, "{row:?}");
+                let n_sharp = single_peak_m2n_max_x12(n as usize, k);
+                if single {
+                    assert!(12 * m2n as i128 <= n_sharp, "{row:?}");
+                    widest = widest.max(12 * m2n as i128);
+                }
+                assert_eq!(
+                    flagged,
+                    var > b_mu + 1e-12 || 12 * m2n as i128 > n_sharp,
+                    "{row:?}"
+                );
                 // Above the ceiling is always flagged, at any mean.
                 if horns > single_peak_ceiling(k) + 1e-12 {
                     assert!(flagged, "{row:?}");
                 }
             }
             assert!(highest <= single_peak_ceiling(k) + 1e-12, "k = {k}");
+            // The bound at this n is reached.
+            assert_eq!(widest, single_peak_m2n_max_x12(n as usize, k), "k = {k}");
         }
     }
 

@@ -32,7 +32,8 @@ from 0.3 to 2.6 in steps of 0.1, both rounded to two decimals (rounding error
 reaches, at every cutoff in the default band, and whether checks that use only
 the reported statistics reach them too: the mean-free single-peak ceiling, and
 `beyond_single_peak`, which uses the bound at the reported mean (Navard et
-al.'s $B_\mu$, proved in `horns-and-shapes.qmd`). "Middle third" means a mean in the middle third of the scale, where
+al.'s $B_\mu$, proved in `horns-and-shapes.qmd`) and the mean-free bound at
+the actual $n$ (which adds no cases at these sample sizes). "Middle third" means a mean in the middle third of the scale, where
 a floor or ceiling effect is not obvious from the mean.
 
 | | 1–5, n = 20 | 1–5, n = 50 | 1–7, n = 30 |
