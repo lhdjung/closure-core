@@ -498,6 +498,10 @@ impl<U: IntegerType> SpriteParams<U> {
     /// Whether no single-peaked sample meets the bounds, on a grid `k` wide;
     /// see [`crate::beyond_single_peak`]. Internal units are grid steps.
     fn beyond_single_peak(&self, k: usize) -> bool {
+        // Infeasible inputs carry placeholder sums, not the admissible range.
+        if self.infeasible.is_some() {
+            return false;
+        }
         let n = U::to_usize(&self.n).expect("n was validated");
         let shift = n as i64 * self.scale_min_scaled;
         crate::beyond_single_peak(self.m2n_lo, self.sum_lo - shift, self.sum_hi - shift, n, k)
