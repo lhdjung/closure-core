@@ -35,7 +35,7 @@
 //! | `metrics_main`, `metrics_horns`, `frequency`, `frequency_dist` | summary statistics; `metrics_horns` ends with the single-peak ceiling and whether the reported SD is beyond it |
 //! | `modality_counts`, `modality_pairs` | per-value count ranges across the whole result set, and which adjacent orderings are fixed |
 //! | `modality_shapes` | per-value count ranges **within each shape class** — read as "if the data had this shape, then…" |
-//! | `modality_summary` | one row: samples per shape class at the primary cutoff (`n_*`) and anywhere in the band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread, the smallest and largest gap between a sample's tallest and shortest bar (`bar_gap_*`, in observations and as a share of the average bar), how clearly a second peak stands out (`second_peak_*`) and how far the tallest peak stands above the bars towards the nearer scale end (`edge_drop_*`), both in observations |
+//! | `modality_summary` | one row: samples per shape class at the primary cutoff (`n_*`) and anywhere in the band (`band_n_*`), whether the search was exhaustive, unimodality-deficit spread, the smallest and largest gap between a sample's tallest and shortest bar (`bar_gap_*`, in observations and as a share of the average bar), how clearly a second peak stands out (`second_peak_*`) and how far the tallest peak stands above the lowest bar towards either end, the smaller of the two (`edge_drop_*`), both in observations |
 //! | `modality_prominence` | samples per shape class at each threshold in the prominence envelope |
 //!
 //! # Reading the shape output
