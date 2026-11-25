@@ -641,7 +641,11 @@ fires where CLOSURE finds a single-peaked sample, as the theorem guarantees.
 
 The flag also tests the largest variance a single-peaked histogram of the
 actual $n$ values can have, whatever its mean. That maximum is sharp at every
-$n$ (tides_article, Appendix L, Theorem L.3): it is the largest
+$n$ (Theorem L.3 in
+`bounds-of-SD-article/appendices/appendix_l_scale_limits_mean_and_unimodality.qmd`
+of github.com/ianhussey/tides_article, whose
+`bounds-of-SD-article/unimodality/README.md` tracks this line of work): it is
+the largest
 $c\,w(w-1)(2w-1)/6 - c^2w^2(w-1)^2/(4n)$, divided by $n$, over whole numbers
 $2 \le w \le \min(m+1, n)$ and $1 \le c \le n/w$, reached by $c$ values on
 each of $w - 1$ neighbouring positions and the rest on the next. In the sweep

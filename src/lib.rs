@@ -685,7 +685,9 @@ pub fn single_peak_ceiling(k: usize) -> f64 {
 /// each of `w − 1` neighbouring positions and the rest on the next one
 /// (tides_article, Appendix L, Theorem L.3). Unlike [`single_peak_ceiling`] it
 /// is sharp at every `n`, and for small `n` it is much lower: on 1–7 with
-/// `n = 5` the largest population SD is √2, not 13/6.
+/// `n = 5` the largest population SD is √2, not 13/6. The proof is in
+/// `bounds-of-SD-article/appendices/appendix_l_scale_limits_mean_and_unimodality.qmd`
+/// of github.com/ianhussey/tides_article.
 ///
 /// For a fixed `w`, `S` is a downward parabola in `c` with its vertex at
 /// `n(2w − 1)/(3w(w − 1))`, so only the two whole numbers around the vertex
