@@ -1684,3 +1684,53 @@ fn sprite_accepts_a_mean_past_the_scale_within_its_rounding() {
     )
     .is_err());
 }
+
+#[test]
+fn sprite_finds_samples_near_the_widest_sd() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // The last useful move here can be one of about `2 n²`; giving up after
+    // a few fruitless random shifts found none of the 23 samples.
+    let results = sprite_parallel::<f64, i32>(
+        3.0,
+        2.0,
+        1000,
+        1,
+        5,
+        0.005,
+        0.001,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        Some(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!(results.results.len(), 1);
+}
+
+#[test]
+fn sprite_finds_the_one_sample_of_a_narrow_sd() {
+    use closure_core::{sprite_parallel, RestrictionsOption};
+
+    // Attempts bounced across the SD band until the loop limit, and finding
+    // this one sample took minutes.
+    let results = sprite_parallel::<f64, i32>(
+        3.0,
+        0.08,
+        300,
+        1,
+        5,
+        0.005,
+        0.005,
+        1,
+        None,
+        RestrictionsOption::Null,
+        None,
+        Some(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!(results.results.len(), 1);
+}
