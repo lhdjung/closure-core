@@ -3205,10 +3205,11 @@ fn closure_branch_deep(
         ssq,
     });
     'levels: loop {
-        let k = k0 + stack.len() - 1;
+        let depth = stack.len();
         let Some(level) = stack.last_mut() else {
             return;
         };
+        let k = k0 + depth - 1;
         while level.idx < counts.len() {
             let idx = level.idx;
             match closure_step(ctx, k, level.sum, level.ssq, idx) {
