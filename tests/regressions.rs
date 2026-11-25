@@ -1598,3 +1598,14 @@ fn no_shape_is_claimed_when_no_sample_exists() {
     assert_eq!(r.results.len(), 2);
     assert!(r.metrics_horns.beyond_single_peak);
 }
+
+#[test]
+fn a_search_just_below_the_old_recursion_cap_does_not_overflow_in_debug() {
+    // Branches up to 4096 deep recursed, about 500 bytes a level in debug
+    // builds: n = 4000 overflowed a 2 MB thread (rayon's workers, the test
+    // harness's) and aborted.
+    let n = 4000;
+    let results =
+        closure_parallel::<f64, i32>(0.5, 0.5, n, 0, 1, 0.5, 0.5, 1, None, Some(5), None).unwrap();
+    assert_eq!(results.results.len(), 5);
+}

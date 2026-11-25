@@ -3050,10 +3050,13 @@ fn closure_branch(
     results
 }
 
-/// Deepest branch [`closure_branch`] searches by recursion. Below it the
-/// recursion needs a few hundred KB of stack, little enough for any thread
-/// that calls in; deeper branches run [`closure_branch_deep`].
-const MAX_RECURSION_DEPTH: usize = 4096;
+/// Deepest branch [`closure_branch`] searches by recursion; deeper branches
+/// run [`closure_branch_deep`]. A level takes about 140 bytes of stack in
+/// release builds and about 500 in debug builds, so 1024 levels fit a 512 KB
+/// thread (macOS's default for threads other than the main one) in release
+/// and a 2 MB one (rayon's workers, `cargo test`'s threads) in debug. At 4096,
+/// debug builds overflowed from about n = 4000.
+const MAX_RECURSION_DEPTH: usize = 1024;
 
 /// The signature [`closure_branch_recurse`] and [`closure_branch_deep`] share.
 type BranchSearch =
