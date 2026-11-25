@@ -404,7 +404,7 @@ and refactors.
 | `b7e234d` | `beyond_single_peak` is `FALSE` on an empty result (5) |
 | `d3749b6` | A single peak's edge is decided by the bars within the cutoff (5) |
 | `dc2cf02` | Equal lower peaks merge (5) |
-| `47784a3` | Cutoffs must lie between 0 and 1; a cutoff of 0 reads as 1 (6) |
+| `47784a3` | Cutoffs passed as `prominence` must lie strictly between 0 and 1 (6) |
 | `ce0783d` | Complete empty runs are exhaustive; real `n` in `modality_prominence` (5) |
 | `ae301d4`, `80085ce` | No stack overflow at large `n` (5) |
 | `535674b` | CLOSURE lists samples for `n` up to 1,000,000 (6) |
