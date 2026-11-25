@@ -33,9 +33,10 @@ execute:
   ceiling is $R/3$; the $1/6$ is what whole numbers add.
 - **So the reported SD alone can show that the data was not single-peaked.**
   closure-core reports the ceiling and a flag, `beyond_single_peak`, in
-  `metrics_horns`. The flag needs no samples, no search and no cutoff, so it
-  also works for SPRITE and for truncated runs. Neither of those can rule out
-  a shape by itself, because neither sees every sample.
+  `metrics_horns`. The bound needs no samples, no search and no cutoff, so the
+  flag also works for SPRITE and for truncated runs. Neither of those can rule
+  out a shape by itself, because neither sees every sample. The flag is set
+  only when samples were found: without any, there is no shape to infer.
 - **At a given mean the line is lower.** Navard, Seaman and Young (1993)
   give it, $B_\mu$, but prove it only under side conditions. This document
   proves it for every single-peaked distribution and every mean; its maximum
@@ -653,8 +654,10 @@ $\sqrt{V(\mu)}$ from @sec-mean-ceiling, lower everywhere else: on 1–5 it is
 1.5 at means 2.5 and 3.5, but $\sqrt{2} = 1.41$, the uniform's SD, at mean 3.
 
 Because the reported mean and SD are rounded, the flag uses every mean and
-the lowest SD the rounding allows: `beyond_single_peak` is true when, at every
-admissible mean, even the lowest admissible SD is past the line for that mean.
+the lowest SD the rounding allows: `beyond_single_peak` is true when samples
+were found and, at every admissible mean, even the lowest admissible SD is
+past the line for that mean. On an empty result it is false: statistics that
+contradict each other leave no shape to infer.
 closure-core decides this exactly, without floating point. Its search bounds
 already hold the admissible totals $S = \sum x$ and the smallest admissible
 value of $n\sum x^2 - S^2 = n^2\sigma^2$, as integers in grid steps from the
@@ -827,8 +830,8 @@ $(u - \bar{x})(\bar{x} - l)$. In horns units that is the arch
 $h \le 1 - \big((2\bar{x} - l - u)/R\big)^2$, against which the single-peak
 ceiling is a horizontal line. An SD past the arch is a consistency failure,
 BRIMMER's territory. An SD between the line and the arch is consistent, but no
-single-peaked histogram has it. That band only exists for means near the
-middle of the scale:
+single-peaked histogram has it. Against the mean-free line, that band only
+exists for means near the middle of the scale:
 
 ```{r}
 #| label: band
@@ -840,13 +843,23 @@ band <- function(l, u) {
 round(rbind(`1-5` = band(1, 5), `1-7` = band(1, 7)), 3)
 ```
 
-On 1–5, for means below 1.68 or above 4.32, any SD past the single-peak line
-is already past the arch: the statistics contradict each other, and there is
-no shape to infer. closure-core reports `beyond_single_peak` regardless. For
-CLOSURE that case shows up as an empty result. For SPRITE it shows up too,
-because SPRITE checks the Bhatia–Davis bound before searching. So read the
-flag as a shape inference only when the statistics pass the consistency
-checks.
+On 1–5, for means below 1.68 or above 4.32, any SD past the mean-free line
+is already past the arch. The flag, though, uses the line at the given mean,
+$V(\mu)$ from @sec-mean-ceiling, and against that line the band exists at
+every mean strictly inside the scale. In grid steps, for $\mu \ge m/2$,
+$$
+\mu(m - \mu) - V(\mu) = \frac{(m-1)(m-\mu)}{3},
+$$
+mirrored below the middle: positive for $\mu < m$ on any scale of three or
+more values, and zero on two values, where every histogram is single-peaked.
+On 1–5 with $n = 50$ and mean 1.5, for example, reported SDs of 1.2 and 1.25
+are consistent (CLOSURE finds 2 samples and 1), and both are flagged.
+
+Past the arch, the statistics contradict each other, and there is no shape to
+infer. CLOSURE then returns no samples, and closure-core leaves
+`beyond_single_peak` false. SPRITE returns no samples either, and its flag is
+false too: an empty SPRITE run cannot show whether samples exist, so it
+claims no shape.
 
 **The same inequality, read the other way.** The BRIMMER manuscript bounds the
 SD under constraints such as $\{l, u, n, \bar{x}, \mathbb{Z}, \alpha\}$ and
@@ -899,4 +912,5 @@ CLOSURE adds only which values inside that interval whole counts can reach.
 
 The horns index earns its place in the first row: a cheap, cutoff-free,
 search-free check that turns "the SD is large" into "the data cannot have had
-a single peak", with the exact line $(2k-1)^2/(9(k-1)^2)$.
+a single peak". The mean-free line is the ceiling $(2k-1)^2/(9(k-1)^2)$; the
+flag uses the lower line at the reported mean, $B_\mu$.

@@ -78,8 +78,11 @@
 //! allows is beyond that limit at every mean the rounding allows,
 //! `metrics_horns` says `beyond_single_peak`: every histogram with these
 //! statistics has a dip, so the original data was not single-peaked. That
-//! holds for SPRITE and truncated runs too. On a 1–5 scale the mean-free line
-//! is a population SD of 1.5; at mean 3 it is 1.41, the uniform's.
+//! holds for SPRITE and truncated runs too. Like every shape inference, it
+//! needs samples to exist: on an empty result the flag is down, because
+//! statistics that contradict each other leave no shape to infer. On a 1–5
+//! scale the mean-free line is a population SD of 1.5; at mean 3 it is 1.41,
+//! the uniform's.
 //!
 //! Two more points on reading the output:
 //!
@@ -615,25 +618,33 @@ pub struct MetricsHorns {
     pub max: f64,
     pub range: f64,
     /// The highest horns index any single-peaked histogram on this grid can
-    /// have; see [`single_peak_ceiling`]. `NaN` for an empty result list
-    /// built without a grid's search bounds.
+    /// have; see [`single_peak_ceiling`].
     pub single_peak_ceiling: f64,
-    /// True when no single-peaked histogram meets the reported statistics:
-    /// at every mean the rounding allows, even the lowest SD it allows is
-    /// beyond the largest a single-peaked histogram with that mean can have.
-    /// Every admissible histogram then has a dip somewhere, so, if the
-    /// reported statistics are right, the original data was not single-peaked.
+    /// True when samples were found and no single-peaked histogram meets the
+    /// reported statistics: at every mean the rounding allows, even the lowest
+    /// SD it allows is beyond the largest a single-peaked histogram with that
+    /// mean can have. Every admissible histogram then has a dip somewhere, so,
+    /// if the reported statistics are right, the original data was not
+    /// single-peaked.
+    ///
+    /// The test works in one direction only. False does not mean a
+    /// single-peaked sample exists: the bound ignores whole-number effects at
+    /// the actual `n`, so every sample can have a dip with the flag down. Ask
+    /// the samples (`deficit_min`) for that.
     ///
     /// The bound at a given mean is Navard, Seaman and Young's (1993) `B_μ`,
     /// whose largest value over all means is [`Self::single_peak_ceiling`]; so
     /// a horns index above the ceiling always sets this flag, and at most
-    /// means a lower one does too. It follows from the mean, the SD and the
-    /// scale alone, without any samples, so it holds for SPRITE and for
-    /// truncated runs too. It is about strictly
-    /// single-peaked histograms, rising and then falling with no dip at all;
-    /// at a prominence cutoff a small dip does not count as a second mode.
-    /// When no sample exists at all, the reported statistics contradict each
-    /// other, and that finding comes first.
+    /// means a lower one does too. The bound follows from the mean, the SD
+    /// and the scale alone, so it holds for SPRITE and for truncated runs too.
+    /// It is about strictly single-peaked histograms, rising and then falling
+    /// with no dip at all; at a prominence cutoff a small dip does not count
+    /// as a second mode.
+    ///
+    /// The flag is false whenever no sample was found. In an exhaustive
+    /// CLOSURE run that means the reported statistics contradict each other,
+    /// a consistency failure with no shape to infer. For SPRITE an empty run
+    /// leaves open whether samples exist, so it claims no shape either.
     pub beyond_single_peak: bool,
 }
 
@@ -809,12 +820,12 @@ impl<U: IntegerType> ResultListFromMeanSdN<U> {
             1,
             100,
         );
-        empty_result_list(grid, 0, &ProminenceThresholds::default(), false, false)
+        empty_result_list(grid, 0, &ProminenceThresholds::default(), false)
     }
 
     /// Create an empty result list over an explicit value grid.
     pub fn empty_on_grid(grid: ValueGrid, n: usize) -> Self {
-        empty_result_list(grid, n, &ProminenceThresholds::default(), false, false)
+        empty_result_list(grid, n, &ProminenceThresholds::default(), false)
     }
 }
 
@@ -1482,7 +1493,6 @@ pub(crate) fn empty_result_list<U>(
     n: usize,
     thresholds: &ProminenceThresholds,
     exhaustive: bool,
-    beyond_single_peak: bool,
 ) -> ResultListFromMeanSdN<U>
 where
     U: IntegerType,
@@ -1513,7 +1523,8 @@ where
             max: f64::NAN,
             range: f64::NAN,
             single_peak_ceiling: single_peak_ceiling(group_size),
-            beyond_single_peak,
+            // No sample, no shape: see `MetricsHorns::beyond_single_peak`.
+            beyond_single_peak: false,
         },
         frequency: FrequencyTable::new(
             FrequencySamplesColumn::new(group_size),
@@ -1570,7 +1581,7 @@ where
     // Handle empty samples case
     if counts.is_empty() {
         let n = counts.n();
-        return empty_result_list(grid, n, thresholds, exhaustive, beyond_single_peak);
+        return empty_result_list(grid, n, thresholds, exhaustive);
     }
 
     let n = counts.n();
@@ -2564,13 +2575,8 @@ pub(crate) fn write_streaming_statistics(
     let samples_all = all_horns.len();
     if samples_all == 0 {
         // Still create the files so a reader finds a complete, empty result set.
-        let results: ResultListFromMeanSdN<i32> = empty_result_list(
-            grid.clone(),
-            n_usize,
-            thresholds,
-            exhaustive,
-            beyond_single_peak,
-        );
+        let results: ResultListFromMeanSdN<i32> =
+            empty_result_list(grid.clone(), n_usize, thresholds, exhaustive);
         return write_statistics_files(base_path, &results).map_err(output_error);
     }
 

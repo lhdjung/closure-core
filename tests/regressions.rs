@@ -1552,3 +1552,49 @@ fn a_limited_run_that_saw_everything_is_exhaustive() {
         "reaching the limit proves nothing"
     );
 }
+
+#[test]
+fn no_shape_is_claimed_when_no_sample_exists() {
+    // `beyond_single_peak` was set whenever the SD was past the single-peak
+    // bound, even when no sample reached it at all, a consistency failure
+    // with no shape to infer. On two values every histogram is single-peaked,
+    // so the flag was plainly wrong there.
+    for (mean, sd, n, hi) in [(1.5, 0.6, 10, 2), (3.0, 5.0, 100, 5), (1.3, 0.96, 10, 5)] {
+        let closure =
+            closure_parallel::<f64, i32>(mean, sd, n, 1, hi, 0.005, 0.005, 1, None, None, None)
+                .unwrap();
+        assert!(closure.results.is_empty());
+        assert!(
+            !closure.metrics_horns.beyond_single_peak,
+            "{mean} {sd} {n} 1..={hi}"
+        );
+        let sprite = closure_core::sprite_parallel::<f64, i32>(
+            mean,
+            sd,
+            n,
+            1,
+            hi,
+            0.005,
+            0.005,
+            1,
+            None,
+            closure_core::RestrictionsOption::Null,
+            None,
+            Some(5),
+            None,
+        )
+        .unwrap();
+        assert!(sprite.results.is_empty());
+        assert!(
+            !sprite.metrics_horns.beyond_single_peak,
+            "SPRITE {mean} {sd} {n} 1..={hi}"
+        );
+    }
+    // Consistent statistics past the line at the mean are still flagged:
+    // mean 1.5 is far from the middle, where the mean-free line would not
+    // flag them.
+    let r = closure_parallel::<f64, i32>(1.5, 1.2, 50, 1, 5, 0.005, 0.005, 1, None, None, None)
+        .unwrap();
+    assert_eq!(r.results.len(), 2);
+    assert!(r.metrics_horns.beyond_single_peak);
+}

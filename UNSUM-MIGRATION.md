@@ -181,14 +181,20 @@ against `n` without adopting closure-core's cutoffs.
 
 In `metrics_horns`, `single_peak_ceiling` is the highest horns index any
 single-peaked histogram on the scale can have, `(2k − 1)² / (9 (k − 1)²)` for
-`k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when no
-single-peaked histogram meets the reported statistics: at every mean the
+`k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when samples
+were found and no single-peaked histogram meets the reported statistics: at
+every mean the
 rounding allows, even the lowest SD it allows is beyond the largest a
 single-peaked histogram with that mean can have (Navard, Seaman and Young's
 `B_μ`, whose maximum over the mean is the ceiling). Then every histogram with
 these statistics has a dip, so, if they are right, the original data was not
 single-peaked. It follows from the reported statistics alone, so it holds for
-SPRITE and for runs with `stop_after` too. On 1–5 the line is a population SD
+SPRITE and for runs with `stop_after` too. On an empty result it is `FALSE`:
+statistics that contradict each other leave no shape to infer. The test works
+in one direction only: `FALSE` does not mean a single-peaked sample exists,
+because the bound ignores whole-number effects at the actual `n` (at mean
+2.5, SD 1.49, `n = 100` on 1–5, all 363 samples have a dip and the flag is
+down); `deficit_min` answers that. On 1–5 the line is a population SD
 of 1.5 at means 2.5 and 3.5, and 1.41 at mean 3; at mean 3 and `n = 50`, a
 reported SD of 1.44 is flagged. The derivation is in closure-core's
 `protocols/horns-and-shapes.qmd`.
