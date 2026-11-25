@@ -503,6 +503,21 @@ impl<U: IntegerType> SpriteParams<U> {
         crate::beyond_single_peak(self.m2n_lo, self.sum_lo - shift, self.sum_hi - shift, n, k)
     }
 
+    /// Whether some sum of squares puts `n·Σx² − total²` inside the SD
+    /// bounds. Since `x² ≡ x (mod 2)`, `Σx² ≡ total (mod 2)`, so at a fixed
+    /// total that statistic moves in steps of `2n`, and a band narrower than
+    /// that misses some totals altogether. An attempt aimed at one of them
+    /// used to bounce across the band until the loop limit: mean 5000.01, sd
+    /// 0.1, n 1000 on 0..=10000 took 25 s for 4 samples, against 0.2 s on
+    /// 4995..=5005.
+    fn total_can_hit_sd(&self, total: i64) -> bool {
+        let n = U::to_i64(&self.n).expect("n was validated") as i128;
+        let (total, s2) = (total as i128, (total as i128).pow(2));
+        let q_lo = -(-(self.m2n_lo as i128 + s2)).div_euclid(n);
+        let q_hi = (self.m2n_hi as i128 + s2).div_euclid(n);
+        q_lo + (q_lo - total).rem_euclid(2) <= q_hi
+    }
+
     /// Tabulate a sample in internal units onto a value grid `k` wide.
     ///
     /// Exact: internal units are grid steps, so a value's position is plain
@@ -1136,7 +1151,12 @@ where
     let r_n = n_usize - params.n_fixed;
     let pv = &params.possible_values_scaled;
 
-    let total_target_sum = rng.random_range(params.sum_lo..=params.sum_hi);
+    // Draw among the totals the SD band can be reached from. Each check is
+    // O(1); an attempt that misses 1,000 times fails like a doomed one did.
+    let total_target_sum = (0..1_000)
+        .map(|_| rng.random_range(params.sum_lo..=params.sum_hi))
+        .find(|&total| params.total_can_hit_sd(total))
+        .ok_or("No admissible total can reach the SD")?;
     let vec_target_sum = total_target_sum - params.fixed_sum;
 
     // Direct mean initialization (O(n)): fill the r_n free slots with the
@@ -1201,6 +1221,10 @@ where
     // Running sums for the mutable part of the distribution. Shifts keep the
     // total, so only the sum of squares runs.
     let total = vec.iter().map(|v| U::to_i64(v).unwrap()).sum::<i64>() + params.fixed_sum;
+    // A random fill's mean correction can land on any admissible total.
+    if !params.total_can_hit_sd(total) {
+        return Err("The total reached cannot reach the SD".to_string());
+    }
     let mut running_sum_sq: i64 = vec.iter().map(|v| U::to_i64(v).unwrap().pow(2)).sum();
     let n_i64 = n_usize as i64;
 
@@ -2134,5 +2158,55 @@ pub mod tests {
         // clamped to the floor of 20,000.
         assert_eq!(loop_limits(65_536, 256), (16_777_216, 16_777_216));
         assert_eq!(loop_limits(usize::MAX, 100_000), (u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn the_sd_parity_check_keeps_every_total_a_sample_reaches() {
+        // Every sequence of 6 values on 1..=5, by total and `n·Σx² − total²`.
+        let n = 6usize;
+        let samples: Vec<(i64, i64)> = (0..5usize.pow(n as u32))
+            .map(|mut code| {
+                let (mut s, mut q) = (0i64, 0i64);
+                for _ in 0..n {
+                    let x = (code % 5) as i64 + 1;
+                    code /= 5;
+                    s += x;
+                    q += x * x;
+                }
+                (s, n as i64 * q - s * s)
+            })
+            .collect();
+        let mut ruled_out = 0;
+        for mean_x100 in (150..=450).step_by(7) {
+            for sd_x100 in (20..=200).step_by(9) {
+                let Ok(params) = build_sprite_params::<f64, i32>(
+                    mean_x100 as f64 / 100.0,
+                    sd_x100 as f64 / 100.0,
+                    n as i32,
+                    1,
+                    5,
+                    0.05,
+                    0.005,
+                    1,
+                    None,
+                    RestrictionsOption::Null,
+                ) else {
+                    continue;
+                };
+                for total in params.sum_lo..=params.sum_hi {
+                    let reached = samples.iter().any(|&(s, m2n)| {
+                        s == total && (params.m2n_lo..=params.m2n_hi).contains(&m2n)
+                    });
+                    let kept = params.total_can_hit_sd(total);
+                    assert!(
+                        kept || !reached,
+                        "mean {mean_x100}, sd {sd_x100}, total {total}"
+                    );
+                    ruled_out += (!kept) as usize;
+                }
+            }
+        }
+        // The check must also bite, or it guards nothing.
+        assert!(ruled_out > 0);
     }
 }
