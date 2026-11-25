@@ -401,7 +401,7 @@ where
 ///   the fixed ones do. Without fixed responses it is `r (n − r)` for
 ///   `r = S mod n`. Ignoring them let mean 3, sd 0.005, n 20,000 on 1..=5
 ///   with the default restrictions search for 6.6 s, though a 1 and a 5
-///   among 3s already have an SD of 0.028.
+///   among 3s already have an SD of 0.020.
 fn feasibility<U: IntegerType>(
     bounds: &SearchBounds,
     n: usize,

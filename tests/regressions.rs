@@ -1496,7 +1496,7 @@ fn sprite_gives_up_quickly_on_an_sd_too_narrow_for_its_restrictions() {
     use closure_core::{sprite_parallel, RestrictionsOption};
 
     // The default restrictions fix a 1 and a 5, and with every other value
-    // at 3 that is already an SD of 0.028 at n = 20,000. The up-front check
+    // at 3 that is already an SD of 0.020 at n = 20,000. The up-front check
     // for SDs narrower than any sample ignored fixed responses, so every
     // attempt ran first, about 6.6 s.
     let start = std::time::Instant::now();
