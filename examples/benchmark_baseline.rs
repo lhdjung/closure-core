@@ -39,6 +39,10 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = System.realloc(ptr, layout, new_size);
+        if new_ptr.is_null() {
+            // Failed: nothing was allocated, and the old block is still live.
+            return new_ptr;
+        }
         if new_ptr != ptr {
             // The block moved, so the old and the new block were both live
             // while it was copied. LIVE still counts the old one here.
