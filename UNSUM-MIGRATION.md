@@ -171,10 +171,12 @@ rests on, in observations, as its smallest and largest value over the samples
   observations above its dip, so every sample is multimodal at any cutoff up
   to 7. If `second_peak_max` is 0, no sample has two modes at any cutoff.
 - `edge_drop_*`: how far a sample's tallest bar stands above the lowest bar
-  between it and the nearer end of the scale, 0 if it sits at an end; the
-  number behind *bell* versus *floor or ceiling effect*. A single-peaked
-  sample is a bell at any cutoff up to its edge drop. If `edge_drop_min` is 8,
-  every single-peaked sample is a bell at any cutoff up to 8.
+  between it and an end of the scale, on whichever side that drop is smaller
+  (not always the end nearer by position), 0 if it sits at an end; the number
+  behind *bell* versus *floor or ceiling effect*. A sample with one mode at a
+  cutoff is a bell there if the cutoff is at most its edge drop. If
+  `edge_drop_min` is 8, every sample with one mode at a cutoff up to 8 is a
+  bell there.
 
 Each is exactly where the class changes, so a reader can weigh these numbers
 against `n` without adopting closure-core's cutoffs.

@@ -66,8 +66,9 @@
 //! cutoff, the output also reports the number behind it, so a reader can judge
 //! directly. In `modality_summary`, `bar_gap_*` says how close together every
 //! sample's bars are (flatness), `second_peak_*` how clearly a second peak
-//! stands out (multimodality), and `edge_drop_*` how far the tallest peak is
-//! from the nearer end of the scale (a bell or a floor or ceiling effect).
+//! stands out (multimodality), and `edge_drop_*` how far the tallest peak
+//! stands above the lowest bar towards either end, the smaller of the two
+//! (a bell or a floor or ceiling effect).
 //!
 //! One shape conclusion needs no samples and no cutoff. The reported SD fixes
 //! every sample's horns index, and no single-peaked histogram on a scale of

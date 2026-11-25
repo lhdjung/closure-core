@@ -750,7 +750,7 @@ smallest and largest values in `modality_summary`, in observations.
 |---|---|---|
 | flat | `bar_gap` | tallest bar minus shortest bar |
 | multimodal | `second_peak` | largest cutoff at which the sample still has two or more modes; 0 if it never does |
-| bell vs floor or ceiling effect | `edge_drop` | how far the tallest bar stands above the lowest bar between it and the nearer end of the scale; 0 if a tallest bar sits at an end |
+| bell vs floor or ceiling effect | `edge_drop` | how far the tallest bar stands above the lowest bar between it and an end of the scale, on whichever side that drop is smaller; 0 if a tallest bar sits at an end |
 
 Each number is exactly the cutoff at which its verdict changes:
 
@@ -760,8 +760,10 @@ Each number is exactly the cutoff at which its verdict changes:
   if $t \le \text{edge\_drop}$, and a floor or ceiling effect otherwise.
 
 So "`second_peak_min` is 7" says every sample is multimodal at every cutoff
-up to 7 observations. "`edge_drop_min` is 8" says every single-peaked sample
-is a bell at every cutoff up to 8.
+up to 7 observations. "`edge_drop_min` is 8" says every sample with one mode
+at a cutoff up to 8 is a bell there. (Here "one mode" is at the cutoff $t$;
+elsewhere in this document "single-peaked" means strictly, with no dip at
+all.)
 
 ### Why the numbers are exact
 

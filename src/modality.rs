@@ -86,7 +86,8 @@
 //! - One peak or several: [`second_peak`], the largest cutoff at which a
 //!   sample still has two modes.
 //! - A bell or a floor or ceiling effect: [`edge_drop`], how far the tallest
-//!   bar stands above the lowest bar between it and the nearer end.
+//!   bar stands above the lowest bar between it and an end of the scale, on
+//!   whichever side that drop is smaller.
 //!
 //! A sample takes a class at a cutoff exactly when these numbers say so: it
 //! is multimodal at a cutoff up to its second peak, and a single peak is a
@@ -683,11 +684,11 @@ pub struct ModalityShapes {
     ///
     /// The cutoff-free version of the bell-or-edge verdict. If it is 8, every
     /// sample's tallest bar stands at least 8 observations above the lowest
-    /// bar between it and either end of the scale, so every single-peaked
-    /// sample is a bell at any cutoff up to 8.
+    /// bar between it and either end of the scale, so every sample with one
+    /// mode at a cutoff up to 8 is a bell there.
     pub edge_drop_min: u32,
-    /// Largest [`edge_drop`]: every single-peaked sample reaches a scale end,
-    /// a floor or ceiling effect, at any cutoff above this. 0 means every
+    /// Largest [`edge_drop`]: every sample with one mode at a cutoff above
+    /// this reaches a scale end there, a floor or ceiling effect. 0 means every
     /// sample's tallest bar sits at an end of the scale.
     pub edge_drop_max: u32,
 }
@@ -888,15 +889,18 @@ fn edge_from(runs: &[Run]) -> Option<(ShapeClass, u32)> {
     }
 }
 
-/// How far a peak is from the nearer end of the scale, in observations: how
-/// far the tallest bar stands above the lowest bar between it and that end. 0
-/// when a tallest bar sits at an end.
+/// How far a peak is from an end of the scale, in observations: how far the
+/// tallest bar stands above the lowest bar between it and each end, taking
+/// the smaller of the two sides. That side need not be the end nearer by
+/// position: in `[20, 25, 30, 40, 39, 39, 39, 38]` it is the high end, four
+/// values away, with a drop of 2. 0 when a tallest bar sits at an end.
 ///
 /// This is the number the bell-or-edge verdict rests on. A sample with one
 /// mode is [`ShapeClass::OneModeInterior`] at a cutoff exactly when its edge
 /// drop is at least the cutoff, and a floor or ceiling effect below that. So
-/// "every sample has an edge drop of at least 8" says every single-peaked
-/// sample is a bell at any cutoff up to 8 observations, without choosing one.
+/// "every sample has an edge drop of at least 8" says every sample with one
+/// mode at a cutoff up to 8 observations is a bell there, without choosing
+/// a cutoff.
 pub fn edge_drop(counts: &[u32]) -> u32 {
     let (low, high) = edge_drops(&runs_of(counts));
     low.min(high)
