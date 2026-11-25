@@ -1261,14 +1261,15 @@ fn a_bound_hit_exactly_at_a_large_n_is_found() {
 fn sprite_rejects_a_scale_too_wide_for_the_grid() {
     use closure_core::{sprite_parallel, ParameterError, RestrictionsOption};
 
-    // An i64 sample type holds 3e7 easily, but the output grid keys values
-    // in hundredths as an i32. This used to panic building the grid.
+    // An i64 sample type holds 2.15e7 easily, but the output grid keys values
+    // in hundredths as an i32. This used to panic building the grid. The
+    // scale is narrow so that the grid-width cap cannot reject it first.
     let result = sprite_parallel::<f64, i64>(
-        15e6,
+        21_500_002.0,
         1.0,
-        10,
-        0,
-        30_000_000,
+        4,
+        21_500_000,
+        21_500_004,
         0.05,
         0.05,
         1,
