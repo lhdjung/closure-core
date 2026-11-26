@@ -10,6 +10,12 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **Status:** unsum's branch `adopt-closure-core-optimize` adopts `f866ebf`
   (unsum `cc3d166` through `6f86c8e`), builds against it and passes its
   tests; it is not on master yet.
+- **After the target:** two later changes reach unsum at its next update,
+  with no API change. `beyond_single_peak` also fires when the lowest
+  admissible SD is past the largest any single-peaked histogram of the
+  actual `n` values can have at any mean, so it is `TRUE` in more small-`n`
+  cases: on 1–7 with `n = 5`, mean 4.00 and SD 1.73 (`eb5d4ef`). And SPRITE,
+  like CLOSURE, refuses `n` above 1,000,000 (`9102500`, section 6).
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -374,6 +380,7 @@ already turns that into `abort_in_export()`.
 |---|---|---|
 | More than 100,000 scale values (CLOSURE), or grid values `(scale_max − scale_min) · items + 1` (SPRITE) | `InputValidation` | CLOSURE could list billions of seeds; SPRITE spent 40 MB per sample. `count_closure_combinations()` has no such limit. |
 | CLOSURE: `n` above 1,000,000 | `InputValidation` | the search asked for memory in proportion to `n`, tens of GB near `i32::MAX`, and aborted R when the allocation failed. `count_closure_combinations()` has no such limit. |
+| SPRITE: `n` above 1,000,000 (after the target, `9102500`) | `InputValidation` | each attempt held all `n` values, gigabytes per thread near `i32::MAX`, and could abort R the same way |
 | CLOSURE: `scale_min == scale_max` | `InputValidation` | every sample `Flat`, so an exhaustive run "proved" the data not unimodal |
 | SPRITE: `items > 100` | `InputValidation` | neighbouring grid values shared a key in hundredths |
 | SPRITE: scale values beyond ±21,474,836 | `InputValidation` | panic building the output grid |
