@@ -1642,6 +1642,23 @@ fn listing_rejects_an_n_too_large_to_hold() {
             closure_parallel::<f64, i32>(0.5, 0.5, n, 0, 1, 0.5, 0.5, 1, None, Some(1), None)
                 .is_err()
         );
+        // SPRITE held all n values per attempt and aborted the same way.
+        assert!(closure_core::sprite_parallel::<f64, i32>(
+            0.5,
+            0.5,
+            n,
+            0,
+            1,
+            0.5,
+            0.5,
+            1,
+            None,
+            closure_core::RestrictionsOption::Null,
+            None,
+            Some(1),
+            None,
+        )
+        .is_err());
     }
 }
 

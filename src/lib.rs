@@ -916,12 +916,14 @@ fn with_slack(x: f64, up: bool) -> f64 {
 /// such limit.
 pub(crate) const MAX_GRID_WIDTH: usize = 100_000;
 
-/// Largest `n` CLOSURE lists samples for. The search keeps one bound and, on
-/// deep branches, one stack entry per position, about 32 bytes per position
-/// per running branch, so `n` near `i32::MAX` asked for tens of GB and
-/// aborted the process when the allocation failed. A million positions take
-/// about 32 MB per branch. [`closure_count`](crate::count::closure_count)
-/// lists nothing and has no such limit.
+/// Largest `n` CLOSURE and SPRITE list samples for. The CLOSURE search keeps
+/// one bound and, on deep branches, one stack entry per position, about 32
+/// bytes per position per running branch, so `n` near `i32::MAX` asked for
+/// tens of GB and aborted the process when the allocation failed. A million
+/// positions take about 32 MB per branch. A SPRITE attempt holds its `n`
+/// values, a few MB at a million.
+/// [`closure_count`](crate::count::closure_count) lists nothing and has no
+/// such limit.
 pub(crate) const MAX_LISTING_N: usize = 1_000_000;
 
 /// Most branches a CLOSURE search is split into up front; see

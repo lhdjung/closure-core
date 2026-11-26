@@ -235,6 +235,15 @@ where
             "n must be at least 2".to_string(),
         ));
     }
+    // Every attempt holds the n values of its sample, so n near `i32::MAX`
+    // asked for gigabytes per thread and aborted when the allocation failed.
+    if n_usize > crate::MAX_LISTING_N {
+        return Err(ParameterError::InputValidation(format!(
+            "n is {n_usize}, but SPRITE lists samples for n up to {}: each attempt holds \
+             all n values. closure_count has no such limit",
+            crate::MAX_LISTING_N
+        )));
+    }
     // Counted before the fixed responses are built: a count of `usize::MAX`
     // overflowed the vector's capacity, and one of 2^40 asked for terabytes.
     let n_fixed = restrictions_exact
