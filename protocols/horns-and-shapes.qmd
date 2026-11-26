@@ -727,7 +727,7 @@ line, and every one of CLOSURE's 68 samples has a dip. closure-core's test
   cutoffs play no part.
 - **It does not replace the consistency test.** If CLOSURE finds no sample at
   all, the reported statistics contradict each other, and that is the finding.
-  The flag is still computed then, but there is no data whose shape it could
+  The flag is then false, because there is no data whose shape it could
   describe.
 - **It is about strict single peaks.** A histogram with a small dip, which the
   shape classes count as one mode at a cutoff above the dip, is not covered.
@@ -740,12 +740,12 @@ line, and every one of CLOSURE's 68 samples has a dip. closure-core's test
   only when the proportions are free (the BRIMMER manuscript's quasi-integer
   sense). With whole counts the extreme histogram exists only for some $n$:
   on 1–7 with $n = 14$, the highest single-peaked horns index is 0.472,
-  against a ceiling of 0.522. And for mean 2.5 and SD 1.49 on 1–5 with
-  $n = 100$, the flag stays down, yet all 363 CLOSURE samples have a dip.
-  Like Popoviciu's range-only bound before its odd-$n$ refinement, an
-  $n$-sharp version would flag more small samples. Where CLOSURE can run, its
-  own numbers (`deficit_min`, and those in @sec-verdict-numbers) catch such
-  cases.
+  against a ceiling of 0.522. The flag catches that gap, since it also tests
+  the $n$-sharp maximum over all means (@sec-mean-ceiling). At a given mean
+  it has no such refinement: for mean 2.5 and SD 1.49 on 1–5 with $n = 100$,
+  the flag stays down, yet all 363 CLOSURE samples have a dip. Where CLOSURE
+  can run, its own numbers (`deficit_min`, and those in @sec-verdict-numbers)
+  catch such cases.
 
 ```{r}
 #| label: limits

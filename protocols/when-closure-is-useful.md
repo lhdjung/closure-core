@@ -58,9 +58,11 @@ How to read it:
   and at any n. The mean-free ceiling alone catches fewer (20, 48, 74).
 - **"Every sample has a dip" is mostly free.** `beyond_single_peak` catches
   about half to four fifths of these verdicts (24 of 46, 79 of 96, 126 of
-  199). It sets the flag exactly when no single-peaked histogram with free
-  proportions fits. What remains comes from whole-number effects at the
-  actual n, which only an exact method sees.
+  199). It sets the flag when no single-peaked histogram with free
+  proportions fits, or when the SD is past the largest any single-peaked
+  histogram of the actual n values can have at any mean. What remains comes
+  from whole-number effects at the actual n and the reported mean together,
+  which only an exact method sees.
 - **"Cannot be a bell" is where CLOSURE still adds the most, but less than it
   seems.** Most of these verdicts have a mean near an end of the scale, where
   a floor or ceiling effect is visible from the mean itself, or a flagged SD.
@@ -116,8 +118,9 @@ its proportions should not be quoted as rates in the literature.
 
 ## Where this could go
 
-- **An n-sharp ceiling**, like the odd-n refinement of Popoviciu's range-only
-  bound, would catch more small samples.
+- **An n-sharp line at the reported mean.** `beyond_single_peak` already uses
+  the n-sharp maximum over all means (tides_article, Theorem L.3). The same
+  sharpening of $B_\mu$ at a given mean would catch more small samples.
 - **A dynamic program for counts and shapes.** `closure_count` already counts
   datasets without listing them. The same approach could plausibly give
   per-value count ranges and the existence of a single-peaked dataset exactly,
