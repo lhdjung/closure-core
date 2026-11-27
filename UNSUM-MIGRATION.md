@@ -10,8 +10,8 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **Status:** unsum's branch `adopt-closure-core-optimize` adopts `c7a196c`
   (unsum `cc3d166` through `6f86c8e` for `f866ebf`, then one commit for the
   rest), builds against it and passes its tests; it is not on master yet.
-  `040ca2c` changes no interface, so adopting it means only updating the
-  pinned closure-core in `src/rust/Cargo.lock`.
+  `040ca2c` changes no interface; unsum `c699c56` adopts it by updating the
+  pinned closure-core in `src/rust/Cargo.lock` (to `2508e15`).
 - **Since `f866ebf`:** `beyond_single_peak` also fires when the lowest
   admissible SD is past the largest any single-peaked histogram of the
   actual `n` values can have at any mean, so it is `TRUE` in more small-`n`
