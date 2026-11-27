@@ -6,10 +6,12 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `c7a196c` on `optimize`.
+- **To:** closure-core `040ca2c` on `optimize`.
 - **Status:** unsum's branch `adopt-closure-core-optimize` adopts `c7a196c`
   (unsum `cc3d166` through `6f86c8e` for `f866ebf`, then one commit for the
   rest), builds against it and passes its tests; it is not on master yet.
+  `040ca2c` changes no interface, so adopting it means only updating the
+  pinned closure-core in `src/rust/Cargo.lock`.
 - **Since `f866ebf`:** `beyond_single_peak` also fires when the lowest
   admissible SD is past the largest any single-peaked histogram of the
   actual `n` values can have at any mean, so it is `TRUE` in more small-`n`
@@ -20,6 +22,13 @@ that affects unsum, and says exactly what to change in unsum for each one.
   and over the single-peaked ones; unsum exposes it as
   `closure_count_details()`, and the cutoffs as `prominence` and
   `prominence_band` in its generators.
+- **Since `c7a196c`:** `beyond_single_peak` uses the largest SD of a
+  single-peaked histogram of the actual `n` values at every admissible mean,
+  computed exactly, instead of Navard, Seaman and Young's `B_μ`, which
+  ignores that counts are whole numbers (`040ca2c`). It is `TRUE` in more
+  cases: on 1–5 with `n = 30` and mean 4.5, the line is a sample SD of 1.01
+  instead of 1.14. Above a size limit (on 7 values, `n` above 528) it falls
+  back to `B_μ`.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -206,14 +215,16 @@ single-peaked histogram on the scale can have, `(2k − 1)² / (9 (k − 1)²)` 
 `k` grid values: 0.5625 on 1–5. `beyond_single_peak` is `TRUE` when samples
 were found and no single-peaked histogram meets the reported statistics: at
 every mean the rounding allows, even the lowest SD it allows is beyond the
-largest a single-peaked histogram with that mean can have (Navard, Seaman and Young's
-`B_μ`, whose maximum over the mean is the ceiling). Then every histogram with
+largest a single-peaked histogram of `n` values with that mean can have
+(computed exactly up to a size limit, and from Navard, Seaman and Young's
+`B_μ`, whose maximum over the mean is the ceiling, beyond it). Then every histogram with
 these statistics has a dip, so, if they are right, the original data was not
 single-peaked. It follows from the reported statistics alone, so it holds for
 SPRITE and for runs with `stop_after` too. On an empty result it is `FALSE`:
 statistics that contradict each other leave no shape to infer. The test works
 in one direction only: `FALSE` does not mean a single-peaked sample exists,
-because the bound ignores whole-number effects at the actual `n` (at mean
+because a single-peaked histogram can be wide enough without having an SD in
+the admissible range (at mean
 2.5, SD 1.49, `n = 100` on 1–5, all 363 samples have a dip and the flag is
 down); `deficit_min` answers that. It reads the SD as a sample SD, like
 everything else: a population SD would set it falsely. On 1–5 the line is a population SD
@@ -426,6 +437,7 @@ and refactors.
 | `eb5d4ef` | `beyond_single_peak` also uses the largest SD of a single-peaked histogram at the actual `n` (5) |
 | `9102500` | SPRITE refuses `n` above 1,000,000 (6) |
 | `c7a196c` | `closure_count_details` (1, row 5a) |
+| `040ca2c` | `beyond_single_peak` uses the exact largest single-peaked SD at the actual `n` and mean |
 | `ea27622`, `dd9da52` | `beyond_single_peak` uses the bound at the reported mean, proved for every mean (3) |
 | `08d8e80` | SPRITE rejects SDs wider than any whole-number sample up front (5) |
 | `b7e234d` | `beyond_single_peak` is `FALSE` on an empty result (5) |
