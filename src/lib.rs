@@ -86,6 +86,14 @@
 //! the uniform's. The flag also uses the mean-free line at the actual `n`,
 //! which is lower for small samples: on 1–7 with `n = 5` it is √2, not 2.17.
 //!
+//! Whether a single-peaked sample exists can also be settled exactly, without
+//! listing samples and without a cutoff: [`closure_count_details`] runs
+//! [`closure_count`]'s dynamic program forwards and backwards and returns, over
+//! all samples and over the single-peaked ones, how many samples give each
+//! scale value each count. That includes the number of single-peaked samples
+//! and the range of each value's count among them, at sample sizes where
+//! CLOSURE cannot list the samples.
+//!
 //! Two more points on reading the output:
 //!
 //! - A class with **many** members means little on its own, since one
@@ -143,7 +151,7 @@ pub mod sample_counts;
 mod sprite;
 mod sprite_types;
 
-pub use count::closure_count;
+pub use count::{closure_count, closure_count_details, CountDetails, CountTable};
 pub use sample_counts::{
     count_data_type, counts_record_batch, counts_schema, create_counts_writer, OutputFormat,
     SampleCounts, SampleFormat, ValueGrid, OUTPUT_FORMAT_VERSION,
@@ -637,7 +645,8 @@ pub struct MetricsHorns {
     /// The test works in one direction only. False does not mean a
     /// single-peaked sample exists: at a given mean the bound ignores
     /// whole-number effects at the actual `n`, so every sample can have a dip
-    /// with the flag down. Ask the samples (`deficit_min`) for that.
+    /// with the flag down. Ask the samples (`deficit_min`) for that, or
+    /// [`closure_count_details`], which settles it without listing them.
     ///
     /// The bound at a given mean is Navard, Seaman and Young's (1993) `B_μ`,
     /// whose largest value over all means is [`Self::single_peak_ceiling`]; so
