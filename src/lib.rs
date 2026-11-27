@@ -83,8 +83,11 @@
 //! needs samples to exist: on an empty result the flag is down, because
 //! statistics that contradict each other leave no shape to infer. On a 1–5
 //! scale the mean-free line is a population SD of 1.5; at mean 3 it is 1.41,
-//! the uniform's. The flag also uses the mean-free line at the actual `n`,
-//! which is lower for small samples: on 1–7 with `n = 5` it is √2, not 2.17.
+//! the uniform's. The flag uses the line at the actual `n` and mean, which is
+//! lower still because the counts are whole numbers: on 1–5 with `n = 30` and
+//! mean 4.5 the largest single-peaked sample SD is 1.01, against 1.14 from
+//! `B_μ`. It is computed exactly up to a size limit (on 7 values, `n` up to
+//! 528), and from `B_μ` and the mean-free line at the actual `n` beyond it.
 //!
 //! Whether a single-peaked sample exists can also be settled exactly, without
 //! listing samples and without a cutoff: [`closure_count_details`] runs
@@ -632,27 +635,32 @@ pub struct MetricsHorns {
     pub single_peak_ceiling: f64,
     /// True when samples were found and no single-peaked histogram meets the
     /// reported statistics: at every mean the rounding allows, even the lowest
-    /// SD it allows is beyond the largest a single-peaked histogram with that
-    /// mean can have. Every admissible histogram then has a dip somewhere, so,
-    /// if the reported statistics are right, the original data was not
-    /// single-peaked.
+    /// SD it allows is beyond the largest a single-peaked histogram of `n`
+    /// values with that mean can have. Every admissible histogram then has a
+    /// dip somewhere, so, if the reported statistics are right, the original
+    /// data was not single-peaked.
     ///
-    /// It also fires when even the lowest SD the rounding allows is beyond the
-    /// largest a single-peaked histogram of `n` values can have at any mean,
-    /// a bound that is sharp at the actual `n` (see `single_peak_m2n_max_x12`).
-    /// For small samples that bound is far below the ceiling.
+    /// That largest SD is computed exactly at the actual `n` and mean (see
+    /// `single_peak_m2n_max_at`). Where that computation would need more than
+    /// 64 MB, as for `n` above 528 on 7 values, the flag uses Navard, Seaman
+    /// and Young's (1993) `B_μ` at the mean instead, which ignores
+    /// whole-number effects at the actual `n` but is close to the exact
+    /// maximum at such sample sizes; and the largest SD at the actual `n`
+    /// over all means (see `single_peak_m2n_max_x12`), which for small samples
+    /// is far below the ceiling.
     ///
-    /// The test works in one direction only. False does not mean a
-    /// single-peaked sample exists: at a given mean the bound ignores
-    /// whole-number effects at the actual `n`, so every sample can have a dip
-    /// with the flag down. Ask the samples (`deficit_min`) for that, or
+    /// The test works in one direction only. False means that some
+    /// single-peaked histogram has an admissible mean and an SD at least as
+    /// large as the lowest admissible one, not that one meets all the reported
+    /// statistics: its SD can be too large, and every sample can still have a
+    /// dip. Ask the samples (`deficit_min`) for that, or
     /// [`closure_count_details`], which settles it without listing them.
     ///
-    /// The bound at a given mean is Navard, Seaman and Young's (1993) `B_μ`,
-    /// whose largest value over all means is [`Self::single_peak_ceiling`]; so
-    /// a horns index above the ceiling always sets this flag, and at most
-    /// means a lower one does too. The bound follows from the mean, the SD
-    /// and the scale alone, so it holds for SPRITE and for truncated runs too.
+    /// `B_μ`'s largest value over all means is [`Self::single_peak_ceiling`];
+    /// so a horns index above the ceiling always sets this flag, and at most
+    /// means a lower one does too. The bounds follow from the mean, the SD,
+    /// `n` and the scale alone, so they hold for SPRITE and for truncated runs
+    /// too.
     /// It is about strictly single-peaked histograms, rising and then falling
     /// with no dip at all; at a prominence cutoff a small dip does not count
     /// as a second mode.
@@ -715,28 +723,111 @@ pub(crate) fn single_peak_m2n_max_x12(n: usize, k: usize) -> i128 {
     best
 }
 
-/// Whether every sample the search bounds admit has a variance above the
-/// largest any single-peaked histogram with its mean can have, so that none of
-/// them is single-peaked.
+/// The largest `n·Σx² − S²` that a single-peaked histogram of `n` values on
+/// `k` evenly spaced positions can have with a total `S` in `lo..=hi`, in grid
+/// steps; `i128::MIN` if no single-peaked histogram has such a total. `None`
+/// when the tables would need more than 64 MB; the caller then falls back to
+/// `B_μ`, which is not sharp at the actual `n`.
 ///
-/// The bound is Navard, Seaman and Young's (1993) `B_μ`, proved without their
-/// side conditions in `protocols/horns-and-shapes.qmd`: on positions `0..=m`, a
-/// single-peaked histogram with mean `μ ≥ m/2` has a variance of at most
-/// `(4m − 1)μ/3 − μ² − m(m − 1)/3`, mirrored below `m/2`. Its maximum over `μ`
-/// is [`single_peak_ceiling`].
+/// Every single-peaked histogram is a stack of nested blocks of neighbouring
+/// positions, each block placing one value on each of its positions. For the
+/// block `a..=b`, a table holds the largest `Σx²` among the stacks whose blocks
+/// all contain `a..=b`, for every number of values and every total. A stack
+/// either has `a..=b` as its smallest block, or all its blocks contain
+/// `a − 1..=b` or `a..=b + 1`, so each table follows from the tables of the two
+/// blocks one position longer. Every stack's blocks contain its mode, so the
+/// tables of the single positions hold every single-peaked histogram. This is
+/// the recursion of tides_article, Appendix L, section "The largest standard
+/// deviation for a given sample size and mean", also implemented as
+/// `sd_max_unimodal()` in the R package strait.
+///
+/// Its work grows with `n²k³`. On 7 values it runs up to `n = 528`; beyond the
+/// limit, `B_μ`'s excess over this maximum, which stays bounded as `n` grows
+/// in every case computed, is small next to the spread itself.
+pub(crate) fn single_peak_m2n_max_at(n: usize, k: usize, lo: i64, hi: i64) -> Option<i128> {
+    let top = k.saturating_sub(1);
+    let width = n * top + 1;
+    // At most `k + 3` tables at once (blocks of two neighbouring lengths,
+    // one in progress, the empty stack), each with `n + 1` rows of `width`
+    // totals, as `i32`. Unreachable cells start far below zero and stay
+    // negative, since no stack adds more than `n·top²` to them.
+    let cells = (k + 3) as u128 * (n + 1) as u128 * width as u128;
+    if cells > 1 << 24 || (n * top * top) as u128 > (i32::MAX / 4) as u128 {
+        return None;
+    }
+    const NONE: i32 = i32::MIN / 2;
+    let mut empty_stack = vec![NONE; (n + 1) * width];
+    empty_stack[0] = 0;
+
+    // `longer[a]` is the table of the block `a..=a + len`, one longer.
+    let mut longer: Vec<Vec<i32>> = Vec::new();
+    for len in (1..=top + 1).rev() {
+        let mut tables = Vec::with_capacity(top + 2 - len);
+        for a in 0..=top + 1 - len {
+            // Stacks without the block `a..=b`: all their blocks contain
+            // `a − 1..=b` or `a..=b + 1`.
+            let left = a.checked_sub(1).and_then(|i| longer.get(i));
+            let mut t = match (left, longer.get(a)) {
+                (Some(x), Some(y)) => x.iter().zip(y).map(|(&x, &y)| x.max(y)).collect(),
+                (Some(x), None) | (None, Some(x)) => x.clone(),
+                (None, None) => empty_stack.clone(),
+            };
+
+            // Stacks with it: one block `a..=b` on top of a stack of `len`
+            // fewer values. Rows go upwards, so the block can repeat.
+            let b = a + len - 1;
+            let block_sum = (a..=b).sum::<usize>();
+            let block_sq = (a..=b).map(|x| x * x).sum::<usize>() as i32;
+            if len <= n && block_sum < width {
+                for row in 0..=n - len {
+                    let (below, above) = t.split_at_mut((row + len) * width);
+                    let from = &below[row * width..(row + 1) * width - block_sum];
+                    for (to, &from) in above[block_sum..width].iter_mut().zip(from) {
+                        *to = (*to).max(from + block_sq);
+                    }
+                }
+            }
+            tables.push(t);
+
+            // The block `a − 1..=b` has served both its shorter blocks.
+            if let Some(done) = a.checked_sub(1).and_then(|i| longer.get_mut(i)) {
+                *done = Vec::new();
+            }
+        }
+        longer = tables;
+    }
+
+    let n_i = n as i128;
+    let largest = (lo.max(0)..=hi.min((n * top) as i64))
+        .filter_map(|s| {
+            let sq = longer
+                .iter()
+                .map(|t| t[n * width + s as usize])
+                .max()
+                .filter(|&q| q >= 0)?;
+            Some(n_i * sq as i128 - (s as i128) * (s as i128))
+        })
+        .max();
+    Some(largest.unwrap_or(i128::MIN))
+}
+
+/// Whether every sample the search bounds admit has a variance above the
+/// largest any single-peaked histogram with its total can have, so that none
+/// of them is single-peaked.
 ///
 /// Exact, in integers. `sum_lo..=sum_hi` are the admissible totals and `m2n_lo`
 /// the lowest admissible `n·Σx² − (Σx)²`, all in grid steps from the bottom of
-/// the scale. For total `S`, `n²` times the bound is `f(S) / 3` with
-/// `f(S) = (4m − 1)·S·n − 3S² − m(m − 1)·n²` (with `S` mirrored to `nm − S`
-/// below the middle), so the test is `3 · m2n_lo > f(S)` for every admissible
-/// `S`. `f` is concave on each side of the middle, so its largest admissible
-/// value lies at an end of the range, at the middle, or next to a side's peak.
+/// the scale.
 ///
-/// Before that, it tests the largest spread at this `n` without the mean,
-/// [`single_peak_m2n_max_x12`]. `B_μ` ignores whole-number effects at the
-/// actual `n`; this bound does not, and for small `n` it flags spreads that
-/// `B_μ` allows at every admissible mean.
+/// It first tests the largest spread at this `n` without the mean,
+/// [`single_peak_m2n_max_x12`], which is quick. Then it tests the largest
+/// spread at this `n` and every admissible total,
+/// [`single_peak_m2n_max_at`], which is sharp: the flag is then down exactly
+/// when some single-peaked histogram has an admissible total and a spread no
+/// lower than the lowest admissible one. Where that computation is too large,
+/// it tests Navard, Seaman and Young's (1993) `B_μ` at every admissible total
+/// instead ([`beyond_b_mu`]), which ignores whole-number effects at the
+/// actual `n`.
 pub(crate) fn beyond_single_peak(
     m2n_lo: i64,
     sum_lo: i64,
@@ -744,15 +835,37 @@ pub(crate) fn beyond_single_peak(
     n: usize,
     k: usize,
 ) -> bool {
-    let (n, m) = (n as i128, k.saturating_sub(1) as i128);
-    let (lo, hi) = ((sum_lo as i128).max(0), (sum_hi as i128).min(n * m));
+    let (lo, hi) = (sum_lo.max(0), sum_hi.min((n * k.saturating_sub(1)) as i64));
     if lo > hi {
         // No admissible total: a consistency failure, with no shape to infer.
         return false;
     }
-    if 12 * (m2n_lo as i128) > single_peak_m2n_max_x12(n as usize, k) {
+    if 12 * (m2n_lo as i128) > single_peak_m2n_max_x12(n, k) {
         return true;
     }
+    match single_peak_m2n_max_at(n, k, lo, hi) {
+        Some(widest) => m2n_lo as i128 > widest,
+        None => beyond_b_mu(m2n_lo, lo, hi, n, k),
+    }
+}
+
+/// Whether `m2n_lo` is beyond Navard, Seaman and Young's (1993) `B_μ` at every
+/// total in `lo..=hi`, a nonempty range of totals on the scale; arguments as
+/// in [`beyond_single_peak`].
+///
+/// `B_μ` is proved without their side conditions in
+/// `protocols/horns-and-shapes.qmd`: on positions `0..=m`, a single-peaked
+/// histogram with mean `μ ≥ m/2` has a variance of at most
+/// `(4m − 1)μ/3 − μ² − m(m − 1)/3`, mirrored below `m/2`. Its maximum over `μ`
+/// is [`single_peak_ceiling`]. For total `S`, `n²` times the bound is
+/// `f(S) / 3` with `f(S) = (4m − 1)·S·n − 3S² − m(m − 1)·n²` (with `S`
+/// mirrored to `nm − S` below the middle), so the test is `3 · m2n_lo > f(S)`
+/// for every admissible `S`. `f` is concave on each side of the middle, so its
+/// largest admissible value lies at an end of the range, at the middle, or
+/// next to a side's peak.
+pub(crate) fn beyond_b_mu(m2n_lo: i64, lo: i64, hi: i64, n: usize, k: usize) -> bool {
+    let (n, m) = (n as i128, k.saturating_sub(1) as i128);
+    let (lo, hi) = (lo as i128, hi as i128);
     let f = |s: i128| {
         let s = if 2 * s < n * m { n * m - s } else { s };
         (4 * m - 1) * s * n - 3 * s * s - m * (m - 1) * n * n
@@ -3410,9 +3523,10 @@ mod tests {
         // Every histogram of n over k values: a single-peaked one never has a
         // horns index above the ceiling, nor a variance above B_μ at its own
         // mean, nor a spread above the largest at this n, which one of them
-        // reaches. The exact integer test flags a histogram's own total and
-        // spread exactly when its variance is above B_μ or its spread above
-        // that largest one.
+        // reaches. The exact integer tests flag a histogram's own total and
+        // spread exactly when its spread is above the largest of a
+        // single-peaked histogram with the same total, or, for B_μ, when its
+        // variance is above B_μ.
         fn compositions(k: usize, n: u32, row: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
             if row.len() == k - 1 {
                 row.push(n);
@@ -3426,20 +3540,45 @@ mod tests {
                 row.pop();
             }
         }
-        for (k, n) in [(3, 40), (4, 24), (5, 20), (6, 14), (7, 12)] {
+        let cases = [
+            (2, 60),
+            (3, 40),
+            (4, 24),
+            (5, 20),
+            (6, 14),
+            (7, 12),
+            (7, 3),
+            (9, 4),
+        ];
+        for (k, n) in cases {
             let mut rows = Vec::new();
             compositions(k, n, &mut Vec::new(), &mut rows);
-            let mut highest = 0.0f64;
-            let mut widest = 0i128;
-            for row in rows {
+            let stats = |row: &[u32]| {
                 let (sum, ssq) = row
                     .iter()
                     .enumerate()
                     .fold((0i64, 0i64), |(s, q), (i, &c)| {
                         (s + i as i64 * c as i64, q + (i * i) as i64 * c as i64)
                     });
-                let m2n = n as i64 * ssq - sum * sum;
-                let single = modality::unimodality_deficit(&row) == 0;
+                (sum, n as i64 * ssq - sum * sum)
+            };
+            // The widest single-peaked spread at every total.
+            let top = (k - 1) * n as usize;
+            let mut widest_at = vec![i128::MIN; top + 1];
+            for row in rows
+                .iter()
+                .filter(|r| modality::unimodality_deficit(r) == 0)
+            {
+                let (sum, m2n) = stats(row);
+                let w = &mut widest_at[sum as usize];
+                *w = (*w).max(m2n as i128);
+            }
+            let mut highest = 0.0f64;
+            let mut widest = 0i128;
+            let mut sharper = 0;
+            for row in &rows {
+                let (sum, m2n) = stats(row);
+                let single = modality::unimodality_deficit(row) == 0;
                 let horns = horns_from_counts(&row.iter().map(|&c| c as f64).collect::<Vec<_>>());
                 // B_μ in grid steps, from the mean's nearer half.
                 let m = (k - 1) as f64;
@@ -3448,19 +3587,21 @@ mod tests {
                 let b_mu = (4.0 * m - 1.0) * mu / 3.0 - mu * mu - m * (m - 1.0) / 3.0;
                 let var = m2n as f64 / (n as f64 * n as f64);
                 let flagged = beyond_single_peak(m2n, sum, sum, n as usize, k);
-                if single {
-                    highest = highest.max(horns);
-                    assert!(var <= b_mu + 1e-12, "{row:?}");
-                    assert!(!flagged, "{row:?}");
-                }
                 let n_sharp = single_peak_m2n_max_x12(n as usize, k);
                 if single {
-                    assert!(12 * m2n as i128 <= n_sharp, "{row:?}");
+                    highest = highest.max(horns);
                     widest = widest.max(12 * m2n as i128);
+                    assert!(var <= b_mu + 1e-12, "{row:?}");
+                    assert!(12 * m2n as i128 <= n_sharp, "{row:?}");
+                    assert!(!flagged, "{row:?}");
+                }
+                assert_eq!(flagged, m2n as i128 > widest_at[sum as usize], "{row:?}");
+                if flagged && var <= b_mu + 1e-12 && 12 * m2n as i128 <= n_sharp {
+                    sharper += 1;
                 }
                 assert_eq!(
-                    flagged,
-                    var > b_mu + 1e-12 || 12 * m2n as i128 > n_sharp,
+                    beyond_b_mu(m2n, sum, sum, n as usize, k),
+                    var > b_mu + 1e-12,
                     "{row:?}"
                 );
                 // Above the ceiling is always flagged, at any mean.
@@ -3471,7 +3612,41 @@ mod tests {
             assert!(highest <= single_peak_ceiling(k) + 1e-12, "k = {k}");
             // The bound at this n is reached.
             assert_eq!(widest, single_peak_m2n_max_x12(n as usize, k), "k = {k}");
+            // Whole-number effects at a given mean: B_μ and the largest
+            // spread at this n allow spreads that no single-peaked histogram
+            // with that total has (on three values, at these n, they do not).
+            if k > 3 && n as usize >= k {
+                assert!(sharper > 0, "k = {k}, n = {n}");
+            }
+            // Over a range of totals, the flag is set exactly above the widest
+            // single-peaked spread at any of them.
+            for lo in 0..=top {
+                let hi = (lo + 2).min(top);
+                let edge = widest_at[lo..=hi].iter().max().copied().unwrap();
+                let exact = single_peak_m2n_max_at(n as usize, k, lo as i64, hi as i64);
+                assert_eq!(exact, Some(edge), "k = {k}, totals {lo}..={hi}");
+                if edge >= 0 {
+                    let edge = edge as i64;
+                    assert!(!beyond_single_peak(
+                        edge, lo as i64, hi as i64, n as usize, k
+                    ));
+                    assert!(beyond_single_peak(
+                        edge + 1,
+                        lo as i64,
+                        hi as i64,
+                        n as usize,
+                        k
+                    ));
+                }
+            }
         }
+        // On 1–5 with n = 30 and mean 4.5, the largest single-peaked sample
+        // SD is 1.01; B_μ allows 1.14.
+        let widest = single_peak_m2n_max_at(30, 5, 105, 105).unwrap();
+        let sd = (widest as f64 / (30.0 * 29.0)).sqrt();
+        assert!((sd - 1.01).abs() < 0.005, "{sd}");
+        // Too large to tabulate: no answer, so the flag falls back to B_μ.
+        assert_eq!(single_peak_m2n_max_at(5_000, 7, 0, 30_000), None);
     }
 
     #[test]

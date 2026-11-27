@@ -23,9 +23,9 @@ fn main() {
                 // (2m + 1)/6 for m = hi - 1, against the lowest admissible SD.
                 let var_lo = (sd - r).powi(2) * (n as f64 - 1.0) / n as f64;
                 let ceiling = var_lo > ((2.0 * hi as f64 - 1.0) / 6.0).powi(2) + 1e-9;
-                // The library's flag: Navard et al.'s B_mu at every
-                // admissible mean, in exact integers.
-                let navard = res.metrics_horns.beyond_single_peak;
+                // The library's flag: the largest single-peaked SD at the
+                // actual n and every admissible mean, in exact integers.
+                let flag = res.metrics_horns.beyond_single_peak;
                 let dip = s.deficit_min > 0;
                 let multi = s.must_be(|c| c.is_multimodal()) == Some(true);
                 let no_bell = s.can_be_bell_shaped() == Some(false);
@@ -34,15 +34,15 @@ fn main() {
                     true,
                     multi,
                     multi && ceiling,
-                    multi && navard,
+                    multi && flag,
                     ceiling,
-                    navard,
+                    flag,
                     dip,
                     dip && ceiling,
-                    dip && navard,
+                    dip && flag,
                     no_bell,
                     middle,
-                    middle && no_bell && !navard,
+                    middle && no_bell && !flag,
                 ]
                 .into_iter()
                 .enumerate()
@@ -53,8 +53,8 @@ fn main() {
         }
         println!(
             "1..{hi} n={n}: consistent {}; must be multimodal {} (ceiling catches {}, \
-             B_mu flag catches {}); mean-free ceiling {}; B_mu flag {}; every sample \
-             has a dip {} (ceiling catches {}, B_mu flag catches {}); cannot be a bell \
+             flag catches {}); mean-free ceiling {}; flag {}; every sample \
+             has a dip {} (ceiling catches {}, flag catches {}); cannot be a bell \
              {}; middle-third means {}, of which no bell and no flag {}",
             t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11]
         );

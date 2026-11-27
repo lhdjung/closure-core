@@ -40,8 +40,10 @@ execute:
 - **At a given mean the line is lower.** Navard, Seaman and Young (1993)
   give it, $B_\mu$, but prove it only under side conditions. This document
   proves it for every single-peaked distribution and every mean; its maximum
-  over the mean is the ceiling above. closure-core's flag uses it at every
-  mean the rounding allows.
+  over the mean is the ceiling above. closure-core's flag uses a sharper
+  line at every mean the rounding allows: the largest SD of a single-peaked
+  histogram of the actual $n$ values, computed exactly, with $B_\mu$ only
+  for designs too large to compute.
 - **It only works in one direction.** A high horns index rules out a single
   peak; a low one rules out nothing.
 - **Each shape verdict now comes with the number it rests on:** `bar_gap_*`
@@ -631,28 +633,40 @@ $\mu = (n+1)/2$ the theorem gives $\sigma^2 \le (n^2-1)/12$, the uniform's
 variance, for every single-peaked distribution. Navard et al. also assume the
 end categories each hold less than $1/n$; that condition is not needed.
 
-**In closure-core.** `beyond_single_peak` tests the theorem at every total the
-rounding of the mean allows (@sec-sd). In the sweep over reported statistics
-in `protocols/when-closure-is-useful.md`, CLOSURE finds that every sample has
-a dip in 46, 96 and 199 cases (1–5 with $n = 20$ and $50$; 1–7 with
-$n = 30$). The mean-free ceiling catches 20, 52 and 86 of them from the
-statistics alone; the flag, using $B_\mu$, catches 24, 79 and 126. It never
-fires where CLOSURE finds a single-peaked sample, as the theorem guarantees.
-
-The flag also tests the largest variance a single-peaked histogram of the
-actual $n$ values can have, whatever its mean. That maximum is sharp at every
-$n$ (Theorem L.3 in
+**In closure-core.** `beyond_single_peak` first used the theorem at every
+total the rounding of the mean allows (@sec-sd). The theorem is about
+proportions, so it ignores that the counts of $n$ values are whole numbers.
+The flag now uses the largest variance a single-peaked histogram of the
+actual $n$ values can have at each admissible total, computed exactly by the
+recursion over stacks of nested blocks in the section "The largest standard
+deviation for a given sample size and mean" of
 `bounds-of-SD-article/appendices/appendix_l_scale_limits_mean_and_unimodality.qmd`
 of github.com/ianhussey/tides_article, whose
-`bounds-of-SD-article/unimodality/README.md` tracks this line of work): it is
-the largest
+`bounds-of-SD-article/unimodality/README.md` tracks this line of work
+(`single_peak_m2n_max_at` in `src/lib.rs`). On 1–5 with $n = 30$ and mean
+4.5, the largest single-peaked sample SD is 1.01, against 1.14 from the
+theorem. Where the recursion's tables would need more than 64 MB (on 7
+values, for $n$ above 528), the flag falls back to the theorem, whose excess
+over the exact maximum stays bounded as $n$ grows in every case computed.
+
+In the sweep over reported statistics in
+`protocols/when-closure-is-useful.md`, CLOSURE finds that every sample has a
+dip in 46, 96 and 199 cases (1–5 with $n = 20$ and $50$; 1–7 with $n = 30$).
+The mean-free ceiling catches 20, 52 and 86 of them from the statistics
+alone; the flag caught 24, 79 and 126 with $B_\mu$, and catches 32, 85 and
+167 with the exact maximum. It never fires where CLOSURE finds a
+single-peaked sample.
+
+The flag also tests, as a quick first step and in the fallback, the largest
+variance a single-peaked histogram of the actual $n$ values can have,
+whatever its mean. That maximum is sharp at every $n$ (Theorem L.3 in the same
+appendix): it is the largest
 $c\,w(w-1)(2w-1)/6 - c^2w^2(w-1)^2/(4n)$, divided by $n$, over whole numbers
 $2 \le w \le \min(m+1, n)$ and $1 \le c \le n/w$, reached by $c$ values on
-each of $w - 1$ neighbouring positions and the rest on the next. In the sweep
-above, with $n$ from 20 to 50, it adds no cases. It matters for small
-samples: on 1–7 with $n = 5$ the largest single-peaked population SD is
-$\sqrt{2}$, not $13/6$, so mean 4.00 and SD 1.73 are flagged although $B_\mu$
-allows them.
+each of $w - 1$ neighbouring positions and the rest on the next. It matters
+for small samples: on 1–7 with $n = 5$ the largest single-peaked population
+SD is $\sqrt{2}$, not $13/6$, so mean 4.00 and SD 1.73 are flagged although
+$B_\mu$ allows them.
 
 ## From the ceiling to a reported SD {#sec-sd}
 
@@ -687,7 +701,10 @@ $$
 $$
 with $S$ replaced by $nm - S$ below the middle. The right-hand side is
 concave on each side of the middle, so only the ends of the range, the middle
-and each side's peak need checking.
+and each side's peak need checking. This is the test for designs too large
+for the exact maximum at the actual $n$; otherwise the flag compares
+$\text{m2n\_lo}$ with that maximum at every admissible $S$ in the same
+integer units.
 
 ```{r}
 #| label: thresholds

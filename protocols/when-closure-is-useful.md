@@ -31,42 +31,44 @@ from 0.3 to 2.6 in steps of 0.1, both rounded to two decimals (rounding error
 0.005). For every consistent case it records which shape conclusions CLOSURE
 reaches, at every cutoff in the default band, and whether checks that use only
 the reported statistics reach them too: the mean-free single-peak ceiling, and
-`beyond_single_peak`, which uses the bound at the reported mean (Navard et
-al.'s $B_\mu$, proved in `horns-and-shapes.qmd`) and the mean-free bound at
-the actual $n$ (which adds no cases at these sample sizes). "Middle third" means a mean in the middle third of the scale, where
-a floor or ceiling effect is not obvious from the mean.
+`beyond_single_peak`, which uses the largest SD of a single-peaked
+histogram of the actual $n$ values at every admissible mean, computed exactly
+(tides_article, Appendix L). "Middle third" means a mean in the middle third
+of the scale, where a floor or ceiling effect is not obvious from the mean.
 
 | | 1–5, n = 20 | 1–5, n = 50 | 1–7, n = 30 |
 |---|---|---|---|
 | consistent cases | 97 | 204 | 443 |
 | CLOSURE: must have several peaks | 22 | 52 | 87 |
 | … caught by the mean-free ceiling | 20 | 48 | 74 |
-| … caught by `beyond_single_peak` | 20 | 52 | 87 |
+| … caught by `beyond_single_peak` | 22 | 52 | 87 |
 | statistics only: beyond the mean-free ceiling | 20 | 52 | 86 |
-| statistics only: `beyond_single_peak` | 24 | 79 | 126 |
+| statistics only: `beyond_single_peak` | 32 | 85 | 167 |
 | CLOSURE: every sample has a dip | 46 | 96 | 199 |
 | … caught by the mean-free ceiling | 20 | 52 | 86 |
-| … caught by `beyond_single_peak` | 24 | 79 | 126 |
+| … caught by `beyond_single_peak` | 32 | 85 | 167 |
 | CLOSURE: cannot be a bell | 54 | 123 | 193 |
 | middle-third means | 53 | 106 | 205 |
-| … cannot be a bell, and no `beyond_single_peak` | 6 | 10 | 8 |
+| … cannot be a bell, and no `beyond_single_peak` | 2 | 6 | 2 |
 
 How to read it:
 
-- **"Must have several peaks" is nearly free.** `beyond_single_peak` catches
-  all but two of CLOSURE's verdicts (20 of 22, 52 of 52, 87 of 87), instantly
-  and at any n. The mean-free ceiling alone catches fewer (20, 48, 74).
+- **"Must have several peaks" is free here.** `beyond_single_peak` catches
+  all of CLOSURE's verdicts (22 of 22, 52 of 52, 87 of 87), instantly. The
+  mean-free ceiling alone catches fewer (20, 48, 74).
 - **"Every sample has a dip" is mostly free.** `beyond_single_peak` catches
-  about half to four fifths of these verdicts (24 of 46, 79 of 96, 126 of
-  199). It sets the flag when no single-peaked histogram with free
-  proportions fits, or when the SD is past the largest any single-peaked
-  histogram of the actual n values can have at any mean. What remains comes
-  from whole-number effects at the actual n and the reported mean together,
-  which only an exact method sees.
+  about two thirds to nine tenths of these verdicts (32 of 46, 85 of 96, 167
+  of 199). Before it was computed exactly at the actual n and mean, it caught
+  24, 79 and 126. It sets the flag when even the lowest admissible SD is past
+  the largest any single-peaked histogram of the actual n values with an
+  admissible mean can have. What remains are cases where some single-peaked
+  histogram with an admissible mean is at least as wide as the lowest
+  admissible SD, but none has an SD in the admissible range.
+  `closure_count_details` settles those exactly without listing samples.
 - **"Cannot be a bell" is where CLOSURE still adds the most, but less than it
   seems.** Most of these verdicts have a mean near an end of the scale, where
   a floor or ceiling effect is visible from the mean itself, or a flagged SD.
-  With the mean in the middle third and no flag, they are 4–11% of cases.
+  With the mean in the middle third and no flag, they are 1–6% of cases.
   These verdicts are taken at the cutoff, so read them with `edge_drop_*` and
   `second_peak_*` rather than on their own.
 - **At typical SDs with a central mean, samples of every shape fit.** There is
@@ -118,14 +120,14 @@ its proportions should not be quoted as rates in the literature.
 
 ## Where this could go
 
-- **An n-sharp line at the reported mean.** `beyond_single_peak` already uses
-  the n-sharp maximum over all means (tides_article, Theorem L.3). The same
-  sharpening of $B_\mu$ at a given mean would catch more small samples.
-- **A dynamic program for counts and shapes.** `closure_count` already counts
-  datasets without listing them. The same approach could plausibly give
-  per-value count ranges and the existence of a single-peaked dataset exactly,
-  at larger n. That is a guess; it has not been built. If it works, CLOSURE's
-  only unique product is the list of datasets itself.
+- **Done: an n-sharp line at the reported mean.** `beyond_single_peak` uses
+  the largest single-peaked SD at the actual n and mean, computed exactly by
+  the recursion of tides_article, Appendix L, up to a size limit (on 7
+  values, n up to 528), and $B_\mu$ beyond it.
+- **Done: a dynamic program for counts and shapes.** `closure_count_details`
+  gives per-value count ranges and the existence of a single-peaked dataset
+  exactly, without listing datasets. Count ranges within the other shape
+  classes still need CLOSURE.
 
 ## Reproduce
 
