@@ -6,16 +6,20 @@ that affects unsum, and says exactly what to change in unsum for each one.
 - **From:** unsum `6d83a70` ("Adopt current closure-core and store samples as
   counts"). Its `src/rust/Cargo.lock` pins closure-core `optimize#5d63b62`,
   and it writes the counts layout (`OutputFormat::Counts`).
-- **To:** closure-core `f866ebf` on `optimize`.
-- **Status:** unsum's branch `adopt-closure-core-optimize` adopts `f866ebf`
-  (unsum `cc3d166` through `6f86c8e`), builds against it and passes its
-  tests; it is not on master yet.
-- **After the target:** two later changes reach unsum at its next update,
-  with no API change. `beyond_single_peak` also fires when the lowest
+- **To:** closure-core `c7a196c` on `optimize`.
+- **Status:** unsum's branch `adopt-closure-core-optimize` adopts `c7a196c`
+  (unsum `cc3d166` through `6f86c8e` for `f866ebf`, then one commit for the
+  rest), builds against it and passes its tests; it is not on master yet.
+- **Since `f866ebf`:** `beyond_single_peak` also fires when the lowest
   admissible SD is past the largest any single-peaked histogram of the
   actual `n` values can have at any mean, so it is `TRUE` in more small-`n`
-  cases: on 1–7 with `n = 5`, mean 4.00 and SD 1.73 (`eb5d4ef`). And SPRITE,
-  like CLOSURE, refuses `n` above 1,000,000 (`9102500`, section 6).
+  cases: on 1–7 with `n = 5`, mean 4.00 and SD 1.73 (`eb5d4ef`). SPRITE,
+  like CLOSURE, refuses `n` above 1,000,000 (`9102500`, section 6). And
+  `closure_count_details` (`c7a196c`) gives, without listing samples, the
+  number of samples in which each value has each count, over all samples
+  and over the single-peaked ones; unsum exposes it as
+  `closure_count_details()`, and the cutoffs as `prominence` and
+  `prominence_band` in its generators.
 - **Line numbers** refer to unsum's master at `9dc590d`.
 
 The earlier migration from closure-core `1fe8f95`, which a previous version of
@@ -55,6 +59,7 @@ skipped.
 | 3a | `metrics_horns` has two new columns: `single_peak_ceiling`, `beyond_single_peak` | the schema check, on disk at once and in memory once exported | Export them, and expect 11 columns | `src/rust/src/lib.rs` 287, `R/utils.R` 196–210 |
 | 4 | Shape classes and SPRITE coverage changed | snapshot tests | Update snapshots and `NEWS.md` (section 5) | `tests/`, `NEWS.md` |
 | 5 | New input errors | nothing; they arrive as strings | Mention in `NEWS.md` (section 6) | |
+| 5a | `closure_count_details`: per-value counts over all and over single-peaked samples, without listing them (`c7a196c`) | nothing; new function | Export it and wrap it in R | `src/rust/src/lib.rs`, `R/count.R` |
 | 6 | Multi-item SPRITE samples are in rounded hundredths | exact statistics at `items` = 3, 6, 7, … | Use the grid's exact values where it matters (section 7) | wherever samples are recomputed |
 
 ---
@@ -387,7 +392,7 @@ already turns that into `abort_in_export()`.
 | SPRITE: an infinite SD or tolerance | `InputValidation` | an empty result |
 | SPRITE: a mean outside the scale by more than its rounding error (5.006 ± 0.005 on 1–5) | `InputValidation`, as before, but 5.004 ± 0.005 now runs | any mean outside the scale was an error |
 | SPRITE: restrictions fixing more responses than `n`, however large the counts | `InputValidation` | a huge count panicked or tried to allocate terabytes |
-| A prominence cutoff not above 0 and below 1 (only once cutoffs are exposed) | `InputValidation` | a cutoff of 5 meant as 5% classified every sample as flat |
+| A prominence cutoff not above 0 and below 1 (unsum exposes the cutoffs since adopting `c7a196c`) | `InputValidation` | a cutoff of 5 meant as 5% classified every sample as flat |
 
 ---
 
@@ -418,6 +423,9 @@ and refactors.
 | `f862887` | Near-uniform samples are flat; `bar_gap_*` columns (3, 4, 5) |
 | `a248020` | `second_peak_*` and `edge_drop_*` columns (3) |
 | `7bf2a52` | `single_peak_ceiling` and `beyond_single_peak` in `metrics_horns` (3) |
+| `eb5d4ef` | `beyond_single_peak` also uses the largest SD of a single-peaked histogram at the actual `n` (5) |
+| `9102500` | SPRITE refuses `n` above 1,000,000 (6) |
+| `c7a196c` | `closure_count_details` (1, row 5a) |
 | `ea27622`, `dd9da52` | `beyond_single_peak` uses the bound at the reported mean, proved for every mean (3) |
 | `08d8e80` | SPRITE rejects SDs wider than any whole-number sample up front (5) |
 | `b7e234d` | `beyond_single_peak` is `FALSE` on an empty result (5) |
